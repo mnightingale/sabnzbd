@@ -770,9 +770,8 @@ class Downloader(Thread):
                 continue
 
             if self.recv_threads > 1:
-                for future in concurrent.futures.as_completed(
-                    {self.recv_pool.submit(self.__recv, fds) for fds in read}
-                ):
+                futures = {self.recv_pool.submit(self.__recv, fds) for fds in read}
+                for future in concurrent.futures.as_completed(futures):
                     nw, bytes_received, done = future.result()
                     self.__handle_recv_result(nw, bytes_received, done)
                 if self.bandwidth_limit:
