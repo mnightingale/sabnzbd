@@ -106,8 +106,113 @@ class Decoder:
                 pass
 
     def process(self, article: Article, raw_data: bytearray, raw_data_size: int):
-        sabnzbd.ArticleCache.reserve_space(raw_data_size)
-        self.decoder_queue.put((article, raw_data, raw_data_size))
+        decoded_data = None
+
+        nzo = article.nzf.nzo
+        art_id = article.article
+
+        # Keeping track
+        article_success = False
+
+        try:
+            if nzo.precheck:
+                raise BadYenc
+
+            if sabnzbd.LOG_ALL:
+                logging.debug("Decoding %s", art_id)
+
+            if article.nzf.type == "uu":
+                decoded_data = decode_uu(article, raw_data)
+            else:
+                decoded_data = decode_yenc(article, raw_data, raw_data_size)
+
+            article_success = True
+
+        except MemoryError:
+            logging.warning(T("Decoder failure: Out of memory"))
+            logging.info("Cache: %d, %d, %d", *sabnzbd.ArticleCache.cache_info())
+            logging.info("Traceback: ", exc_info=True)
+            sabnzbd.Downloader.pause()
+
+            # This article should be fetched again
+            sabnzbd.NzbQueue.reset_try_lists(article)
+            return
+
+        except BadData as error:
+            # Continue to the next one if we found new server
+            if search_new_server(article):
+                return
+
+            # Store data, maybe par2 can still fix it
+            decoded_data = error.data
+
+        except BadUu:
+            logging.info("Badly formed uu article in %s", art_id)
+
+            # Try the next server
+            if search_new_server(article):
+                return
+
+        except (BadYenc, ValueError):
+            # Handles precheck and badly formed articles
+            if nzo.precheck and raw_data and raw_data.startswith(b"223 "):
+                # STAT was used, so we only get a status code
+                article_success = True
+            else:
+                # Try uu-decoding
+                if (not nzo.precheck) and article.nzf.type != "yenc":
+                    try:
+                        decoded_data = decode_uu(article, raw_data)
+                        logging.debug("Found uu-encoded article %s in job %s", art_id, nzo.final_name)
+                        article_success = True
+                    except Exception:
+                        pass
+                # Only bother with further checks if uu-decoding didn't work out
+                if not article_success:
+                    # Convert the first 2000 bytes of raw socket data to article lines,
+                    # and examine the headers (for precheck) or body (for download).
+                    for line in raw_data[:2000].split(b"\r\n"):
+                        lline = line.lower()
+                        if lline.startswith(b"message-id:"):
+                            article_success = True
+                        # Look for DMCA clues (while skipping "X-" headers)
+                        if not lline.startswith(b"x-") and match_str(
+                            lline, (b"dmca", b"removed", b"cancel", b"blocked")
+                        ):
+                            article_success = False
+                            logging.info("Article removed from server (%s)", art_id)
+                            break
+
+            # Pre-check, proper article found so just register
+            if nzo.precheck and article_success and sabnzbd.LOG_ALL:
+                logging.debug("Server %s has article %s", article.fetcher, art_id)
+            elif not article_success:
+                # If not pre-check, this must be a bad article
+                if not nzo.precheck:
+                    logging.info("Badly formed yEnc article %s", art_id)
+
+                # Continue to the next one if we found new server
+                if search_new_server(article):
+                    return
+
+        except:
+            logging.warning(T("Unknown Error while decoding %s"), art_id)
+            logging.info("Traceback: ", exc_info=True)
+
+            # Continue to the next one if we found new server
+            if search_new_server(article):
+                return
+
+        if decoded_data:
+            # If the data needs to be written to disk due to full cache, this will be slow
+            # Causing the decoder-queue to fill up and delay the downloader
+            sabnzbd.ArticleCache.save_article(article, decoded_data)
+            article.decoded = True
+        elif not nzo.precheck:
+            # Nothing to save
+            article.on_disk = True
+
+        sabnzbd.NzbQueue.register_article(article, article_success)
 
     def queue_level(self) -> float:
         # Return level of decoder queue. 0 = empty, >=1 = full.
