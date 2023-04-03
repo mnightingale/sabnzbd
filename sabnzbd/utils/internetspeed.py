@@ -8,13 +8,15 @@ Reports in MB/s (so mega BYTES per seconds), not to be confused with Mbps
 
 import time
 import logging
-import urllib.request
+import requests
 
 SIZE_URL_LIST = [
     [5, "https://sabnzbd.org/tests/internetspeed/5MB.bin"],
     [10, "https://sabnzbd.org/tests/internetspeed/10MB.bin"],
     [20, "https://sabnzbd.org/tests/internetspeed/20MB.bin"],
 ]
+
+session = requests.session()
 
 
 def measure_speed_from_url(url: str) -> float:
@@ -23,8 +25,8 @@ def measure_speed_from_url(url: str) -> float:
     start = time.time()
     downloaded_bytes = 0  # default
     try:
-        req = urllib.request.Request(url, data=None, headers={"User-Agent": "Mozilla/5.0 (Macintosh)"})
-        downloaded_bytes = len(urllib.request.urlopen(req, timeout=4).read())
+        req = session.get(url, data=None, headers={"User-Agent": "Mozilla/5.0 (Macintosh)"}, timeout=4)
+        downloaded_bytes = len(req.content)
     except:
         # No connection at all?
         pass
