@@ -202,11 +202,16 @@ class Assembler(Thread):
                         if article.data_begin is not None:
                             # Seek ahead if needed
                             if article.data_begin != file_position:
-                                fout.seek(article.data_begin)
-                            file_position = article.data_begin + len(data)
+                                file_position = fout.seek(article.data_begin)
                         else:
                             fout.seek(0, os.SEEK_END)
-                        fout.write(data)
+
+                        tries = written = 0
+                        while tries < 3 and written < len(data):
+                            tries += 1
+                            written += fout.write(data[written:])
+                            file_position += written
+
                         nzf.update_crc32(article.crc32, len(data))
                         article.on_disk = True
                     else:
