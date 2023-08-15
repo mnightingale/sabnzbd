@@ -199,8 +199,9 @@ OPEN_ARGS = ("p", "-inul")
 #: Command line args to use for extracting file to disk.
 EXTRACT_ARGS = ("x", "-y", "-idq")
 
+# SABnzbd-edit: prompt for next volume
 #: args for testrar()
-TEST_ARGS = ("t", "-idq")
+TEST_ARGS = ("t", "-idq", "-vp")
 
 #
 # Allow use of tool that is not compatible with unrar.
