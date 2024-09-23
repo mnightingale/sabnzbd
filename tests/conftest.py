@@ -131,6 +131,7 @@ def run_sabnews_and_selenium(request):
     """Start SABNews and Selenium/Chromedriver, shared across the pytest session."""
     # We only try Chrome for consistent results
     driver_options = ChromeOptions()
+    driver_options.browser_version = "120"
 
     # Headless during CI testing
     if "CI" in os.environ:
