@@ -27,6 +27,7 @@ import logging
 import ssl
 import sabctools
 from typing import Optional, Tuple, Union
+import zmq
 
 import sabnzbd
 import sabnzbd.cfg
@@ -38,6 +39,8 @@ from sabnzbd.misc import int_conv
 
 # Set pre-defined socket timeout
 socket.setdefaulttimeout(DEF_NETWORKING_TIMEOUT)
+
+zmq_context = zmq.Context()
 
 
 class NNTPPermanentError(Exception):
@@ -69,6 +72,7 @@ class NewsWrapper:
         "user_ok",
         "pass_ok",
         "force_login",
+        "ihave_socket",
     )
 
     def __init__(self, server, thrdnum, block=False):
@@ -92,6 +96,8 @@ class NewsWrapper:
         self.pass_ok: bool = False
         self.force_login: bool = False
         self.group: Optional[str] = None
+        self.ihave_socket = zmq_context.socket(zmq.PUB)
+        self.ihave_socket.connect("tcp://127.0.0.1:5555")
 
     @property
     def status_code(self) -> Optional[int]:

@@ -798,6 +798,10 @@ class Downloader(Thread):
             server.bad_cons = 0
             server.errormsg = server.warning = ""
 
+            # TODO: retried articles would need ARTICLE request
+            # TODO: would want something like "if article.tries > 0:"
+            nw.ihave_socket.send_multipart([b"ihave", nw.data_view[: nw.data_position]])
+
             # Decode
             self.decode(article, nw.data_view[: nw.data_position])
 
