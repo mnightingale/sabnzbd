@@ -96,6 +96,8 @@ from sabnzbd.misc import (
     is_localhost,
     helpful_warning,
     set_https_verification,
+    ip_in_subnet,
+    is_loopback_addr,
 )
 from sabnzbd.filesystem import get_ext, real_path, long_path, globber_full, remove_file
 from sabnzbd.panic import panic_tmpl, panic_port, panic_host, panic, launch_a_browser
@@ -540,24 +542,10 @@ def get_webhost(web_host, web_port, https_port):
     # If only APIPA's or IPV6 are found, fall back to localhost
     ipv4 = ipv6 = False
     localhost = hostip = "localhost"
-    try:
-        info = socket.getaddrinfo(socket.gethostname(), None)
-    except socket.error:
-        # Hostname does not resolve
-        try:
-            # Valid user defined name?
-            info = socket.getaddrinfo(web_host, None)
-        except socket.error:
-            if not is_localhost(web_host):
-                web_host = "0.0.0.0"
-            try:
-                info = socket.getaddrinfo(localhost, None)
-            except socket.error:
-                info = socket.getaddrinfo("127.0.0.1", None)
-                localhost = "127.0.0.1"
-    for item in info:
-        ip = str(item[4][0])
-        if ip.startswith("169.254."):
+    for ip in ip_extract():
+        if ip_in_subnet(ip, "fe80::/10") or is_loopback_addr(ip):
+            continue
+        elif ip.startswith("169.254."):
             pass  # Automatic Private IP Addressing (APIPA)
         elif ":" in ip:
             ipv6 = True
