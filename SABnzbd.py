@@ -544,7 +544,7 @@ def get_webhost(web_host, web_port, https_port):
     localhost = hostip = "localhost"
     for ip in ip_extract():
         if ip_in_subnet(ip, "fe80::/10") or is_loopback_addr(ip):
-            continue
+            pass
         elif ip.startswith("169.254."):
             pass  # Automatic Private IP Addressing (APIPA)
         elif ":" in ip:
