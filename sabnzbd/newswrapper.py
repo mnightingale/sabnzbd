@@ -58,6 +58,7 @@ class NewsWrapper:
         "blocking",
         "timeout",
         "article",
+        "decoder",
         "data",
         "data_view",
         "data_position",
@@ -78,6 +79,7 @@ class NewsWrapper:
 
         self.timeout: Optional[float] = None
         self.article: Optional[sabnzbd.nzbstuff.Article] = None
+        self.decoder: Optional[sabctools.Decoder] = None
 
         self.data: Optional[bytearray] = None
         self.data_view: Optional[memoryview] = None
@@ -95,8 +97,9 @@ class NewsWrapper:
 
     @property
     def status_code(self) -> Optional[int]:
-        if self.data_position >= 3:
-            return int_conv(self.data[:3])
+        if self.decoder and self.decoder.bytes_read >= 3:
+            return self.decoder.status_code
+        return None
 
     @property
     def nntp_msg(self) -> str:
@@ -202,18 +205,26 @@ class NewsWrapper:
         # The SSL-layer might still contain data even though the socket does not. Another Downloader-loop would
         # not identify this socket anymore as it is not returned by select(). So, we have to forcefully trigger
         # another recv_chunk so the buffer is increased and the data from the SSL-layer is read. See #2752.
-        if self.nntp.nw.server.ssl and self.data_position == len(self.data) and self.nntp.sock.pending() > 0:
+        read_more = self.nntp.nw.server.ssl and self.data_position == len(self.data) and self.nntp.sock.pending() > 0
+
+        done, unprocessed = self.decoder.decode(self.data_view[: self.data_position])
+        if unprocessed:
+            # copy whatever is left to the start of the buffer
+            # logic can be improved here don't always need to
+            self.data_position = len(unprocessed)
+            self.data_view[: self.data_position] = unprocessed
+        else:
+            self.data_position = 0
+
+        # Check for end of line
+        if done:
+            self.data_position = 0
+            return bytes_recv, True, self.decoder.status_code in (220, 222)
+
+        if read_more:
             # We do not perform error-handling, as we know there is data available to read
             additional_bytes_recv, additional_end_of_line, additional_end_of_article = self.recv_chunk()
             return bytes_recv + additional_bytes_recv, additional_end_of_line, additional_end_of_article
-
-        # Check for end of line
-        # Using the data directly seems faster than the memoryview
-        if self.data[self.data_position - 2 : self.data_position] == b"\r\n":
-            # Official end-of-article is "\r\n.\r\n"
-            if self.data[self.data_position - 5 : self.data_position] == b"\r\n.\r\n":
-                return bytes_recv, True, True
-            return bytes_recv, True, False
 
         # Still in middle of data, so continue!
         return bytes_recv, False, False
@@ -222,24 +233,27 @@ class NewsWrapper:
         """Reset for the next article"""
         self.timeout = None
         self.article = None
+        self.decoder = None
         self.reset_data_buffer()
 
     def reset_data_buffer(self):
         """Reset the data position"""
         self.data_position = 0
+        self.decoder = sabctools.Decoder()
 
     def increase_data_buffer(self):
         """Resize the buffer in the extremely unlikely case that it overflows"""
         # Sanity check before we go any further
-        if len(self.data) > NTTP_MAX_BUFFER_SIZE:
+        if self.decoder.bytes_read > NTTP_MAX_BUFFER_SIZE:
             raise BufferError("Maximum data buffer size exceeded")
 
-        # Input needs to be integer, floats don't work
-        new_buffer = sabctools.bytearray_malloc(len(self.data) + NNTP_BUFFER_SIZE // 2)
-        new_buffer[: len(self.data)] = self.data
-        logging.info("Increased buffer from %d to %d for %s", len(self.data), len(new_buffer), str(self))
-        self.data = new_buffer
-        self.data_view = memoryview(self.data)
+        if len(self.data) != NNTP_BUFFER_SIZE:
+            # Input needs to be integer, floats don't work
+            new_buffer = sabctools.bytearray_malloc(NNTP_BUFFER_SIZE)
+            new_buffer[: len(self.data)] = self.data
+            logging.info("Increased buffer from %d to %d for %s", len(self.data), len(new_buffer), str(self))
+            self.data = new_buffer
+            self.data_view = memoryview(self.data)
 
     def hard_reset(self, wait: bool = True):
         """Destroy and restart"""

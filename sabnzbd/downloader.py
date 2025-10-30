@@ -29,6 +29,8 @@ import time
 from datetime import date
 from typing import List, Dict, Optional, Union, Set
 
+import sabctools
+
 import sabnzbd
 from sabnzbd.decorators import synchronized, NzbQueueLocker, DOWNLOADER_CV, DOWNLOADER_LOCK
 from sabnzbd.newswrapper import NewsWrapper, NNTPPermanentError
@@ -505,20 +507,20 @@ class Downloader(Thread):
             server.addrinfo = None
 
     @staticmethod
-    def decode(article, data_view: Optional[memoryview] = None):
+    def decode(article, decoder: Optional[sabctools.Decoder] = None):
         """Decode article"""
         # Article was requested and fetched, update article stats for the server
         sabnzbd.BPSMeter.register_server_article_tried(article.fetcher.id)
 
         # Handle broken articles directly
-        if not data_view:
+        if not decoder or not decoder.success:
             if not article.search_new_server():
                 article.nzf.nzo.increase_bad_articles_counter("missing_articles")
                 sabnzbd.NzbQueue.register_article(article, success=False)
             return
 
         # Decode and send to article cache
-        sabnzbd.decoder.decode(article, data_view)
+        sabnzbd.decoder.decode(article, decoder)
 
     def run(self):
         # Warn if there are servers defined, but none are valid
@@ -605,6 +607,7 @@ class Downloader(Thread):
                         nw.article = server.get_article()
                         if not nw.article:
                             break
+                        nw.decoder = sabctools.Decoder()
 
                         server.idle_threads.remove(nw)
                         server.busy_threads.add(nw)
@@ -717,6 +720,7 @@ class Downloader(Thread):
             return
 
         article = nw.article
+        decoder = nw.decoder
         server = nw.server
 
         with DOWNLOADER_LOCK:
@@ -726,7 +730,7 @@ class Downloader(Thread):
             # Update statistics only when we fetched a whole article
             # The side effect is that we don't count things like article-not-available messages
             if article_done:
-                article.nzf.nzo.update_download_stats(sabnzbd.BPSMeter.bps, server.id, nw.data_position)
+                article.nzf.nzo.update_download_stats(sabnzbd.BPSMeter.bps, server.id, nw.decoder.bytes_read)
             # Check speedlimit
             if (
                 self.bandwidth_limit
@@ -799,7 +803,7 @@ class Downloader(Thread):
             server.errormsg = server.warning = ""
 
             # Decode
-            self.decode(article, nw.data_view[: nw.data_position])
+            self.decode(article, decoder)
 
             if sabnzbd.LOG_ALL:
                 logging.debug("Thread %s@%s: %s done", nw.thrdnum, server.host, article.article)
@@ -981,6 +985,7 @@ class Downloader(Thread):
         try:
             if sabnzbd.LOG_ALL:
                 logging.debug("Thread %s@%s: BODY %s", nw.thrdnum, nw.server.host, nw.article.article)
+            nw.decoder = sabctools.Decoder()
             nw.body()
             # Mark as ready to be read
             self.add_socket(nw.nntp.fileno, nw)

@@ -23,6 +23,7 @@ import logging
 import hashlib
 import binascii
 from io import BytesIO
+from typing import Optional
 from zlib import crc32
 
 import sabnzbd
@@ -50,7 +51,7 @@ except Exception:
 
 
 class BadData(Exception):
-    def __init__(self, data: bytes):
+    def __init__(self, data: memoryview):
         super().__init__()
         self.data = data
 
@@ -63,8 +64,8 @@ class BadUu(Exception):
     pass
 
 
-def decode(article: Article, data_view: memoryview):
-    decoded_data = None
+def decode(article: Article, decoder: sabctools.Decoder):
+    decoded_data: Optional[memoryview] = None
     nzo = article.nzf.nzo
     art_id = article.article
 
@@ -79,9 +80,9 @@ def decode(article: Article, data_view: memoryview):
             logging.debug("Decoding %s", art_id)
 
         if article.nzf.type == "uu":
-            decoded_data = decode_uu(article, bytes(data_view))
+            decoded_data = decode_uu(article, memoryview(decoder))
         else:
-            decoded_data = decode_yenc(article, data_view)
+            decoded_data = decode_yenc(article, decoder)
 
         article_success = True
 
@@ -112,31 +113,31 @@ def decode(article: Article, data_view: memoryview):
 
     except (BadYenc, ValueError):
         # Handles precheck and badly formed articles
-        if nzo.precheck and data_view and data_view[:4] == b"223 ":
+        if nzo.precheck and decoder.status_code == 223:
             # STAT was used, so we only get a status code
             article_success = True
         else:
             # Try uu-decoding
             if not nzo.precheck and article.nzf.type != "yenc":
                 try:
-                    decoded_data = decode_uu(article, bytes(data_view))
+                    decoded_data = decode_uu(article, bytes(memoryview(decoder)))
                     logging.debug("Found uu-encoded article %s in job %s", art_id, nzo.final_name)
                     article_success = True
                 except Exception:
                     pass
-            # Only bother with further checks if uu-decoding didn't work out
-            if not article_success:
-                # Convert the first 2000 bytes of raw socket data to article lines,
-                # and examine the headers (for precheck) or body (for download).
-                for line in bytes(data_view[:2000]).split(b"\r\n"):
-                    lline = line.lower()
-                    if lline.startswith(b"message-id:"):
-                        article_success = True
-                    # Look for DMCA clues (while skipping "X-" headers)
-                    if not lline.startswith(b"x-") and match_str(lline, (b"dmca", b"removed", b"cancel", b"blocked")):
-                        article_success = False
-                        logging.info("Article removed from server (%s)", art_id)
-                        break
+            # # Only bother with further checks if uu-decoding didn't work out
+            # if not article_success:
+            #     # Convert the first 2000 bytes of raw socket data to article lines,
+            #     # and examine the headers (for precheck) or body (for download).
+            #     for line in bytes(data_view[:2000]).split(b"\r\n"):
+            #         lline = line.lower()
+            #         if lline.startswith(b"message-id:"):
+            #             article_success = True
+            #         # Look for DMCA clues (while skipping "X-" headers)
+            #         if not lline.startswith(b"x-") and match_str(lline, (b"dmca", b"removed", b"cancel", b"blocked")):
+            #             article_success = False
+            #             logging.info("Article removed from server (%s)", art_id)
+            #             break
 
         # Pre-check, proper article found so just register
         if nzo.precheck and article_success and sabnzbd.LOG_ALL:
@@ -170,42 +171,38 @@ def decode(article: Article, data_view: memoryview):
     sabnzbd.NzbQueue.register_article(article, article_success)
 
 
-def decode_yenc(article: Article, data_view: memoryview) -> bytearray:
+def decode_yenc(article: Article, decoder: sabctools.Decoder) -> memoryview:
     # Let SABCTools do all the heavy lifting
-    (
-        decoded_data,
-        yenc_filename,
-        article.file_size,
-        article.data_begin,
-        article.data_size,
-        crc_correct,
-    ) = sabctools.yenc_decode(data_view)
+    decoded_data = memoryview(decoder)
+    article.file_size = decoder.file_size
+    article.data_begin = decoder.part_begin
+    article.data_size = decoder.part_size
 
     nzf = article.nzf
     # Assume it is yenc
     nzf.type = "yenc"
 
     # Only set the name if it was found and not obfuscated
-    if not nzf.filename_checked and yenc_filename:
+    if not nzf.filename_checked and (file_name := decoder.file_name):
         # Set the md5-of-16k if this is the first article
         if article.lowest_partnum:
             nzf.md5of16k = hashlib.md5(decoded_data[:16384]).digest()
 
         # Try the rename, even if it's not the first article
         # For example when the first article was missing
-        nzf.nzo.verify_nzf_filename(nzf, yenc_filename)
+        nzf.nzo.verify_nzf_filename(nzf, file_name)
 
     # CRC check
-    if crc_correct is None:
+    if (crc := decoder.crc) is None:
         logging.info("CRC Error in %s", article.article)
         raise BadData(decoded_data)
 
-    article.crc32 = crc_correct
+    article.crc32 = crc
 
     return decoded_data
 
 
-def decode_uu(article: Article, raw_data: bytes) -> bytes:
+def decode_uu(article: Article, raw_data: memoryview) -> memoryview:
     """Try to uu-decode an article. The raw_data may or may not contain headers.
     If there are headers, they will be separated from the body by at least one
     empty line. In case of no headers, the first line seems to always be the nntp
@@ -215,6 +212,7 @@ def decode_uu(article: Article, raw_data: bytes) -> bytes:
         raise BadUu
 
     # Line up the raw_data
+    raw_data = bytes(raw_data)
     raw_data = raw_data.split(b"\r\n")
 
     # Index of the uu payload start in raw_data
@@ -309,7 +307,7 @@ def decode_uu(article: Article, raw_data: bytes) -> bytes:
                     logging.info(
                         "Error while uu-decoding %s: %s (line: %s; workaround: %s)", article.article, msg, line, msg2
                     )
-                    raise BadData(decoded_data.getvalue())
+                    raise BadData(memoryview(decoded_data.getvalue()))
 
             # Store the decoded data
             decoded_data.write(decoded_line)
@@ -327,7 +325,7 @@ def decode_uu(article: Article, raw_data: bytes) -> bytes:
 
         data = decoded_data.getvalue()
         article.crc32 = crc32(data)
-        return data
+        return memoryview(data)
 
 
 def search_new_server(article: Article) -> bool:
