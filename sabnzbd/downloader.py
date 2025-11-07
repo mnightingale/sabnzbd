@@ -30,6 +30,7 @@ from datetime import date
 from typing import List, Dict, Optional, Union, Set
 
 import sabctools
+from sabctools import DecodingStatus
 
 import sabnzbd
 from sabnzbd.decorators import synchronized, NzbQueueLocker, DOWNLOADER_CV, DOWNLOADER_LOCK
@@ -513,7 +514,7 @@ class Downloader(Thread):
         sabnzbd.BPSMeter.register_server_article_tried(article.fetcher.id)
 
         # Handle broken articles directly
-        if not decoder or not decoder.success:
+        if not decoder or decoder.status is DecodingStatus.NOT_FOUND:
             if not article.search_new_server():
                 article.nzf.nzo.increase_bad_articles_counter("missing_articles")
                 sabnzbd.NzbQueue.register_article(article, success=False)
