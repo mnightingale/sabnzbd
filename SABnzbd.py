@@ -541,7 +541,13 @@ def get_webhost(web_host, web_port, https_port):
     ipv4 = ipv6 = False
     localhost = hostip = "localhost"
     try:
-        info = socket.getaddrinfo(socket.gethostname(), None)
+        # Requires permission to resolve a local DNS name
+        # https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy
+        if os.environ.get("CI", False) and sabnzbd.MACOS and socket.gethostname().endswith(".local"):
+            logging.info("CI skipping .local hostname resolution")
+            raise socket.error  # dont do this but just testing
+        else:
+            info = socket.getaddrinfo(socket.gethostname(), None)
     except socket.error:
         # Hostname does not resolve
         try:
