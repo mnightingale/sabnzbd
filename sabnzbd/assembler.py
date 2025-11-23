@@ -267,18 +267,14 @@ class Assembler(Thread):
     def _flush_idle_files(self) -> None:
         """Close open files that have been idle longer than idle_timeout."""
         now = time.time()
-        to_close = [
-            path
-            for path, (fd, ts) in self.open_files.items()
-            if sabnzbd.Downloader.paused or now - ts > self.idle_file_timeout
-        ]
+        to_close = []
+        for path, (fd, ts) in self.open_files.items():
+            if sabnzbd.Downloader.paused or now - ts > self.idle_file_timeout:
+                to_close.append(path)
         for path in to_close:
-            logging.info("Closing file %s", path)
+            fd, _ = self.open_files.pop(path)
             try:
-                fd, _ = self.open_files.pop(path)
                 os.close(fd)
-            except KeyError:
-                pass
             except Exception:
                 logging.debug("Error closing idle file %s", path)
 
@@ -400,7 +396,7 @@ class Assembler(Thread):
                 try:
                     os.close(fd)
                 except Exception:
-                    logging.exception("Error closing fd for %s during finalization", filepath)
+                    logging.debug("Error closing fd for %s during finalization", filepath)
             # remove per-NZF state
             nzf_next_index.pop(nzf, None)
             set_permissions(nzf.filepath)
