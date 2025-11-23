@@ -44,12 +44,12 @@ from sabnzbd.filesystem import (
 )
 from sabnzbd.constants import Status, GIGI, SOFT_ASSEMBLER_QUEUE_LIMIT
 import sabnzbd.cfg as cfg
-from sabnzbd.nzbstuff import NzbObject, NzbFile, Article
+from sabnzbd.nzbstuff import NzbObject, NzbFile
 import sabnzbd.par2file as par2file
 
 
 class Assembler(Thread):
-    def __init__(self):
+    def __init__(self, idle_file_timeout: float = 5.0, queue_timeout: float = 1.0, max_open_files: int = 256):
         super().__init__()
         self.shutdown = False
         self.max_queue_size: int = cfg.assembler_max_queue_size()
@@ -57,16 +57,24 @@ class Assembler(Thread):
             maxsize=self.max_queue_size
         )
         self.open_files: dict[str, tuple[int, float]] = dict()
-        self.idle_timeout: float = 5.0
-        self.queue_timeout: float = 1.0
-        self.max_open_files: int = 128
+        self.idle_file_timeout: float = idle_file_timeout
+        self.queue_timeout: float = queue_timeout
+        self.max_open_files: int = max_open_files
         self.nzf_next_index: weakref.WeakKeyDictionary[NzbFile, int] = weakref.WeakKeyDictionary()
         # track which nzf objects are currently enqueued to avoid duplicate queue items
         self._queued_nzf = weakref.WeakSet()
         self._queued_lock = threading.Lock()
+        self._queue_cv = threading.Condition()
 
     def stop(self):
         self.shutdown = True
+        with self._queue_cv:
+            self._queue_cv.notify_all()
+
+    def flush(self):
+        """Allow another thread to notify the assembler to close all files"""
+        with self._queue_cv:
+            self._queue_cv.notify_all()
 
     def process(self, nzo: NzbObject, nzf: Optional[NzbFile] = None, file_done: Optional[bool] = None):
         if (assembler_level := self.queue_level()) > SOFT_ASSEMBLER_QUEUE_LIMIT:
@@ -91,18 +99,26 @@ class Assembler(Thread):
                 time.sleep(0.1)
                 logged_counter += 1
 
+        queue_item_added = False
         if nzf is None:
             self.queue.put((nzo, nzf, file_done))
-            return
+            queue_item_added = True
+        else:
+            with self._queued_lock:
+                if nzf not in self._queued_nzf:
+                    # mark queued and put a single notification item
+                    self._queued_nzf.add(nzf)
+                    self.queue.put((nzo, nzf, file_done))
+                    queue_item_added = True
+                elif file_done:
+                    # Already queued but need file_done
+                    self.queue.put((nzo, nzf, file_done))
+                    queue_item_added = True
 
-        with self._queued_lock:
-            if nzf not in self._queued_nzf:
-                # mark queued and put a single notification item
-                self._queued_nzf.add(nzf)
-                self.queue.put((nzo, nzf, file_done))
-            elif file_done:
-                # Already queued but need file_done
-                self.queue.put((nzo, nzf, file_done))
+        # notify assembler that there is work to do
+        if queue_item_added:
+            with self._queue_cv:
+                self._queue_cv.notify()
 
     def queue_level(self) -> float:
         return self.queue.qsize() / self.max_queue_size
@@ -110,88 +126,97 @@ class Assembler(Thread):
     def run(self):
         while not self.shutdown:
             # Flush any idle files
-            self.flush_idle_files()
+            self._flush_idle_files()
 
             # Set NzbObject and NzbFile objects to None so references
             # from this thread do not keep the objects alive (see #1628)
             nzo = nzf = None
-            try:
-                nzo, nzf, file_done = self.queue.get(timeout=self.queue_timeout)
-            except queue.Empty:
-                # nothing to do this iteration; loop around to flush_idle_files again
-                continue
 
-            if nzf is None:
+            # Wait for either new items or idle flush timeout
+            with self._queue_cv:
+                if self.queue.empty() and not self.shutdown:
+                    # Wait until notified or until next idle flush
+                    self._queue_cv.wait(timeout=self.idle_file_timeout)
+
+            # Process queue items
+            while True:
                 try:
+                    nzo, nzf, file_done = self.queue.get_nowait()
+                except queue.Empty:
+                    break
+
+                if nzf:
+                    with self._queued_lock:
+                        self._queued_nzf.discard(nzf)
+
+                if nzf is None:
                     sabnzbd.NzbQueue.remove(nzo.nzo_id, cleanup=False)
                     sabnzbd.PostProcessor.process(nzo)
-                finally:
-                    # no nzf to unqueue
-                    pass
-                continue
-
-            # We've popped an NZF notification; remove from queued set so future events can enqueue again.
-            with self._queued_lock:
-                try:
-                    self._queued_nzf.remove(nzf)
-                except KeyError:
-                    # might not be present (weakset semantics)
-                    pass
-
-            # Check if enough disk space is free after each file is done
-            if file_done and not sabnzbd.Downloader.paused:
-                self.diskspace_check(nzo, nzf)
-
-            # Prepare filepath
-            filepath = nzf.prepare_filepath()
-            if not filepath:
-                continue
-
-            try:
-                logging.debug("Decoding part of %s", filepath)
-                self.assemble(nzo, nzf, file_done)
-
-                # Continue after partly written data
-                if not file_done:
                     continue
 
-                # Clean-up admin data
-                logging.info("Decoding finished %s", filepath)
-                nzf.remove_admin()
+                # We've popped an NZF notification; remove from queued set so future events can enqueue again.
+                with self._queued_lock:
+                    try:
+                        self._queued_nzf.remove(nzf)
+                    except KeyError:
+                        # might not be present (weakset)
+                        pass
 
-                # Do rar-related processing
-                if rarfile.is_rarfile(filepath):
-                    # Check for encrypted files, unwanted extensions and add to direct unpack
-                    self.check_encrypted_and_unwanted(nzo, nzf)
-                    nzo.add_to_direct_unpacker(nzf)
+                # Check if enough disk space is free after each file is done
+                if file_done and not sabnzbd.Downloader.paused:
+                    self.diskspace_check(nzo, nzf)
 
-                elif par2file.is_par2_file(filepath):
-                    # Parse par2 files, cloaked or not
-                    nzo.handle_par2(nzf, filepath)
+                # Prepare filepath
+                filepath = nzf.prepare_filepath()
+                if not filepath:
+                    continue
 
-            except IOError as err:
-                # If job was deleted/finished or in active post-processing, ignore error
-                if not nzo.pp_or_finished:
-                    # 28 == disk full => pause downloader
-                    if err.errno == 28:
-                        logging.error(T("Disk full! Forcing Pause"))
+                try:
+                    logging.debug("Decoding part of %s", filepath)
+                    self.assemble(nzo, nzf, file_done)
+
+                    # Continue after partly written data
+                    if not file_done:
+                        continue
+
+                    # Clean-up admin data
+                    logging.info("Decoding finished %s", filepath)
+                    nzf.remove_admin()
+
+                    # Do rar-related processing
+                    if rarfile.is_rarfile(filepath):
+                        # Check for encrypted files, unwanted extensions and add to direct unpack
+                        self.check_encrypted_and_unwanted(nzo, nzf)
+                        nzo.add_to_direct_unpacker(nzf)
+
+                    elif par2file.is_par2_file(filepath):
+                        # Parse par2 files, cloaked or not
+                        nzo.handle_par2(nzf, filepath)
+
+                except IOError as err:
+                    # If job was deleted/finished or in active post-processing, ignore error
+                    if not nzo.pp_or_finished:
+                        # 28 == disk full => pause downloader
+                        if err.errno == 28:
+                            logging.error(T("Disk full! Forcing Pause"))
+                        else:
+                            logging.error(T("Disk error on creating file %s"), clip_path(filepath))
+                        # Log traceback
+                        if sabnzbd.WINDOWS:
+                            logging.info(
+                                "Winerror: %s - %s",
+                                err.winerror,
+                                hex(ctypes.windll.ntdll.RtlGetLastNtStatus() + 2**32),
+                            )
+                        logging.info("Traceback: ", exc_info=True)
+                        # Pause without saving
+                        sabnzbd.Downloader.pause()
                     else:
-                        logging.error(T("Disk error on creating file %s"), clip_path(filepath))
-                    # Log traceback
-                    if sabnzbd.WINDOWS:
-                        logging.info(
-                            "Winerror: %s - %s",
-                            err.winerror,
-                            hex(ctypes.windll.ntdll.RtlGetLastNtStatus() + 2**32),
-                        )
-                    logging.info("Traceback: ", exc_info=True)
-                    # Pause without saving
-                    sabnzbd.Downloader.pause()
-                else:
-                    logging.debug("Ignoring error %s for %s, already finished or in post-proc", err, filepath)
-            except Exception:
-                logging.error(T("Fatal error in Assembler"), exc_info=True)
-                break
+                        logging.debug("Ignoring error %s for %s, already finished or in post-proc", err, filepath)
+                except Exception:
+                    logging.error(T("Fatal error in Assembler"), exc_info=True)
+                    self.stop()
+                    break
 
         logging.debug("Shutting down assembler")
 
@@ -216,7 +241,6 @@ class Assembler(Thread):
         now = time.time()
         # Reuse FD if exists
         if entry := self.open_files.get(filepath):
-            logging.debug("Reusing file %s", filepath)
             fd, _ = entry
             self.open_files[filepath] = (fd, now)
             return fd
@@ -240,16 +264,19 @@ class Assembler(Thread):
             except Exception:
                 logging.debug("Error closing LRU file %s", oldest_path)
 
-    def flush_idle_files(self) -> None:
+    def _flush_idle_files(self) -> None:
         """Close open files that have been idle longer than idle_timeout."""
         now = time.time()
-        to_close = [path for path, (fd, ts) in self.open_files.items() if now - ts > self.idle_timeout]
+        to_close = []
+        for path, (fd, ts) in self.open_files.items():
+            if sabnzbd.Downloader.paused or now - ts > self.idle_file_timeout:
+                to_close.append(path)
         for path in to_close:
             fd, _ = self.open_files.pop(path)
             try:
                 os.close(fd)
             except Exception:
-                logging.exception("Error closing idle file %s", path)
+                logging.debug("Error closing idle file %s", path)
 
     @staticmethod
     def diskspace_check(nzo: NzbObject, nzf: NzbFile):
@@ -369,7 +396,7 @@ class Assembler(Thread):
                 try:
                     os.close(fd)
                 except Exception:
-                    logging.exception("Error closing fd for %s during finalization", filepath)
+                    logging.debug("Error closing fd for %s during finalization", filepath)
             # remove per-NZF state
             nzf_next_index.pop(nzf, None)
             set_permissions(nzf.filepath)

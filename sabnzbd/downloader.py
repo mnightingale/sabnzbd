@@ -421,6 +421,7 @@ class Downloader(Thread):
                 sabnzbd.BPSMeter.reset()
             if cfg.autodisconnect():
                 self.disconnect()
+            sabnzbd.Assembler.flush()
 
     def wait_for_postproc(self):
         logging.info("Waiting for post-processing to finish")
