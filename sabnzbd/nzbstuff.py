@@ -328,7 +328,7 @@ class NzbFile(TryList):
     """Representation of one file consisting of multiple articles"""
 
     # Pre-define attributes to save memory
-    __slots__ = NzbFileSaver
+    __slots__ = NzbFileSaver + ("__weakref__",)
 
     def __init__(self, date, subject, raw_article_db, file_bytes, nzo):
         """Setup object"""
