@@ -26,6 +26,7 @@ import cherrypy._cpreqbody
 from typing import Union, Optional
 
 import sabnzbd
+from sabnzbd.assembler import AssemblerTask
 from sabnzbd.nzb import Article, NzbObject
 from sabnzbd.misc import exit_sab, cat_to_opts, int_conv, caller_name, safe_lower, duplicate_warning
 from sabnzbd.filesystem import get_admin_path, remove_all, globber_full, remove_file, is_valid_script
@@ -730,20 +731,13 @@ class NzbQueue:
 
         articles_left, file_done, post_done = nzo.remove_article(article, success)
 
-        # Write data if file is done or at trigger time
-        # Skip if the file is already queued, since all available articles will then be written
-        if (
-            file_done
-            or (article.lowest_partnum and nzf.filename_checked and not nzf.import_finished)
-            or (articles_left and (articles_left % sabnzbd.ArticleCache.assembler_write_trigger) == 0)
-        ):
-            if not nzo.precheck:
-                # The type is only set if sabctools could decode the article
-                if nzf.type:
-                    sabnzbd.Assembler.process(nzo, nzf, file_done)
-                elif sabnzbd.par2file.has_par2_in_filename(nzf.filename):
-                    # Broken par2 file, try to get another one
-                    nzo.promote_par2(nzf)
+        if not nzo.precheck:
+            # The type is only set if sabctools could decode the article
+            if nzf.type:
+                sabnzbd.Assembler.process(AssemblerTask(nzo, nzf, file_done), article, articles_left)
+            elif sabnzbd.par2file.has_par2_in_filename(nzf.filename):
+                # Broken par2 file, try to get another one
+                nzo.promote_par2(nzf)
 
         # Save bookkeeping in case of crash
         if file_done and (nzo.next_save is None or time.time() > nzo.next_save):
@@ -776,7 +770,7 @@ class NzbQueue:
                 else:
                     # Not enough data, let postprocessor show it as failed
                     pass
-            sabnzbd.Assembler.process(nzo)
+            sabnzbd.Assembler.process(AssemblerTask(nzo))
 
     def fail_to_history(self, nzo: NzbObject):
         """Fail to history, with all the steps in between"""

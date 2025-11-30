@@ -23,13 +23,16 @@ import os
 import queue
 import logging
 import re
+import threading
+import time
+from dataclasses import dataclass
 from threading import Thread
 import ctypes
 from typing import Optional
 import rarfile
 
 import sabnzbd
-from sabnzbd.misc import get_all_passwords, match_str, SABRarFile
+from sabnzbd.misc import get_all_passwords, match_str, SABRarFile, from_units, to_units, acquire_timeout
 from sabnzbd.filesystem import (
     set_permissions,
     clip_path,
@@ -39,92 +42,424 @@ from sabnzbd.filesystem import (
     has_unwanted_extension,
     get_basename,
 )
-from sabnzbd.constants import Status, GIGI
+from sabnzbd.constants import (
+    Status,
+    GIGI,
+    ARTICLE_CACHE_MIN,
+    ASSEMBLER_WRITE_THRESHOLD,
+    ASSEMBLER_IDLE_FILE_TIMEOUT,
+    ASSEMBLER_MAX_OPEN_FILES,
+)
 import sabnzbd.cfg as cfg
-from sabnzbd.nzb import NzbFile, NzbObject
+from sabnzbd.nzb import NzbFile, NzbObject, Article
 import sabnzbd.par2file as par2file
+from sabnzbd.utils.sparse import sparse
+
+
+@dataclass
+class AssemblerTask:
+    nzo: NzbObject = None
+    nzf: Optional[NzbFile] = None
+    file_done: bool = False
+    force: bool = False
 
 
 class Assembler(Thread):
     def __init__(self):
         super().__init__()
+        self.shutdown: bool = False
         self.max_queue_size: int = cfg.assembler_max_queue_size()
-        self.queue: queue.Queue[tuple[Optional[NzbObject], Optional[NzbFile], Optional[bool]]] = queue.Queue()
+        self.assembler_write_trigger: int = 1
+        self.queue: queue.Queue[AssemblerTask] = queue.Queue()
+        self._open_files: dict[NzbFile, tuple[int, float]] = dict()
+        self.nzf_next_index: dict[NzbFile, int] = dict()
+        self.queued_lock = threading.Lock()
+        self.queued_nzf: set[NzbFile] = set()
+        self.queued_nzf_forced: set[NzbFile] = set()
+        self._queued_cv: threading.Condition = threading.Condition()
 
     def stop(self):
-        self.queue.put((None, None, None))
+        self.shutdown = True
+        with self._queued_cv:
+            self._queued_cv.notify_all()
 
-    def process(self, nzo: NzbObject, nzf: Optional[NzbFile] = None, file_done: Optional[bool] = None):
-        self.queue.put((nzo, nzf, file_done))
+    def new_limit(self, limit: int):
+        """Called when cache limit changes"""
+        limit = max(int(from_units(ARTICLE_CACHE_MIN)), limit)
+        # Set assembler_write_trigger to be the equivalent of ASSEMBLER_WRITE_THRESHOLD %
+        # of the total cache, assuming an article size of 750 000 bytes
+        self.assembler_write_trigger = int(limit * ASSEMBLER_WRITE_THRESHOLD / 100 / 750_000) + 1
+        logging.debug("Assembler trigger = %s", to_units(self.assembler_write_trigger))
 
     def queue_level(self) -> float:
         return self.queue.qsize() / self.max_queue_size
 
+    def discard(self, nzo: NzbObject, timeout: float = 2.0) -> None:
+        # Wait until NzbFiles leave the queue
+        deadline = time.time() + timeout
+        while True:
+            with self.queued_lock:
+                if not any(nzf in self.queued_nzf for nzf in nzo.files):
+                    break
+                if time.time() >= deadline:
+                    logging.debug(
+                        "Timeout waiting for NzbFile(s) of job %s",
+                        nzo.final_name,
+                    )
+                    break
+                time.sleep(0.01)
+        for nzf in nzo.files:
+            self.nzf_next_index.pop(nzf, None)
+            with acquire_timeout(nzf.file_lock, 2.0) as acquired:
+                if not acquired:
+                    continue
+                if fd_entry := self._open_files.pop(nzf, None):
+                    fd, _ = fd_entry
+                    try:
+                        os.close(fd)
+                    except Exception:
+                        logging.debug("Error closing fd for discarded file %s", nzf.filepath)
+
+    def process(
+        self,
+        task: AssemblerTask,
+        article: Optional[Article] = None,
+        articles_left: Optional[int] = None,
+    ) -> None:
+        """Notify the assembler that is can proceed with the given nzf"""
+        nzf = task.nzf
+        file_done = task.file_done
+        force = task.force
+
+        if nzf is None:
+            # post-proc
+            self.queue.put(task)
+        else:
+            # Ensure NzbFile is queued
+            direct_write = bool(sabnzbd.cfg.direct_write.get())
+            if (
+                file_done
+                or (
+                    not direct_write
+                    and nzf not in self.queued_nzf
+                    and (
+                        (article.lowest_partnum and nzf.filename_checked and not nzf.import_finished)
+                        or (articles_left and (articles_left % self.assembler_write_trigger) == 0)
+                    )
+                )
+                or (direct_write and force and nzf not in self.queued_nzf_forced)
+            ):
+                with self.queued_lock:
+                    if force:
+                        self.queued_nzf_forced.add(nzf)
+                    self.queued_nzf.add(nzf)
+                    self.queue.put(task)
+                    with self._queued_cv:
+                        self._queued_cv.notify()
+
     def run(self):
-        while 1:
-            # Set NzbObject and NzbFile objects to None so references
-            # from this thread do not keep the objects alive (see #1628)
-            nzo = nzf = None
-            nzo, nzf, file_done = self.queue.get()
-            if not nzo:
-                logging.debug("Shutting down assembler")
+        while not self.shutdown:
+            # Flush idle files first
+            self._flush_idle_files()
+
+            # Wait for new items or idle file timeout
+            with self._queued_cv:
+                self._queued_cv.wait(timeout=ASSEMBLER_IDLE_FILE_TIMEOUT)
+
+            if self.shutdown:
                 break
 
-            if nzf:
-                # Check if enough disk space is free after each file is done
-                if file_done and not sabnzbd.Downloader.paused:
-                    self.diskspace_check(nzo, nzf)
+            while True:
+                try:
+                    task = self.queue.get_nowait()
+                    self.assemble(task)
+                    self.queue.task_done()
+                except queue.Empty:
+                    break
+                except Exception:
+                    logging.error("Fatal error in assembler loop", exc_info=True)
+                    self.shutdown = True
+                    break
+                finally:
+                    task = None
 
-                # Prepare filepath
-                if filepath := nzf.prepare_filepath():
-                    try:
-                        logging.debug("Decoding part of %s", filepath)
-                        self.assemble(nzo, nzf, file_done)
+        # Close open files
+        for nzf, (fd, _) in list(self._open_files.items()):
+            with acquire_timeout(nzf.file_lock, 1.0) as acquired:
+                if not acquired:
+                    continue
+                try:
+                    os.close(fd)
+                except Exception:
+                    logging.debug("Error closing file %s during shutdown", nzf.filepath)
+        self._open_files.clear()
 
-                        # Continue after partly written data
-                        if not file_done:
-                            continue
+    def assemble(self, task: AssemblerTask) -> None:
+        nzo = task.nzo
+        nzf = task.nzf
+        file_done = task.file_done
+        force = task.force
 
-                        # Clean-up admin data
-                        logging.info("Decoding finished %s", filepath)
-                        nzf.remove_admin()
+        # If nzf is None => NZB-level (post-processing) event
+        if nzf is None:
+            sabnzbd.NzbQueue.remove(nzo.nzo_id, cleanup=False)
+            sabnzbd.PostProcessor.process(nzo)
+            return
 
-                        # Do rar-related processing
-                        if rarfile.is_rarfile(filepath):
-                            # Check for encrypted files, unwanted extensions and add to direct unpack
-                            self.check_encrypted_and_unwanted(nzo, nzf)
-                            nzo.add_to_direct_unpacker(nzf)
+        # If file done, check diskspace
+        if file_done and not sabnzbd.Downloader.paused:
+            self.diskspace_check(nzo, nzf)
 
-                        elif par2file.is_par2_file(filepath):
-                            # Parse par2 files, cloaked or not
-                            nzo.handle_par2(nzf, filepath)
+        try:
+            logging.debug("Assembling %s", nzf.filename)
 
-                    except IOError as err:
-                        # If job was deleted/finished or in active post-processing, ignore error
-                        if not nzo.pp_or_finished:
-                            # 28 == disk full => pause downloader
-                            if err.errno == 28:
-                                logging.error(T("Disk full! Forcing Pause"))
-                            else:
-                                logging.error(T("Disk error on creating file %s"), clip_path(filepath))
-                            # Log traceback
-                            if sabnzbd.WINDOWS:
-                                logging.info(
-                                    "Winerror: %s - %s",
-                                    err.winerror,
-                                    hex(ctypes.windll.ntdll.RtlGetLastNtStatus() + 2**32),
-                                )
-                            logging.info("Traceback: ", exc_info=True)
-                            # Pause without saving
-                            sabnzbd.Downloader.pause()
-                        else:
-                            logging.debug("Ignoring error %s for %s, already finished or in post-proc", err, filepath)
-                    except Exception:
-                        logging.error(T("Fatal error in Assembler"), exc_info=True)
-                        break
+            # Prepare filepath
+            if not (filepath := nzf.prepare_filepath()):
+                # could not prepare path (e.g. job removed). Skip.
+                return
+
+            # logging.debug("Decoding part of %s", filepath)
+            self.assemble_nzf(nzo, nzf, file_done, force)
+
+            # Continue after partly written data
+            if not file_done:
+                return
+
+            # Clean-up admin data
+            logging.info("Decoding finished %s", filepath)
+            nzf.remove_admin()
+
+            # Do rar-related processing
+            if rarfile.is_rarfile(filepath):
+                # Check for encrypted files, unwanted extensions and add to direct unpack
+                self.check_encrypted_and_unwanted(nzo, nzf)
+                nzo.add_to_direct_unpacker(nzf)
+
+            elif par2file.is_par2_file(filepath):
+                # Parse par2 files, cloaked or not
+                nzo.handle_par2(nzf, filepath)
+
+        except IOError as err:
+            # If job was deleted/finished or in active post-processing, ignore error
+            if not nzo.pp_or_finished:
+                # 28 == disk full => pause downloader
+                if err.errno == 28:
+                    logging.error(T("Disk full! Forcing Pause"))
+                else:
+                    logging.error(T("Disk error on creating file %s"), clip_path(filepath))
+                # Log traceback
+                if sabnzbd.WINDOWS:
+                    logging.info(
+                        "Winerror: %s - %s",
+                        err.winerror,
+                        hex(ctypes.windll.ntdll.RtlGetLastNtStatus() + 2**32),
+                    )
+                logging.info("Traceback: ", exc_info=True)
+                # Pause without saving
+                sabnzbd.Downloader.pause()
             else:
-                sabnzbd.NzbQueue.remove(nzo.nzo_id, cleanup=False)
-                sabnzbd.PostProcessor.process(nzo)
+                logging.debug("Ignoring error %s for %s, already finished or in post-proc", err, filepath)
+        finally:
+            # Always remove from queued set after processing
+            # If there are still pending articles, they'll re-queue when the gap is filled
+            with self.queued_lock:
+                self.queued_nzf.discard(nzf)
+                if force:
+                    self.queued_nzf_forced.discard(nzf)
+
+    def assemble_nzf(self, nzo: NzbObject, nzf: NzbFile, file_done: bool, force: bool) -> None:
+        status_deleted = Status.DELETED
+        load_article = sabnzbd.ArticleCache.load_article
+        update_crc32 = nzf.update_crc32
+        direct_write = sabnzbd.cfg.direct_write.get() and nzf.type == "yenc"
+        decodetable = nzf.decodetable
+
+        fd = self.get_fd(nzf, direct_write)
+        empty = direct_write and os.fstat(fd).st_size == 0
+
+        # Resume assembly from where we got to previously
+        for idx in range(self.nzf_next_index.get(nzf, 0), len(decodetable)):
+            article = decodetable[idx]
+
+            if nzo.status is status_deleted:
+                break
+
+            # When forced stop once reached an untried article
+            if force and not article.tries:
+                break
+
+            if article.on_disk:
+                if not force:
+                    self.nzf_next_index[nzf] = idx + 1
+                continue
+
+            if empty and direct_write and article.file_size:
+                with nzf.file_lock:
+                    if os.fstat(fd).st_size == 0:
+                        try:
+                            sparse(fd, article.file_size)
+                        except OSError:
+                            logging.debug(
+                                "Sparse call failed for %s size %d", nzf.filename, article.file_size, exc_info=True
+                            )
+                            direct_write = False
+                empty = False
+
+            # stop if next piece not yet decoded
+            if not article.decoded:
+                # If the article was not decoded but the file
+                # is done, it is just a missing piece, so keep writing
+                if file_done:
+                    self.nzf_next_index[nzf] = idx + 1
+                    continue
+                # We reach an article that was not decoded
+                if not force:
+                    break
+
+            # load and write article
+            data = load_article(article)
+            if not data:
+                # no data present yet; don't remove pending, break unless finalizing
+                if file_done:
+                    self.nzf_next_index[nzf] = idx + 1
+                    continue
+                if force:
+                    continue
+                break
+
+            # write to correct file offset
+            with nzf.file_lock:
+                if direct_write:
+                    # Have to seek everytime because article cache may have flushed directly to disk
+                    if article.data_begin is not None:
+                        os.lseek(fd, article.data_begin, os.SEEK_SET)
+                    else:
+                        os.lseek(fd, 0, os.SEEK_END)
+
+                mv = memoryview(data)
+                try:
+                    while mv:
+                        written = os.write(fd, mv)
+                        mv = mv[written:]
+                finally:
+                    mv.release()
+
+            update_crc32(article.crc32, len(data))
+            article.on_disk = True
+
+            if not force:
+                self.nzf_next_index[nzf] = idx + 1
+
+        if file_done:
+            # Close file descriptor
+            with acquire_timeout(nzf.file_lock, 1.0) as acquired:
+                if acquired:
+                    fd, _ = self._open_files.pop(nzf, (None, None))
+                    if fd is not None:
+                        try:
+                            os.close(fd)
+                        except Exception:
+                            logging.debug("Error closing fd for %s during finalization", nzf.filepath)
+            self.nzf_next_index.pop(nzf, None)
+            set_permissions(nzf.filepath)
+            nzf.assembled = True
+
+    def assemble_article(self, article: Article, data: bytes) -> bool:
+        """Write a single article to disk"""
+        nzf = article.nzf
+        update_crc32 = nzf.update_crc32
+        direct_write = sabnzbd.cfg.direct_write.get() and nzf.type == "yenc"
+
+        if not direct_write:
+            return False
+
+        with nzf.file_lock:
+            fd = self.get_fd(nzf, True)
+            empty = os.fstat(fd).st_size == 0
+            if empty and article.file_size:
+                try:
+                    sparse(fd, article.file_size)
+                except OSError:
+                    logging.debug("Sparse call failed for %s size %d", nzf.filename, article.file_size)
+                    return False
+
+            os.lseek(fd, article.data_begin, os.SEEK_SET)
+            mv = memoryview(data)
+            try:
+                while mv:
+                    written = os.write(fd, mv)
+                    mv = mv[written:]
+            finally:
+                mv.release()
+
+            update_crc32(article.crc32, len(data))
+            article.on_disk = True
+
+        return True
+
+    def get_fd(self, nzf: NzbFile, direct_write: bool) -> int:
+        """Return an open fd for filepath, reusing if present; update timestamp."""
+        with nzf.file_lock:
+            entry = self._open_files.get(nzf)
+            now = time.time()
+
+            if entry is not None:
+                fd, _ = entry
+                self._open_files[nzf] = (fd, now)
+                return fd
+
+            # Not open, enforce max_open_files by closing oldest
+            if len(self._open_files) >= ASSEMBLER_MAX_OPEN_FILES:
+                self._close_oldest_open_file()
+
+            # Open file descriptor and record timestamp
+            if direct_write:
+                flags = os.O_CREAT | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+            else:
+                flags = os.O_CREAT | os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0)
+            fd = os.open(nzf.filepath, flags, 0o644)
+            self._open_files[nzf] = (fd, time.time())
+            return fd
+
+    def _close_oldest_open_file(self) -> None:
+        """Close the oldest (least-recently-used) open file to keep fd count below limit."""
+        if not self._open_files:
+            return
+        # find path with smallest timestamp
+        oldest = min(self._open_files.items(), key=lambda kv: kv[1][1])[0]
+        fd, _ = self._open_files.pop(oldest, (None, None))
+
+        if fd is not None:
+            with acquire_timeout(oldest.file_lock, 1.0) as acquired:
+                if not acquired:
+                    return
+                try:
+                    os.close(fd)
+                except Exception:
+                    logging.debug("Error closing LRU file %s", oldest.filepath)
+
+    def _flush_idle_files(self) -> None:
+        """
+        Close open files that have been idle longer than idle_timeout.
+        Should not be called while an assembly is in progress, it could close an active file.
+        """
+        now: float = time.time()
+        to_close: list[NzbFile] = []
+
+        for nzf, (fd, ts) in self._open_files.items():
+            if sabnzbd.Downloader.paused or now - ts > ASSEMBLER_IDLE_FILE_TIMEOUT:
+                to_close.append(nzf)
+
+        for nzf in to_close:
+            with acquire_timeout(nzf.file_lock, 1.0) as acquired:
+                if not acquired:
+                    continue
+                fd, _ = self._open_files.pop(nzf, (None, None))
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except Exception:
+                        logging.debug("Error closing idle file %s", nzf.filepath, exc_info=True)
 
     @staticmethod
     def diskspace_check(nzo: NzbObject, nzf: NzbFile):
@@ -160,53 +495,6 @@ class Assembler(Thread):
                 sabnzbd.Scheduler.plan_diskspace_resume(full_dir, required_space)
             sabnzbd.notifier.send_notification("SABnzbd", T("Too little diskspace forcing PAUSE"), "disk_full")
             sabnzbd.emailer.diskfull_mail()
-
-    @staticmethod
-    def assemble(nzo: NzbObject, nzf: NzbFile, file_done: bool):
-        """Assemble a NZF from its table of articles
-        1) Partial write: write what we have
-        2) Nothing written before: write all
-        """
-
-        # We write large article-sized chunks, so we can safely skip the buffering of Python
-        with open(nzf.filepath, "ab", buffering=0) as fout:
-            for article in nzf.decodetable:
-                # Break if deleted during writing
-                if nzo.status is Status.DELETED:
-                    break
-
-                # Skip already written articles
-                if article.on_disk:
-                    continue
-
-                # Write all decoded articles
-                if article.decoded:
-                    # Could be empty in case nzo was deleted
-                    if data := sabnzbd.ArticleCache.load_article(article):
-                        written = fout.write(data)
-
-                        # In raw/non-buffered mode fout.write may not write everything requested:
-                        # https://docs.python.org/3/library/io.html?highlight=write#io.RawIOBase.write
-                        while written < len(data):
-                            written += fout.write(data[written:])
-
-                        nzf.update_crc32(article.crc32, len(data))
-                        article.on_disk = True
-                    else:
-                        logging.info("No data found when trying to write %s", article)
-                else:
-                    # If the article was not decoded but the file
-                    # is done, it is just a missing piece, so keep writing
-                    if file_done:
-                        continue
-                    else:
-                        # We reach an article that was not decoded
-                        break
-
-        # Final steps
-        if file_done:
-            set_permissions(nzf.filepath)
-            nzf.assembled = True
 
     @staticmethod
     def check_encrypted_and_unwanted(nzo: NzbObject, nzf: NzbFile):

@@ -35,6 +35,10 @@ import ctypes
 import random
 from typing import Union, Any, Optional, BinaryIO
 
+import sabctools
+
+from sabnzbd.utils.sparse import is_sparse_supported
+
 try:
     import win32api
     import win32file
@@ -1222,7 +1226,7 @@ def directory_is_writable(test_dir: str) -> bool:
     return True
 
 
-def check_filesystem_capabilities(test_dir: str) -> bool:
+def check_filesystem_capabilities(test_dir: str, is_download_dir: bool = False) -> bool:
     """Checks if we can write long and unicode filenames to the given directory.
     If not on Windows, also check for special chars like slashes and :
     Returns True if all OK, otherwise False"""
@@ -1248,6 +1252,15 @@ def check_filesystem_capabilities(test_dir: str) -> bool:
         sabnzbd.misc.helpful_warning(
             T("%s is not writable with special character filenames. This can cause problems."), test_dir
         )
+        allgood = False
+
+    # sparse files allow efficient use of empty space in files
+    if is_download_dir and sabnzbd.cfg.direct_write.get() and not is_sparse_supported(test_dir):
+        sabnzbd.cfg.direct_write.set(False)
+
+        # Writing to correct file offsets will be disabled, and it won't be possible to flush the article cache
+        # directly to the destination file
+        sabnzbd.misc.helpful_warning(T("%s does not support sparse files. Disabling direct write mode."), test_dir)
         allgood = False
 
     return allgood

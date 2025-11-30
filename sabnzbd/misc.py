@@ -24,6 +24,7 @@ import platform
 import ssl
 import sys
 import logging
+import threading
 import urllib.request
 import urllib.parse
 import re
@@ -36,12 +37,14 @@ import queue
 import ctypes
 import html
 import ipaddress
+from contextlib import contextmanager
+
 import socks
 import math
 import rarfile
 from threading import Thread
 from collections.abc import Iterable
-from typing import Union, Any, AnyStr, Optional, Collection
+from typing import Union, Any, AnyStr, Optional, Collection, Generator
 
 import sabnzbd
 import sabnzbd.getipaddress
@@ -717,15 +720,7 @@ def get_cache_limit() -> str:
     """
     # Calculate, if possible
     try:
-        if sabnzbd.WINDOWS:
-            # Windows
-            mem_bytes = get_windows_memory()
-        elif sabnzbd.MACOS:
-            # macOS
-            mem_bytes = get_macos_memory()
-        else:
-            # Linux
-            mem_bytes = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        mem_bytes = get_memory()
 
         # Use 1/4th of available memory
         mem_bytes = mem_bytes / 4
@@ -774,10 +769,35 @@ def get_windows_memory() -> int:
     return stat.ullTotalPhys
 
 
-def get_macos_memory() -> float:
+def get_macos_memory() -> int:
     """Use system-call to extract total memory on macOS"""
-    system_output = run_command(["sysctl", "hw.memsize"])
-    return float(system_output.split()[1])
+    system_output = run_command(["sysctl", "-n", "hw.memsize"]).strip()
+    return int(system_output)
+
+
+def get_linux_memory() -> int:
+    """Find total memory on linux"""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) * 1024
+    except Exception:
+        pass
+    return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+
+
+def get_memory() -> int:
+    try:
+        if sabnzbd.WINDOWS:
+            return get_windows_memory()
+        elif sabnzbd.MACOS:
+            return get_macos_memory()
+        else:
+            return get_linux_memory()
+    except Exception:
+        pass
+    return 0
 
 
 @conditional_cache(cache_time=3600)
@@ -1653,6 +1673,17 @@ def subject_name_extractor(subject: str) -> str:
 
     # Return the subject
     return subject
+
+
+@contextmanager
+def acquire_timeout(lock: Union[threading.RLock, threading.Lock], timeout: float) -> Generator[bool, Any, None]:
+    """Try to acquire a lock with timeout"""
+    result = lock.acquire(timeout=timeout)
+    try:
+        yield result
+    finally:
+        if result:
+            lock.release()
 
 
 ##
