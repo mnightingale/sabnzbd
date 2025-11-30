@@ -22,26 +22,40 @@ sabnzbd.articlecache - Article cache handling
 import logging
 import threading
 import struct
+import time
 from typing import Collection
 
 import sabnzbd
 from sabnzbd.decorators import synchronized
-from sabnzbd.constants import GIGI, ANFO, ASSEMBLER_WRITE_THRESHOLD
-from sabnzbd.nzb import Article
+from sabnzbd.constants import (
+    GIGI,
+    ANFO,
+    ARTICLE_CACHE_UPPER_PERCENTAGE,
+    ARTICLE_CACHE_LOWER_PERCENTAGE,
+)
+from sabnzbd.nzb import Article, NzbFile, NZO_LOCK
+from sabnzbd.misc import to_units
 
-# Operations on the article table are handled via try/except.
+# Operations on the article table must be locked.
+ARTICLE_TABLE_LOCK = threading.RLock()
 # The counters need to be made atomic to ensure consistency.
 ARTICLE_COUNTER_LOCK = threading.RLock()
 
+_SECONDS_BETWEEN_FLUSHES = 0.5
 
-class ArticleCache:
+
+class ArticleCache(threading.Thread):
     def __init__(self):
+        super().__init__()
+        self.shutdown = False
         self.__cache_limit_org = 0
         self.__cache_limit = 0
         self.__cache_size = 0
         self.__article_table: dict[Article, bytes] = {}  # Dict of buffered articles
-
-        self.assembler_write_trigger: int = 1
+        self.__cache_size_cv: threading.Condition = threading.Condition(ARTICLE_COUNTER_LOCK)
+        self.__next_flush: float = 0
+        self.__cache_size_upper: int = 0
+        self.__cache_size_lower: int = 0
 
         # On 32 bit we only allow the user to set 1GB
         # For 64 bit we allow up to 4GB, in case somebody wants that
@@ -49,9 +63,53 @@ class ArticleCache:
         if sabnzbd.MACOS or sabnzbd.WINDOWS or (struct.calcsize("P") * 8) == 64:
             self.__cache_upper_limit = 4 * GIGI
 
-    def cache_info(self):
-        return ANFO(len(self.__article_table), abs(self.__cache_size), self.__cache_limit_org)
+    def stop(self):
+        self.shutdown = True
+        with self.__cache_size_cv:
+            self.__cache_size_cv.notify_all()
 
+    def __needs_flush(self) -> bool:
+        """
+        Should we flush the cache?
+        Only if direct write is supported and cache usage is over the upper limit.
+        Or downloader is paused and cache is not empty
+        """
+        return (
+            sabnzbd.cfg.direct_write.get()
+            and (self.__cache_size >= self.__cache_size_upper or sabnzbd.Downloader.paused and self.__cache_size)
+            and time.monotonic() > self.__next_flush
+        )
+
+    def run(self):
+        assembler = sabnzbd.Assembler.process
+
+        while True:
+            with self.__cache_size_cv:
+                self.__cache_size_cv.wait_for(
+                    lambda: self.shutdown or self.__needs_flush(),
+                    timeout=5.0,
+                )
+            if self.shutdown:
+                break
+
+            # Maybe Timeout
+            if not self.__needs_flush():
+                continue
+
+            self.__next_flush = time.monotonic() + _SECONDS_BETWEEN_FLUSHES
+            nzfs: set[NzbFile] = set()
+            with ARTICLE_TABLE_LOCK:
+                for article in self.__article_table:
+                    if article.nzf.type == "yenc":
+                        nzfs.add(article.nzf)
+            for nzf in nzfs:
+                logging.debug("Forcing write for %s", nzf.nzo.final_name)
+                assembler(nzf.nzo, nzf, force=True)
+
+    def cache_info(self):
+        return ANFO(len(self.__article_table), abs(self.__cache_size), self.__cache_limit)
+
+    @synchronized(ARTICLE_COUNTER_LOCK)
     def new_limit(self, limit: int):
         """Called when cache limit changes"""
         self.__cache_limit_org = limit
@@ -59,26 +117,30 @@ class ArticleCache:
             self.__cache_limit = self.__cache_upper_limit
         else:
             self.__cache_limit = min(limit, self.__cache_upper_limit)
-
-        # Set assembler_write_trigger to be the equivalent of ASSEMBLER_WRITE_THRESHOLD %
-        # of the total cache, assuming an article size of 750 000 bytes
-        self.assembler_write_trigger = int(self.__cache_limit * ASSEMBLER_WRITE_THRESHOLD / 100 / 750_000) + 1
-
+        self.__cache_size_upper = self.__cache_limit * ARTICLE_CACHE_UPPER_PERCENTAGE
+        self.__cache_size_lower = self.__cache_limit * ARTICLE_CACHE_LOWER_PERCENTAGE
         logging.debug(
-            "Assembler trigger = %d",
-            self.assembler_write_trigger,
+            "Article cache trigger upper:%s lower:%s",
+            to_units(self.__cache_size_upper),
+            to_units(self.__cache_size_lower),
         )
 
     @synchronized(ARTICLE_COUNTER_LOCK)
-    def reserve_space(self, data_size: int):
+    def reserve_space(self, data_size: int) -> bool:
         """Reserve space in the cache"""
-        self.__cache_size += data_size
+        if (usage := self.__cache_size + data_size) > self.__cache_limit:
+            return False
+        self.__cache_size = usage
+        self.__cache_size_cv.notify_all()
+        return True
 
     @synchronized(ARTICLE_COUNTER_LOCK)
     def free_reserved_space(self, data_size: int):
         """Remove previously reserved space"""
-        self.__cache_size -= data_size
+        self.__cache_size = max(0, self.__cache_size - data_size)
+        self.__cache_size_cv.notify_all()
 
+    @synchronized(ARTICLE_COUNTER_LOCK)
     def space_left(self) -> bool:
         """Is there space left in the set limit?"""
         return self.__cache_size < self.__cache_limit
@@ -91,7 +153,8 @@ class ArticleCache:
             return
 
         # Register article for bookkeeping in case the job is deleted
-        nzo.saved_articles.add(article)
+        with NZO_LOCK:
+            nzo.saved_articles.add(article)
 
         if article.lowest_partnum and not (article.nzf.import_finished or article.nzf.filename_checked):
             # Write the first-fetched articles to temporary file unless downloading
@@ -100,17 +163,11 @@ class ArticleCache:
             self.__flush_article_to_disk(article, data)
             return
 
-        if self.__cache_limit:
-            # Check if we exceed the limit
-            data_size = len(data)
-            self.reserve_space(data_size)
-            if self.space_left():
-                # Add new article to the cache
+        # Check if we exceed the limit
+        if self.__cache_limit and self.reserve_space(len(data)):
+            # Add new article to the cache
+            with ARTICLE_TABLE_LOCK:
                 self.__article_table[article] = data
-            else:
-                # Return the space and save to disk
-                self.free_reserved_space(data_size)
-                self.__flush_article_to_disk(article, data)
         else:
             # No data saved in memory, direct to disk
             self.__flush_article_to_disk(article, data)
@@ -120,51 +177,63 @@ class ArticleCache:
         data = None
         nzo = article.nzf.nzo
 
-        if article in self.__article_table:
-            try:
-                data = self.__article_table.pop(article)
-                self.free_reserved_space(len(data))
-            except KeyError:
-                # Could fail due the article already being deleted by purge_articles, for example
-                # when post-processing deletes the job while delayed articles still come in
-                logging.debug("Failed to load %s from cache, probably already deleted", article)
-                return data
+        with ARTICLE_TABLE_LOCK:
+            data = self.__article_table.pop(article, None)
+        if data:
+            self.free_reserved_space(len(data))
         elif article.art_id:
             data = sabnzbd.filesystem.load_data(
                 article.art_id, nzo.admin_path, remove=True, do_pickle=False, silent=True
             )
-        nzo.saved_articles.discard(article)
+        with NZO_LOCK:
+            nzo.saved_articles.discard(article)
         return data
 
     def flush_articles(self):
         logging.debug("Saving %s cached articles to disk", len(self.__article_table))
-        self.__cache_size = 0
-        while self.__article_table:
-            try:
+        while True:
+            with ARTICLE_TABLE_LOCK:
+                if not self.__article_table:
+                    break
                 article, data = self.__article_table.popitem()
-                self.__flush_article_to_disk(article, data)
-            except KeyError:
-                # Could fail if already deleted by purge_articles or load_data
-                logging.debug("Failed to flush item from cache, probably already deleted or written to disk")
+            self.free_reserved_space(len(data))
+            self.__flush_article_to_disk(article, data)
 
     def purge_articles(self, articles: Collection[Article]):
         """Remove all saved articles, from memory and disk"""
         logging.debug("Purging %s articles from the cache/disk", len(articles))
         for article in articles:
-            if article in self.__article_table:
-                try:
-                    data = self.__article_table.pop(article)
-                    self.free_reserved_space(len(data))
-                except KeyError:
-                    # Could fail if already deleted by flush_articles or load_data
-                    logging.debug("Failed to flush %s from cache, probably already deleted or written to disk", article)
-            elif article.art_id:
-                sabnzbd.filesystem.remove_data(article.art_id, article.nzf.nzo.admin_path)
+            with ARTICLE_TABLE_LOCK:
+                # Could fail if already deleted by flush_articles or load_data
+                data = self.__article_table.pop(article, None)
+            if data:
+                self.free_reserved_space(len(data))
+            else:
+                logging.debug("Failed to flush %s from cache, probably already deleted or written to disk", article)
+                if article.art_id:
+                    sabnzbd.filesystem.remove_data(article.art_id, article.nzf.nzo.admin_path)
 
-    @staticmethod
-    def __flush_article_to_disk(article: Article, data):
+    def __flush_article_to_disk(self, article: Article, data):
         # Save data, but don't complain when destination folder is missing
         # because this flush may come after completion of the NZO.
-        sabnzbd.filesystem.save_data(
-            data, article.get_art_id(), article.nzf.nzo.admin_path, do_pickle=False, silent=True
-        )
+        if self.__cache_limit:
+            # Give the cache a chance to recover
+            with self.__cache_size_cv:
+                self.__cache_size_cv.wait_for(
+                    lambda: self.shutdown or self.__cache_size <= self.__cache_size_lower, timeout=2.0
+                )
+
+        nzf = article.nzf
+        # Direct write to destination
+        if (
+            sabnzbd.cfg.direct_write.get()
+            and nzf.type == "yenc"
+            and nzf.prepare_filepath()
+            and sabnzbd.Assembler.assemble_article(article, data)
+        ):
+            with NZO_LOCK:
+                nzf.nzo.saved_articles.discard(article)
+            return
+
+        # Fallback to disk cache
+        sabnzbd.filesystem.save_data(data, article.get_art_id(), nzf.nzo.admin_path, do_pickle=False, silent=True)
