@@ -35,6 +35,8 @@ import ctypes
 import random
 from typing import Union, Any, Optional, BinaryIO
 
+from sabnzbd.utils.sparse import is_sparse_supported
+
 try:
     import win32api
     import win32file
@@ -1081,7 +1083,9 @@ def save_data(data: Any, _id: str, path: str, do_pickle: bool = True, silent: bo
                 time.sleep(0.1)
 
 
-def load_data(data_id: str, path: str, remove: bool = True, do_pickle: bool = True, silent: bool = False) -> Any:
+def load_data(
+    data_id: str, path: str, remove: bool = True, do_pickle: bool = True, silent: bool = False, mutable: bool = False
+) -> Any:
     """Read data from disk file"""
     path = os.path.join(path, data_id)
 
@@ -1100,6 +1104,9 @@ def load_data(data_id: str, path: str, remove: bool = True, do_pickle: bool = Tr
                 except UnicodeDecodeError:
                     # Could be Python 2 data that we can load using old encoding
                     data = pickle.load(data_file, encoding="latin1")
+            elif mutable:
+                data = bytearray(os.fstat(data_file.fileno()).st_size)
+                data_file.readinto(data)
             else:
                 data = data_file.read()
 
@@ -1222,7 +1229,7 @@ def directory_is_writable(test_dir: str) -> bool:
     return True
 
 
-def check_filesystem_capabilities(test_dir: str) -> bool:
+def check_filesystem_capabilities(test_dir: str, is_download_dir: bool = False) -> bool:
     """Checks if we can write long and unicode filenames to the given directory.
     If not on Windows, also check for special chars like slashes and :
     Returns True if all OK, otherwise False"""
@@ -1248,6 +1255,15 @@ def check_filesystem_capabilities(test_dir: str) -> bool:
         sabnzbd.misc.helpful_warning(
             T("%s is not writable with special character filenames. This can cause problems."), test_dir
         )
+        allgood = False
+
+    # sparse files allow efficient use of empty space in files
+    if is_download_dir and sabnzbd.cfg.direct_write.get() and not is_sparse_supported(test_dir):
+        sabnzbd.cfg.direct_write.set(False)
+
+        # Writing to correct file offsets will be disabled, and it won't be possible to flush the article cache
+        # directly to the destination file
+        sabnzbd.misc.helpful_warning(T("%s does not support sparse files. Disabling direct write mode."), test_dir)
         allgood = False
 
     return allgood
@@ -1367,6 +1383,50 @@ def pathbrowser(path: str, show_hidden: bool = False, show_files: bool = False) 
         )
 
     return file_list
+
+
+if sys.platform == "linux":
+
+    def write_at_offset(fd: int, data: memoryview, offset: int) -> int:
+        return os.pwrite(fd, data, offset)
+
+elif sys.platform == "darwin":
+    pwrite = sabnzbd.MACOSLIBC.pwrite
+    pwrite.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_longlong]
+    pwrite.restype = ctypes.c_ssize_t
+
+    def __pwrite_mac(fd: int, data, offset: int) -> int:
+        if isinstance(data, memoryview):
+            mv = data
+        else:
+            mv = memoryview(data)
+
+        # Make contiguous copy if needed
+        if not mv.contiguous:
+            mv = memoryview(bytearray(mv))
+
+        # Make writable copy if needed
+        if mv.readonly:
+            mv = memoryview(bytearray(mv))
+
+        buf = (ctypes.c_char * len(mv)).from_buffer(mv)
+        n = pwrite(fd, buf, len(mv), offset)
+        if n < 0:
+            errno = ctypes.get_errno()
+            raise OSError(errno, os.strerror(errno))
+        return n
+
+    def write_at_offset(fd: int, data: memoryview, offset: int) -> int:
+        return __pwrite_mac(fd, data, offset)
+
+else:
+
+    def write_at_offset(fd: int, data: memoryview, offset: int):
+        # Not implemented for Windows so fallback to os.lseek and os.write
+        # Must lock if writing from multiple threads
+        # Similar is possible with CreateFileW/WriteFile/Overlapped but more complicated
+        os.lseek(fd, offset, os.SEEK_SET)
+        return os.write(fd, data)
 
 
 def create_work_name(name: str) -> str:

@@ -495,6 +495,7 @@ api_logging = OptionBool("misc", "api_logging", True)
 html_login = OptionBool("misc", "html_login", True)
 disable_archive = OptionBool("misc", "disable_archive", False)
 warn_dupl_jobs = OptionBool("misc", "warn_dupl_jobs", False)
+direct_write = OptionBool("misc", "direct_write", True)
 
 keep_awake = OptionBool("misc", "keep_awake", True)
 tray_icon = OptionBool("misc", "tray_icon", True)
@@ -743,6 +744,7 @@ def new_limit():
     if sabnzbd.__INITIALIZED__:
         # Only update after full startup
         sabnzbd.ArticleCache.new_limit(cache_limit.get_int())
+        sabnzbd.Assembler.new_limit(sabnzbd.ArticleCache.cache_info().cache_limit)
 
 
 def guard_restart():

@@ -302,6 +302,7 @@ def initialize(pause_downloader=False, clean_up=False, repair=0):
     sabnzbd.NzbQueue.read_queue(repair)
     sabnzbd.Scheduler.analyse(pause_downloader)
     sabnzbd.ArticleCache.new_limit(cfg.cache_limit.get_int())
+    sabnzbd.Assembler.new_limit(sabnzbd.ArticleCache.cache_info().cache_limit)
 
     logging.info("All processes started")
     sabnzbd.RESTART_REQ = False
@@ -313,6 +314,9 @@ def start():
     if sabnzbd.__INITIALIZED__:
         logging.debug("Starting postprocessor")
         sabnzbd.PostProcessor.start()
+
+        logging.debug("Starting article cache")
+        sabnzbd.ArticleCache.start()
 
         logging.debug("Starting assembler")
         sabnzbd.Assembler.start()
@@ -379,6 +383,13 @@ def halt():
         sabnzbd.Assembler.stop()
         try:
             sabnzbd.Assembler.join(timeout=3)
+        except Exception:
+            pass
+
+        logging.debug("Stopping article cache")
+        sabnzbd.ArticleCache.stop()
+        try:
+            sabnzbd.ArticleCache.join(timeout=3)
         except Exception:
             pass
 
@@ -495,7 +506,7 @@ def delayed_startup_actions():
         logging.debug("Completed Download Folder %s is not on FAT", complete_dir)
 
     if filesystem.directory_is_writable(sabnzbd.cfg.download_dir.get_path()):
-        filesystem.check_filesystem_capabilities(sabnzbd.cfg.download_dir.get_path())
+        filesystem.check_filesystem_capabilities(sabnzbd.cfg.download_dir.get_path(), is_download_dir=True)
     if filesystem.directory_is_writable(sabnzbd.cfg.complete_dir.get_path()):
         filesystem.check_filesystem_capabilities(sabnzbd.cfg.complete_dir.get_path())
 

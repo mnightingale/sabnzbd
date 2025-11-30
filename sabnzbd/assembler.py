@@ -23,9 +23,11 @@ import os
 import queue
 import logging
 import re
+import sys
+import threading
 from threading import Thread
 import ctypes
-from typing import Optional
+from typing import Optional, NamedTuple
 import rarfile
 
 import sabnzbd
@@ -38,24 +40,81 @@ from sabnzbd.filesystem import (
     get_filename,
     has_unwanted_extension,
     get_basename,
+    write_at_offset,
 )
-from sabnzbd.constants import Status, GIGI
+from sabnzbd.constants import (
+    Status,
+    GIGI,
+    ASSEMBLER_WRITE_THRESHOLD,
+)
 import sabnzbd.cfg as cfg
-from sabnzbd.nzb import NzbFile, NzbObject
+from sabnzbd.nzb import NzbFile, NzbObject, Article
 import sabnzbd.par2file as par2file
+from sabnzbd.utils.sparse import sparse
+
+
+class AssemblerTask(NamedTuple):
+    nzo: Optional[NzbObject] = None
+    nzf: Optional[NzbFile] = None
+    file_done: bool = False
+    force: bool = False
+    direct_write: bool = False
 
 
 class Assembler(Thread):
     def __init__(self):
         super().__init__()
         self.max_queue_size: int = cfg.assembler_max_queue_size()
-        self.queue: queue.Queue[tuple[Optional[NzbObject], Optional[NzbFile], Optional[bool]]] = queue.Queue()
+        self.assembler_write_trigger: int = 1
+        self.queue: queue.Queue[AssemblerTask] = queue.Queue()
+        self.queued_lock = threading.Lock()
+        self.queued_nzf: set[NzbFile] = set()
+        self.queued_nzf_forced: set[NzbFile] = set()
 
     def stop(self):
-        self.queue.put((None, None, None))
+        self.queue.put(AssemblerTask())
 
-    def process(self, nzo: NzbObject, nzf: Optional[NzbFile] = None, file_done: Optional[bool] = None):
-        self.queue.put((nzo, nzf, file_done))
+    def new_limit(self, limit: int):
+        """Called when cache limit changes"""
+        # Set assembler_write_trigger to be the equivalent of ASSEMBLER_WRITE_THRESHOLD %
+        # of the total cache, assuming an article size of 750 000 bytes
+        self.assembler_write_trigger = int(limit * ASSEMBLER_WRITE_THRESHOLD / 100 / 750_000) + 1
+        logging.debug("Assembler trigger = %d", self.assembler_write_trigger)
+
+    def process(
+        self,
+        nzo: NzbObject = None,
+        nzf: Optional[NzbFile] = None,
+        file_done: bool = False,
+        force: bool = False,
+        article: Optional[Article] = None,
+        articles_left: Optional[int] = None,
+    ) -> None:
+        if nzf is None:
+            # post-proc
+            self.queue.put(AssemblerTask(nzo))
+        else:
+            direct_write = sabnzbd.cfg.direct_write.get() and nzf.type == "yenc"
+            if (
+                # Always queue if done
+                file_done
+                # non-direct_write queue if not already queued and at trigger
+                or (
+                    not direct_write
+                    and nzf not in self.queued_nzf
+                    and (
+                        (article.lowest_partnum and nzf.filename_checked and not nzf.import_finished)
+                        or (articles_left and (articles_left % self.assembler_write_trigger) == 0)
+                    )
+                )
+                # direct_write only if forced and not already force queued
+                or (direct_write and force and nzf not in self.queued_nzf_forced)
+            ):
+                with self.queued_lock:
+                    if force:
+                        self.queued_nzf_forced.add(nzf)
+                    self.queued_nzf.add(nzf)
+                    self.queue.put(AssemblerTask(nzo, nzf, file_done, force, direct_write))
 
     def queue_level(self) -> float:
         return self.queue.qsize() / self.max_queue_size
@@ -65,7 +124,7 @@ class Assembler(Thread):
             # Set NzbObject and NzbFile objects to None so references
             # from this thread do not keep the objects alive (see #1628)
             nzo = nzf = None
-            nzo, nzf, file_done = self.queue.get()
+            nzo, nzf, file_done, force, direct_write = self.queue.get()
             if not nzo:
                 logging.debug("Shutting down assembler")
                 break
@@ -79,7 +138,7 @@ class Assembler(Thread):
                 if filepath := nzf.prepare_filepath():
                     try:
                         logging.debug("Decoding part of %s", filepath)
-                        self.assemble(nzo, nzf, file_done)
+                        self.assemble(nzo, nzf, file_done, force, direct_write)
 
                         # Continue after partly written data
                         if not file_done:
@@ -122,6 +181,11 @@ class Assembler(Thread):
                     except Exception:
                         logging.error(T("Fatal error in Assembler"), exc_info=True)
                         break
+                    finally:
+                        with self.queued_lock:
+                            self.queued_nzf.discard(nzf)
+                            if force:
+                                self.queued_nzf_forced.discard(nzf)
             else:
                 sabnzbd.NzbQueue.remove(nzo.nzo_id, cleanup=False)
                 sabnzbd.PostProcessor.process(nzo)
@@ -162,51 +226,123 @@ class Assembler(Thread):
             sabnzbd.emailer.diskfull_mail()
 
     @staticmethod
-    def assemble(nzo: NzbObject, nzf: NzbFile, file_done: bool):
+    def assemble(nzo: NzbObject, nzf: NzbFile, file_done: bool, force: bool, direct_write: bool) -> None:
         """Assemble a NZF from its table of articles
         1) Partial write: write what we have
         2) Nothing written before: write all
         """
+        status_deleted = Status.DELETED
+        load_article = sabnzbd.ArticleCache.load_article
+        downloader = sabnzbd.Downloader
+        decodetable = nzf.decodetable
 
-        # We write large article-sized chunks, so we can safely skip the buffering of Python
-        with open(nzf.filepath, "ab", buffering=0) as fout:
-            for article in nzf.decodetable:
+        fd = Assembler.fd(nzf, direct_write)
+        empty = direct_write and os.fstat(fd).st_size == 0
+        skipped: bool = False  # have any articles been skipped
+
+        try:
+            # Resume assembly from where we got to previously
+            for idx in range(nzf.assembler_next_index, len(decodetable)):
+                article = decodetable[idx]
+
                 # Break if deleted during writing
-                if nzo.status is Status.DELETED:
+                if nzo.status is status_deleted:
+                    break
+
+                # When forced stop once reached an untried article unless paused
+                if force and not article.tries and not downloader.paused:
                     break
 
                 # Skip already written articles
                 if article.on_disk:
+                    if not skipped:
+                        nzf.assembler_next_index += 1
                     continue
 
-                # Write all decoded articles
-                if article.decoded:
-                    # Could be empty in case nzo was deleted
-                    if data := sabnzbd.ArticleCache.load_article(article):
-                        written = fout.write(data)
+                if empty and direct_write and article.file_size:
+                    with nzf.file_lock:
+                        # Check size and make sparse under lock
+                        if os.fstat(fd).st_size == 0:
+                            try:
+                                sparse(fd, article.file_size)
+                            except OSError:
+                                logging.debug("Sparse call failed for %s", nzf.filepath)
+                                direct_write = False
+                    empty = False
 
-                        # In raw/non-buffered mode fout.write may not write everything requested:
-                        # https://docs.python.org/3/library/io.html?highlight=write#io.RawIOBase.write
-                        while written < len(data):
-                            written += fout.write(data[written:])
-
-                        nzf.update_crc32(article.crc32, len(data))
-                        article.on_disk = True
-                    else:
-                        logging.info("No data found when trying to write %s", article)
-                else:
+                # stop if next piece not yet decoded
+                if not article.decoded:
                     # If the article was not decoded but the file
                     # is done, it is just a missing piece, so keep writing
                     if file_done:
+                        if not skipped:
+                            nzf.assembler_next_index += 1
+                        continue
+                    # We reach an article that was not decoded
+                    if force:
+                        skipped = True
+                        continue
+                    break
+
+                # Could be empty in case nzo was deleted
+                data = load_article(article)
+                if not data:
+                    if file_done:
+                        nzf.assembler_next_index += 1
+                        continue
+                    if force:
+                        skipped = True
                         continue
                     else:
-                        # We reach an article that was not decoded
-                        break
+                        logging.info("No data found when trying to write %s", article)
+                    break
+
+                if direct_write:
+                    Assembler.write_at_offset(fd, nzf, article, data)
+                else:
+                    written = os.write(fd, data)
+                    # In raw/non-buffered mode os.write may not write everything requested:
+                    # https://docs.python.org/3/library/io.html?highlight=write#io.RawIOBase.write
+                    if written < len(data):
+                        mv = memoryview(data)
+                        while written < len(data):
+                            written += os.write(fd, mv[written:])
+                    nzf.update_crc32(article.crc32, len(data))
+                    article.on_disk = True
+
+                if not skipped:
+                    nzf.assembler_next_index += 1
+        finally:
+            os.close(fd)
 
         # Final steps
         if file_done:
             set_permissions(nzf.filepath)
             nzf.assembled = True
+
+    @staticmethod
+    def assemble_article(article: Article, data: bytearray) -> bool:
+        """Write a single article to disk"""
+        nzf = article.nzf
+        direct_write = sabnzbd.cfg.direct_write.get() and nzf.type == "yenc"
+
+        if not direct_write:
+            return False
+
+        with nzf.file_lock:
+            fd = Assembler.fd(nzf, True)
+            try:
+                if article.file_size and os.fstat(fd).st_size == 0:
+                    try:
+                        sparse(fd, article.file_size)
+                    except OSError:
+                        logging.debug("Sparse call failed for %s size %d", nzf.filename, article.file_size)
+                        return False
+                Assembler.write_at_offset(fd, nzf, article, data)
+            finally:
+                os.close(fd)
+
+        return True
 
     @staticmethod
     def check_encrypted_and_unwanted(nzo: NzbObject, nzf: NzbFile):
@@ -244,6 +380,31 @@ class Assembler(Thread):
                 logging.debug("Unwanted extension ... aborting")
                 nzo.fail_msg = T("Aborted, unwanted extension detected")
                 sabnzbd.NzbQueue.end_job(nzo)
+
+    @staticmethod
+    def write_at_offset(fd: int, nzf: NzbFile, article: Article, data: bytearray):
+        mv = memoryview(data)
+        written = 0
+        while written < len(data):
+            if sys.platform == "linux" or sys.platform == "darwin":
+                written += write_at_offset(fd, mv[written:], article.data_begin + written)
+            else:
+                # Fallback to os.lseek + os.write so need to lock
+                with nzf.file_lock:
+                    written += write_at_offset(fd, mv[written:], article.data_begin + written)
+        nzf.update_crc32(article.crc32, len(data))
+        article.on_disk = True
+
+    @staticmethod
+    def fd(nzf: NzbFile, direct_write: bool) -> int:
+        """Open file for nzf"""
+        with nzf.file_lock:
+            if direct_write:
+                flags = os.O_CREAT | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+            else:
+                flags = os.O_CREAT | os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0)
+            fd = os.open(nzf.filepath, flags, 0o644)
+            return fd
 
 
 RE_SUBS = re.compile(r"\W+sub|subs|subpack|subtitle|subtitles(?![a-z])", re.I)
