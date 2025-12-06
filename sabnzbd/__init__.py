@@ -322,6 +322,9 @@ def start():
         logging.debug("Starting article cache")
         sabnzbd.ArticleCache.start()
 
+        logging.debug("Starting bpsmeter")
+        sabnzbd.BPSMeter.start()
+
         logging.debug("Starting downloader")
         sabnzbd.Downloader.start()
 
@@ -377,6 +380,13 @@ def halt():
         sabnzbd.Downloader.stop()
         try:
             sabnzbd.Downloader.join(timeout=3)
+        except Exception:
+            pass
+
+        logging.debug("Stopping bpsmeter")
+        sabnzbd.BPSMeter.stop()
+        try:
+            sabnzbd.BPSMeter.join(timeout=3)
         except Exception:
             pass
 

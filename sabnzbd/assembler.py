@@ -211,14 +211,12 @@ class Assembler(Thread):
             self.diskspace_check(nzo, nzf)
 
         try:
-            logging.debug("Assembling %s", nzf.filename)
-
             # Prepare filepath
             if not (filepath := nzf.prepare_filepath()):
                 # could not prepare path (e.g. job removed). Skip.
                 return
 
-            # logging.debug("Decoding part of %s", filepath)
+            logging.debug("Decoding part of %s", filepath)
             self.assemble_nzf(nzo, nzf, file_done, force)
 
             # Continue after partly written data
@@ -270,12 +268,14 @@ class Assembler(Thread):
     def assemble_nzf(self, nzo: NzbObject, nzf: NzbFile, file_done: bool, force: bool) -> None:
         status_deleted = Status.DELETED
         load_article = sabnzbd.ArticleCache.load_article
+        downloader = sabnzbd.Downloader
         update_crc32 = nzf.update_crc32
         direct_write = sabnzbd.cfg.direct_write.get() and nzf.type == "yenc"
         decodetable = nzf.decodetable
 
         fd = self.get_fd(nzf, direct_write)
         empty = direct_write and os.fstat(fd).st_size == 0
+        skipped: bool = False
 
         # Resume assembly from where we got to previously
         for idx in range(self.nzf_next_index.get(nzf, 0), len(decodetable)):
@@ -284,12 +284,12 @@ class Assembler(Thread):
             if nzo.status is status_deleted:
                 break
 
-            # When forced stop once reached an untried article
-            if force and not article.tries:
+            # When forced stop once reached an untried article unless paused
+            if force and not article.tries and not downloader.paused:
                 break
 
             if article.on_disk:
-                if not force:
+                if not skipped:
                     self.nzf_next_index[nzf] = idx + 1
                 continue
 
@@ -324,10 +324,10 @@ class Assembler(Thread):
                     self.nzf_next_index[nzf] = idx + 1
                     continue
                 if force:
+                    skipped = True
                     continue
                 break
 
-            # write to correct file offset
             with nzf.file_lock:
                 if direct_write:
                     # Have to seek everytime because article cache may have flushed directly to disk
@@ -335,7 +335,6 @@ class Assembler(Thread):
                         os.lseek(fd, article.data_begin, os.SEEK_SET)
                     else:
                         os.lseek(fd, 0, os.SEEK_END)
-
                 mv = memoryview(data)
                 try:
                     while mv:
@@ -347,7 +346,7 @@ class Assembler(Thread):
             update_crc32(article.crc32, len(data))
             article.on_disk = True
 
-            if not force:
+            if not skipped:
                 self.nzf_next_index[nzf] = idx + 1
 
         if file_done:

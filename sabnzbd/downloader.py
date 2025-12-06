@@ -54,8 +54,8 @@ _PENALTY_VERYSHORT = 0.1  # Error 400 without cause clues
 
 # Wait this many seconds between checking idle servers for new articles or busy threads for timeout
 _SERVER_CHECK_DELAY = 0.5
-# Wait this many seconds between updates of the BPSMeter
-_BPSMETER_UPDATE_DELAY = 0.05
+# Wait this many seconds between checking of the assembler levels
+_ASSEMBLER_CHECK_DELAY = 0.05
 # How many articles should be prefetched when checking the next articles?
 _ARTICLE_PREFETCH = 20
 # Minimum expected size of TCP receive buffer
@@ -567,7 +567,7 @@ class Downloader(Thread):
         # Kick BPS-Meter to check quota
         BPSMeter = sabnzbd.BPSMeter
         BPSMeter.update()
-        next_bpsmeter_update = 0
+        next_assembler_check = 0
 
         # Check server expiration dates
         check_server_expiration()
@@ -710,10 +710,9 @@ class Downloader(Thread):
                         ):
                             DOWNLOADER_CV.wait()
 
-                if now > next_bpsmeter_update:
+                if now > next_assembler_check:
                     # Do not update statistics and check levels every loop
-                    BPSMeter.update()
-                    next_bpsmeter_update = now + _BPSMETER_UPDATE_DELAY
+                    next_assembler_check = now + _ASSEMBLER_CHECK_DELAY
                     self.check_assembler_levels()
 
                 if not events:
@@ -782,7 +781,7 @@ class Downloader(Thread):
         server = nw.server
 
         with DOWNLOADER_LOCK:
-            sabnzbd.BPSMeter.update(server.id, bytes_received)
+            sabnzbd.BPSMeter.add_server_bytes(server.id, bytes_received)
             if bytes_received > self.last_max_chunk_size:
                 self.last_max_chunk_size = bytes_received
             # Check speedlimit

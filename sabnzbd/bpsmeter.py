@@ -23,8 +23,10 @@ import time
 import logging
 import re
 from typing import Optional
+from threading import Thread, Event, RLock
 
 import sabnzbd
+from sabnzbd.decorators import synchronized
 from sabnzbd.constants import BYTES_FILE_NAME, KIBI
 from sabnzbd.misc import to_units
 import sabnzbd.cfg as cfg
@@ -36,6 +38,12 @@ BPS_LIST_MAX = 275
 
 RE_DAY = re.compile(r"^\s*(\d+)[^:]*")
 RE_HHMM = re.compile(r"(\d+):(\d+)\s*$")
+
+BPSMETER_LOCK = RLock()
+# Wait this many seconds between updates of the BPSMeter
+_BPSMETER_UPDATE_DELAY = 0.05
+# Continue updating for 5 seconds after last activity
+_DECAY_INTERVAL = 5.0
 
 
 def tomorrow(t: float) -> float:
@@ -90,8 +98,9 @@ def next_month(t: float) -> float:
     return time.mktime(ntime)
 
 
-class BPSMeter:
+class BPSMeter(Thread):
     __slots__ = (
+        "shutdown",
         "start_time",
         "log_time",
         "speed_log_time",
@@ -123,14 +132,19 @@ class BPSMeter:
         "q_minute",
         "quota_enabled",
         "quota_notifications_sent",
+        "_update_event",
+        "_last_activity_time",
     )
 
     def __init__(self):
+        super().__init__()
+        self.shutdown = False
         t = time.time()
         self.start_time = t
         self.log_time = t
         self.speed_log_time = t
         self.last_update = t
+        self._last_activity_time = 0  # Track when last activity occurred
         self.bps = 0.0
         self.bps_list: list[int] = []
 
@@ -163,6 +177,13 @@ class BPSMeter:
         self.q_minute = 0  # Quota reset minute
         self.quota_enabled: bool = True  # Scheduled quota enable/disable
         self.quota_notifications_sent: int = 0  # Track highest quota threshold that has been notified
+
+        self._update_event = Event()  # Event to signal activity
+
+    def stop(self):
+        """Stop the BPSMeter thread"""
+        self.shutdown = True
+        self._update_event.set()
 
     def save(self):
         """Save admin to disk"""
@@ -269,14 +290,42 @@ class BPSMeter:
             self.article_stats_tried[server][self.day_label] = 0
             self.article_stats_failed[server][self.day_label] = 0
 
-    def update(self, server: Optional[str] = None, amount: int = 0):
+    def add_server_bytes(self, server: str, amount: int):
         """Update counters for "server" with "amount" bytes"""
-        # Add amount to temporary storage
-        if server:
-            self.cached_amount[server] += amount
-            self.sum_cached_amount += amount
+        if amount <= 0:
             return
 
+        # Add amount to temporary storage
+        with BPSMETER_LOCK:
+            self.cached_amount[server] += amount
+            self.sum_cached_amount += amount
+            self._last_activity_time = time.time()
+
+        self._update_event.set()
+
+    def run(self):
+        while not self.shutdown:
+            time_since_activity = time.time() - self._last_activity_time
+
+            # Only perform updates if:
+            # 1. There's recent activity (within decay interval), OR
+            # 2. There's cached data to flush, OR
+            # 3. BPS needs to decay to zero
+            needs_update = time_since_activity < _DECAY_INTERVAL or self.sum_cached_amount > 0 or self.bps > 0.01
+
+            if needs_update:
+                self.update()
+                # Wait for next update interval or activity
+                self._update_event.wait(timeout=_BPSMETER_UPDATE_DELAY)
+                self._update_event.clear()
+            else:
+                # No activity, wait longer (or until signaled)
+                self._update_event.wait(timeout=1.0)
+                self._update_event.clear()
+
+    @synchronized(BPSMETER_LOCK)
+    def update(self):
+        """Update counters for "server" with "amount" bytes"""
         t = time.time()
 
         if t > self.end_of_day:
