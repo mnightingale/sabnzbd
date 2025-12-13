@@ -19,6 +19,7 @@
 sabnzbd.downloader - download engine
 """
 
+import inspect
 import logging
 import selectors
 from collections import deque
@@ -370,6 +371,15 @@ class Downloader(Thread):
     def add_socket(self, nw: NewsWrapper):
         """Add a socket to be watched for read or write availability"""
         if nw.nntp:
+            logging.info(
+                "%s@%s: Add socket (%d) - %s::%s:%d",
+                nw.thrdnum,
+                nw.server.host,
+                nw.nntp.fileno,
+                inspect.stack()[2].filename,
+                inspect.stack()[2].function,
+                inspect.stack()[2].lineno,
+            )
             try:
                 self.selector.register(nw.nntp.fileno, selectors.EVENT_READ | selectors.EVENT_WRITE, nw)
                 nw.selector_events = selectors.EVENT_READ | selectors.EVENT_WRITE
@@ -390,6 +400,15 @@ class Downloader(Thread):
     def remove_socket(self, nw: NewsWrapper):
         """Remove a socket to be watched"""
         if nw.nntp:
+            logging.info(
+                "%s@%s: Remove socket (%d) - %s::%s:%d",
+                nw.thrdnum,
+                nw.server.host,
+                nw.nntp.fileno,
+                inspect.stack()[2].filename,
+                inspect.stack()[2].function,
+                inspect.stack()[2].lineno,
+            )
             try:
                 self.selector.unregister(nw.nntp.fileno)
                 nw.selector_events = 0
@@ -754,9 +773,12 @@ class Downloader(Thread):
                 n, bytes_pending = nw.read(nbytes=bytes_pending)
                 bytes_received += n
             except ssl.SSLWantReadError:
-                return
-            except (ConnectionError, ConnectionAbortedError):
+                break
+            except ConnectionAbortedError:
                 # The ConnectionAbortedError is also thrown by sabctools in case of fatal SSL-layer problems
+                self.reset_nw(nw, "Server closed connection (sabctools)", wait=False)
+                return
+            except ConnectionError:
                 self.reset_nw(nw, "Server closed connection", wait=False)
                 return
             except BufferError:

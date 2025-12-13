@@ -309,7 +309,11 @@ class NewsWrapper:
         self.decoder.process(bytes_recv)
         for response in self.decoder:
             with self.lock:
-                article = self._response_queue.popleft()
+                try:
+                    article = self._response_queue.popleft()
+                except IndexError:
+                    logging.debug("Empty popleft!")
+                    continue
             if on_response:
                 on_response(response.status_code, response.message)
             self.on_response(response, article)
