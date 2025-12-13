@@ -23,6 +23,7 @@ import errno
 import socket
 import threading
 from collections import deque
+from random import uniform
 from selectors import EVENT_READ, EVENT_WRITE
 from threading import Thread
 import time
@@ -317,6 +318,9 @@ class NewsWrapper:
             if on_response:
                 on_response(response.status_code, response.message)
             self.on_response(response, article)
+
+        if uniform(0.0, 1.0) < 0.001:
+            raise ConnectionError("Server closed connection (fake)")
 
         # The SSL-layer might still contain data even though the socket does not. Another Downloader-loop would
         # not identify this socket anymore as it is not returned by select(). So, we have to forcefully trigger

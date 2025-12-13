@@ -778,8 +778,8 @@ class Downloader(Thread):
                 # The ConnectionAbortedError is also thrown by sabctools in case of fatal SSL-layer problems
                 self.reset_nw(nw, "Server closed connection (sabctools)", wait=False)
                 return
-            except ConnectionError:
-                self.reset_nw(nw, "Server closed connection", wait=False)
+            except ConnectionError as exc:
+                self.reset_nw(nw, "Server closed connection:" + exc.args[0], wait=False)
                 return
             except BufferError:
                 # The BufferError is thrown when exceeding maximum buffer size
