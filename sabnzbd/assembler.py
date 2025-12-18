@@ -23,6 +23,7 @@ import os
 import queue
 import logging
 import re
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -41,6 +42,7 @@ from sabnzbd.filesystem import (
     get_filename,
     has_unwanted_extension,
     get_basename,
+    write_at_offset,
 )
 from sabnzbd.constants import (
     Status,
@@ -265,11 +267,24 @@ class Assembler(Thread):
                 if force:
                     self.queued_nzf_forced.discard(nzf)
 
+    @staticmethod
+    def __write_at_offset(fd: int, nzf: NzbFile, article: Article, data: bytes):
+        mv = memoryview(data)
+        written = 0
+        while written < len(data):
+            if sys.platform == "linux" or sys.platform == "darwin":
+                written += write_at_offset(fd, mv[written:], article.data_begin + written)
+            else:
+                # Fallback to os.lseek + os.write
+                with nzf.file_lock:
+                    written += write_at_offset(fd, mv[written:], article.data_begin + written)
+        nzf.update_crc32(article.crc32, len(data))
+        article.on_disk = True
+
     def assemble_nzf(self, nzo: NzbObject, nzf: NzbFile, file_done: bool, force: bool) -> None:
         status_deleted = Status.DELETED
         load_article = sabnzbd.ArticleCache.load_article
         downloader = sabnzbd.Downloader
-        update_crc32 = nzf.update_crc32
         direct_write = sabnzbd.cfg.direct_write.get() and nzf.type == "yenc"
         decodetable = nzf.decodetable
 
@@ -299,9 +314,7 @@ class Assembler(Thread):
                         try:
                             sparse(fd, article.file_size)
                         except OSError:
-                            logging.debug(
-                                "Sparse call failed for %s size %d", nzf.filename, article.file_size, exc_info=True
-                            )
+                            logging.debug("Sparse call failed for %s size %d", nzf.filename, article.file_size)
                             direct_write = False
                 empty = False
 
@@ -313,8 +326,10 @@ class Assembler(Thread):
                     self.nzf_next_index[nzf] = idx + 1
                     continue
                 # We reach an article that was not decoded
-                if not force:
-                    break
+                if force:
+                    skipped = True
+                    continue
+                break
 
             # load and write article
             data = load_article(article)
@@ -328,23 +343,15 @@ class Assembler(Thread):
                     continue
                 break
 
-            with nzf.file_lock:
-                if direct_write:
-                    # Have to seek everytime because article cache may have flushed directly to disk
-                    if article.data_begin is not None:
-                        os.lseek(fd, article.data_begin, os.SEEK_SET)
-                    else:
-                        os.lseek(fd, 0, os.SEEK_END)
+            if direct_write:
+                Assembler.__write_at_offset(fd, nzf, article, data)
+            else:
                 mv = memoryview(data)
-                try:
-                    while mv:
-                        written = os.write(fd, mv)
-                        mv = mv[written:]
-                finally:
-                    mv.release()
-
-            update_crc32(article.crc32, len(data))
-            article.on_disk = True
+                written = 0
+                while written < len(data):
+                    written += os.write(fd, mv[written:])
+                nzf.update_crc32(article.crc32, len(data))
+                article.on_disk = True
 
             if not skipped:
                 self.nzf_next_index[nzf] = idx + 1
@@ -381,18 +388,7 @@ class Assembler(Thread):
                 except OSError:
                     logging.debug("Sparse call failed for %s size %d", nzf.filename, article.file_size)
                     return False
-
-            os.lseek(fd, article.data_begin, os.SEEK_SET)
-            mv = memoryview(data)
-            try:
-                while mv:
-                    written = os.write(fd, mv)
-                    mv = mv[written:]
-            finally:
-                mv.release()
-
-            update_crc32(article.crc32, len(data))
-            article.on_disk = True
+            Assembler.__write_at_offset(fd, nzf, article, data)
 
         return True
 
