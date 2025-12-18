@@ -31,6 +31,7 @@ from threading import Thread
 import ctypes
 from typing import Optional
 import rarfile
+from concurrent.futures import ThreadPoolExecutor
 
 import sabnzbd
 from sabnzbd.misc import get_all_passwords, match_str, SABRarFile, from_units, to_units, acquire_timeout
@@ -293,68 +294,69 @@ class Assembler(Thread):
         skipped: bool = False
 
         # Resume assembly from where we got to previously
-        for idx in range(self.nzf_next_index.get(nzf, 0), len(decodetable)):
-            article = decodetable[idx]
+        with ThreadPoolExecutor(max_workers=cfg.io_threads.get() if direct_write else 1) as pool:
+            for idx in range(self.nzf_next_index.get(nzf, 0), len(decodetable)):
+                article = decodetable[idx]
 
-            if nzo.status is status_deleted:
-                break
+                if nzo.status is status_deleted:
+                    break
 
-            # When forced stop once reached an untried article unless paused
-            if force and not article.tries and not downloader.paused:
-                break
+                # When forced stop once reached an untried article unless paused
+                if force and not article.tries and not downloader.paused:
+                    break
 
-            if article.on_disk:
+                if article.on_disk:
+                    if not skipped:
+                        self.nzf_next_index[nzf] = idx + 1
+                    continue
+
+                if empty and direct_write and article.file_size:
+                    with nzf.file_lock:
+                        if os.fstat(fd).st_size == 0:
+                            try:
+                                sparse(fd, article.file_size)
+                            except OSError:
+                                logging.debug("Sparse call failed for %s size %d", nzf.filename, article.file_size)
+                                direct_write = False
+                    empty = False
+
+                # stop if next piece not yet decoded
+                if not article.decoded:
+                    # If the article was not decoded but the file
+                    # is done, it is just a missing piece, so keep writing
+                    if file_done:
+                        self.nzf_next_index[nzf] = idx + 1
+                        continue
+                    # We reach an article that was not decoded
+                    if force:
+                        skipped = True
+                        continue
+                    break
+
+                # load and write article
+                data = load_article(article)
+                if not data:
+                    # no data present yet; don't remove pending, break unless finalizing
+                    if file_done:
+                        self.nzf_next_index[nzf] = idx + 1
+                        continue
+                    if force:
+                        skipped = True
+                        continue
+                    break
+
+                if direct_write:
+                    pool.submit(Assembler.__write_at_offset, fd, nzf, article, data)
+                else:
+                    mv = memoryview(data)
+                    written = 0
+                    while written < len(data):
+                        written += os.write(fd, mv[written:])
+                    nzf.update_crc32(article.crc32, len(data))
+                    article.on_disk = True
+
                 if not skipped:
                     self.nzf_next_index[nzf] = idx + 1
-                continue
-
-            if empty and direct_write and article.file_size:
-                with nzf.file_lock:
-                    if os.fstat(fd).st_size == 0:
-                        try:
-                            sparse(fd, article.file_size)
-                        except OSError:
-                            logging.debug("Sparse call failed for %s size %d", nzf.filename, article.file_size)
-                            direct_write = False
-                empty = False
-
-            # stop if next piece not yet decoded
-            if not article.decoded:
-                # If the article was not decoded but the file
-                # is done, it is just a missing piece, so keep writing
-                if file_done:
-                    self.nzf_next_index[nzf] = idx + 1
-                    continue
-                # We reach an article that was not decoded
-                if force:
-                    skipped = True
-                    continue
-                break
-
-            # load and write article
-            data = load_article(article)
-            if not data:
-                # no data present yet; don't remove pending, break unless finalizing
-                if file_done:
-                    self.nzf_next_index[nzf] = idx + 1
-                    continue
-                if force:
-                    skipped = True
-                    continue
-                break
-
-            if direct_write:
-                Assembler.__write_at_offset(fd, nzf, article, data)
-            else:
-                mv = memoryview(data)
-                written = 0
-                while written < len(data):
-                    written += os.write(fd, mv[written:])
-                nzf.update_crc32(article.crc32, len(data))
-                article.on_disk = True
-
-            if not skipped:
-                self.nzf_next_index[nzf] = idx + 1
 
         if file_done:
             # Close file descriptor

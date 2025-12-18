@@ -915,6 +915,7 @@ SPECIAL_VALUE_LIST = (
     "unrar_parameters",
     "outgoing_nntp_ip",
     "pipelining_requests",
+    "io_threads",
 )
 SPECIAL_LIST_LIST = (
     "rss_odd_titles",
