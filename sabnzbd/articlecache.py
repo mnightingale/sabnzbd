@@ -90,9 +90,14 @@ class ArticleCache(threading.Thread):
             with self.__cache_size_cv:
                 self.__cache_size_cv.wait_for(
                     lambda: self.shutdown or self.__needs_flush(),
+                    timeout=5.0,
                 )
             if self.shutdown:
                 break
+
+            # Timeout so is reach when paused and no further articles arrive
+            if not self.__needs_flush():
+                continue
 
             self.__next_flush = time.monotonic() + _SECONDS_BETWEEN_FLUSHES
             for article in self.__article_table.copy():
