@@ -35,8 +35,6 @@ import ctypes
 import random
 from typing import Union, Any, Optional, BinaryIO
 
-from sabnzbd.utils.sparse import is_sparse_supported
-
 try:
     import win32api
     import win32file
@@ -44,6 +42,7 @@ try:
 except ImportError:
     pass
 
+import sabctools
 import sabnzbd
 from sabnzbd.decorators import synchronized, conditional_cache
 from sabnzbd.constants import (
@@ -1478,3 +1477,35 @@ def nzf_cmp_name(nzf1, nzf2):
     if m2 and m2.group(1) == ".rar":
         nzf2_name = nzf2_name.replace(".rar", ".r//")
     return sabnzbd.misc.cmp(nzf1_name, nzf2_name)
+
+
+def is_sparse(path: str) -> bool:
+    """Check if a path is a sparse file"""
+    info = os.stat(path)
+    if sys.platform == "win32":
+        return bool(info.st_file_attributes & stat.FILE_ATTRIBUTE_SPARSE_FILE)
+
+    # Linux and macOS
+    if info.st_blocks * 512 < info.st_size:
+        return True
+
+    # Filesystem with SEEK_HOLE (ZFS)
+    try:
+        with open(path, "rb") as f:
+            pos = f.seek(0, os.SEEK_HOLE)
+            return pos < info.st_size
+    except (AttributeError, OSError):
+        pass
+
+    return False
+
+
+def is_sparse_supported(check_dir: str) -> bool:
+    """Check if a directory supports sparse files"""
+    sparse_file = tempfile.NamedTemporaryFile(dir=check_dir, delete=False)
+    try:
+        sabctools.sparse(sparse_file.fileno(), 64)
+        sparse_file.close()
+        return is_sparse(sparse_file.name)
+    finally:
+        os.unlink(sparse_file.name)

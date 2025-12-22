@@ -30,6 +30,7 @@ import ctypes
 from typing import Optional, NamedTuple
 import rarfile
 
+import sabctools
 import sabnzbd
 from sabnzbd.misc import get_all_passwords, match_str, SABRarFile
 from sabnzbd.filesystem import (
@@ -50,7 +51,6 @@ from sabnzbd.constants import (
 import sabnzbd.cfg as cfg
 from sabnzbd.nzb import NzbFile, NzbObject, Article
 import sabnzbd.par2file as par2file
-from sabnzbd.utils.sparse import sparse
 
 
 class AssemblerTask(NamedTuple):
@@ -264,7 +264,7 @@ class Assembler(Thread):
                         # Check size and make sparse under lock
                         if os.fstat(fd).st_size == 0:
                             try:
-                                sparse(fd, article.file_size)
+                                sabctools.sparse(fd, article.file_size)
                             except OSError:
                                 logging.debug("Sparse call failed for %s", nzf.filepath)
                                 direct_write = False
@@ -334,7 +334,7 @@ class Assembler(Thread):
             try:
                 if article.file_size and os.fstat(fd).st_size == 0:
                     try:
-                        sparse(fd, article.file_size)
+                        sabctools.sparse(fd, article.file_size)
                     except OSError:
                         logging.debug("Sparse call failed for %s size %d", nzf.filename, article.file_size)
                         return False
