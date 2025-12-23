@@ -268,6 +268,7 @@ class Assembler(Thread):
                             except OSError:
                                 logging.debug("Sparse call failed for %s", nzf.filepath)
                                 direct_write = False
+                                os.lseek(fd, 0, os.SEEK_END)
                     empty = False
 
                 # stop if next piece not yet decoded
