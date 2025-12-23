@@ -76,6 +76,7 @@ class ArticleCache(threading.Thread):
         """
         return (
             sabnzbd.cfg.direct_write.get()
+            and self.__cache_limit
             and (self.__cache_size > self.__cache_size_upper or sabnzbd.Downloader.paused and self.__cache_size)
             and time.monotonic() > self.__next_flush
         )
@@ -234,6 +235,7 @@ class ArticleCache(threading.Thread):
         # Direct write to destination
         if (
             sabnzbd.cfg.direct_write.get()
+            and self.__cache_limit
             and nzf.type == "yenc"
             and nzf.prepare_filepath()
             and sabnzbd.Assembler.assemble_article(article, data)

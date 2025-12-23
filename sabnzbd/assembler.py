@@ -94,7 +94,7 @@ class Assembler(Thread):
             # post-proc
             self.queue.put(AssemblerTask(nzo))
         else:
-            direct_write = sabnzbd.cfg.direct_write.get() and nzf.type == "yenc"
+            direct_write = sabnzbd.cfg.direct_write.get() and self.assembler_write_trigger > 1 and nzf.type == "yenc"
             if (
                 # Always queue if done
                 file_done
