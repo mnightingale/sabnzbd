@@ -285,10 +285,21 @@ class Assembler(Thread):
                     break
 
                 if fd is None:
-                    fd, direct_write = Assembler.open(nzf, direct_write, article.file_size)
+                    fd, direct_write = Assembler.open(nzf, direct_write and article.can_direct_write, article.file_size)
                     if force and skipped and not direct_write:
                         # Abort a forced direct write if the article is not suitable for direct write; will write when file_done
+                        if file_done:
+                            os.lseek(fd, 0, os.SEEK_END)
+                        else:
+                            break
+                elif direct_write and not article.can_direct_write:
+                    # Opened for direct write but encountered an invalid article; revert to append mode
+                    if force and skipped:
+                        # Abort if skipped an article not yet decoded
                         break
+                    if file_done:
+                        os.lseek(fd, 0, os.SEEK_END)
+                    direct_write = False
 
                 if direct_write:
                     Assembler.write_at_offset(fd, nzf, article, data)
