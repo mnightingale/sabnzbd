@@ -307,15 +307,7 @@ class Assembler(Thread):
                 if direct_write:
                     Assembler.write_at_offset(fd, nzf, article, data)
                 else:
-                    written = os.write(fd, data)
-                    # In raw/non-buffered mode os.write may not write everything requested:
-                    # https://docs.python.org/3/library/io.html?highlight=write#io.RawIOBase.write
-                    if written < len(data):
-                        mv = memoryview(data)
-                        while written < len(data):
-                            written += os.write(fd, mv[written:])
-                    nzf.update_crc32(article.crc32, len(data))
-                    article.on_disk = True
+                    Assembler.write_append(fd, nzf, article, data)
 
                 if not skipped:
                     nzf.assembler_next_index += 1
@@ -388,6 +380,7 @@ class Assembler(Thread):
 
     @staticmethod
     def write_at_offset(fd: int, nzf: NzbFile, article: Article, data: bytearray):
+        """Write data at position in a file"""
         mv = memoryview(data)
         written = 0
         while written < len(data):
@@ -397,6 +390,22 @@ class Assembler(Thread):
                 # Fallback to os.lseek + os.write so need to lock
                 with nzf.file_lock:
                     written += write_at_offset(fd, mv[written:], article.data_begin + written)
+        nzf.update_crc32(article.crc32, len(data))
+        article.on_disk = True
+
+    @staticmethod
+    def write_append(fd: int, nzf: NzbFile, article: Article, data: bytearray):
+        """
+        Append data to the end of the file
+        Assumes position is already at the end of the file.
+        """
+        written = os.write(fd, data)
+        # In raw/non-buffered mode os.write may not write everything requested:
+        # https://docs.python.org/3/library/io.html?highlight=write#io.RawIOBase.write
+        if written < len(data):
+            mv = memoryview(data)
+            while written < len(data):
+                written += os.write(fd, mv[written:])
         nzf.update_crc32(article.crc32, len(data))
         article.on_disk = True
 
