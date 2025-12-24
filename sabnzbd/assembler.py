@@ -236,8 +236,7 @@ class Assembler(Thread):
         downloader = sabnzbd.Downloader
         decodetable = nzf.decodetable
 
-        fd = Assembler.fd(nzf, direct_write)
-        empty = direct_write and os.fstat(fd).st_size == 0
+        fd: Optional[int] = None
         skipped: bool = False  # have any articles been skipped
 
         try:
@@ -259,24 +258,6 @@ class Assembler(Thread):
                         nzf.assembler_next_index += 1
                     continue
 
-                if empty and direct_write:
-                    if article.can_direct_write:
-                        with nzf.file_lock:
-                            try:
-                                # Check size and make sparse under lock
-                                if os.fstat(fd).st_size == 0:
-                                    sabctools.sparse(fd, article.file_size)
-                            except OSError:
-                                logging.debug("Sparse call failed for %s", nzf.filepath)
-                                direct_write = False
-                                os.lseek(fd, 0, os.SEEK_END)
-                    else:
-                        # Revert to append mode
-                        direct_write = False
-                        os.lseek(fd, 0, os.SEEK_END)
-
-                    empty = False
-
                 # stop if next piece not yet decoded
                 if not article.decoded:
                     # If the article was not decoded but the file
@@ -295,7 +276,6 @@ class Assembler(Thread):
                 data = load_article(article)
                 if not data:
                     if file_done:
-                        nzf.assembler_next_index += 1
                         continue
                     if force:
                         skipped = True
@@ -303,6 +283,12 @@ class Assembler(Thread):
                     else:
                         logging.info("No data found when trying to write %s", article)
                     break
+
+                if fd is None:
+                    fd, direct_write = Assembler.open(nzf, direct_write, article.file_size)
+                    if force and skipped and not direct_write:
+                        # Abort a forced direct write if the article is not suitable for direct write; will write when file_done
+                        break
 
                 if direct_write:
                     Assembler.write_at_offset(fd, nzf, article, data)
@@ -312,7 +298,8 @@ class Assembler(Thread):
                 if not skipped:
                     nzf.assembler_next_index += 1
         finally:
-            os.close(fd)
+            if fd is not None:
+                os.close(fd)
 
         # Final steps
         if file_done:
@@ -325,20 +312,14 @@ class Assembler(Thread):
         if not sabnzbd.cfg.direct_write.get() and article.can_direct_write:
             return False
         nzf = article.nzf
-
         with nzf.file_lock:
-            fd = Assembler.fd(nzf, True)
+            fd, direct_write = Assembler.open(nzf, True, article.file_size)
             try:
-                if article.file_size and os.fstat(fd).st_size == 0:
-                    try:
-                        sabctools.sparse(fd, article.file_size)
-                    except OSError:
-                        logging.debug("Sparse call failed for %s size %d", nzf.filename, article.file_size)
-                        return False
+                if not direct_write:
+                    return False
                 Assembler.write_at_offset(fd, nzf, article, data)
             finally:
                 os.close(fd)
-
         return True
 
     @staticmethod
@@ -410,7 +391,7 @@ class Assembler(Thread):
         article.on_disk = True
 
     @staticmethod
-    def fd(nzf: NzbFile, direct_write: bool) -> int:
+    def open(nzf: NzbFile, direct_write: bool, file_size: int) -> tuple[int, bool]:
         """Open file for nzf"""
         with nzf.file_lock:
             if direct_write:
@@ -418,7 +399,19 @@ class Assembler(Thread):
             else:
                 flags = os.O_CREAT | os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0)
             fd = os.open(nzf.filepath, flags, 0o644)
-            return fd
+            if direct_write:
+                if file_size:
+                    if os.fstat(fd).st_size == 0:
+                        try:
+                            sabctools.sparse(fd, file_size)
+                        except OSError:
+                            logging.debug("Sparse call failed for %s", nzf.filepath)
+                            direct_write = False
+                            os.lseek(fd, 0, os.SEEK_END)
+                else:
+                    direct_write = False
+                    os.lseek(fd, 0, os.SEEK_END)
+            return fd, direct_write
 
 
 RE_SUBS = re.compile(r"\W+sub|subs|subpack|subtitle|subtitles(?![a-z])", re.I)
