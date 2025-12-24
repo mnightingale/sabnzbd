@@ -102,7 +102,7 @@ class ArticleCache(threading.Thread):
 
             self.__next_flush = time.monotonic() + _SECONDS_BETWEEN_FLUSHES
             for article in self.__article_table.copy():
-                if article.nzf.type == "yenc" and article.nzf not in nzfs and article.nzf.prepare_filepath():
+                if article.can_direct_write:
                     nzfs.add(article.nzf)
             for nzf in nzfs:
                 logging.debug("Forcing write of %s", nzf.filepath)
@@ -236,8 +236,7 @@ class ArticleCache(threading.Thread):
         if (
             sabnzbd.cfg.direct_write.get()
             and self.__cache_limit
-            and nzf.type == "yenc"
-            and nzf.prepare_filepath()
+            and article.can_direct_write
             and sabnzbd.Assembler.assemble_article(article, data)
         ):
             with NZO_LOCK:

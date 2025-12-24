@@ -259,16 +259,22 @@ class Assembler(Thread):
                         nzf.assembler_next_index += 1
                     continue
 
-                if empty and direct_write and article.file_size:
-                    with nzf.file_lock:
-                        # Check size and make sparse under lock
-                        if os.fstat(fd).st_size == 0:
+                if empty and direct_write:
+                    if article.can_direct_write:
+                        with nzf.file_lock:
                             try:
-                                sabctools.sparse(fd, article.file_size)
+                                # Check size and make sparse under lock
+                                if os.fstat(fd).st_size == 0:
+                                    sabctools.sparse(fd, article.file_size)
                             except OSError:
                                 logging.debug("Sparse call failed for %s", nzf.filepath)
                                 direct_write = False
                                 os.lseek(fd, 0, os.SEEK_END)
+                    else:
+                        # Revert to append mode
+                        direct_write = False
+                        os.lseek(fd, 0, os.SEEK_END)
+
                     empty = False
 
                 # stop if next piece not yet decoded
@@ -324,11 +330,9 @@ class Assembler(Thread):
     @staticmethod
     def assemble_article(article: Article, data: bytearray) -> bool:
         """Write a single article to disk"""
-        nzf = article.nzf
-        direct_write = sabnzbd.cfg.direct_write.get() and nzf.type == "yenc"
-
-        if not direct_write:
+        if not sabnzbd.cfg.direct_write.get() and article.can_direct_write:
             return False
+        nzf = article.nzf
 
         with nzf.file_lock:
             fd = Assembler.fd(nzf, True)
