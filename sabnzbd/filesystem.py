@@ -1438,7 +1438,7 @@ def nzf_cmp_name(nzf1, nzf2):
 def is_sparse(path: str) -> bool:
     """Check if a path is a sparse file"""
     info = os.stat(path)
-    if sys.platform == "win32":
+    if sabnzbd.WINDOWS:
         return bool(info.st_file_attributes & stat.FILE_ATTRIBUTE_SPARSE_FILE)
 
     # Linux and macOS
