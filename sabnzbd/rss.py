@@ -346,7 +346,7 @@ class RSSReader:
         *,
         entry: "NormalisedEntry",
         jobs: dict,
-        filters: FeedConfig,
+        filters: "FeedConfig",
         first: bool,
         download: bool,
         force: bool,
