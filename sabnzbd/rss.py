@@ -565,7 +565,7 @@ class NormalisedEntry:
     episode: int
 
     @classmethod
-    def from_feed_entry(cls, entry: feedparser.FeedParserDict) -> Optional[NormalisedEntry]:
+    def from_feed_entry(cls, entry: feedparser.FeedParserDict) -> Optional["NormalisedEntry"]:
         """Build NormalisedEntry from feedparser entry"""
         link, infourl, category, size, age, season, episode = cls._get_link(entry)
         if link is None:
@@ -582,7 +582,7 @@ class NormalisedEntry:
         )
 
     @classmethod
-    def from_job_entry(cls, link: str, jobs: dict) -> NormalisedEntry:
+    def from_job_entry(cls, link: str, jobs: dict) -> "NormalisedEntry":
         """Build NormalisedEntry from an existing job (readout=False)"""
         job = jobs.get(link, {})
         category = job.get("orgcat") or None
