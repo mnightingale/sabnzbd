@@ -1384,50 +1384,6 @@ def pathbrowser(path: str, show_hidden: bool = False, show_files: bool = False) 
     return file_list
 
 
-if sys.platform == "linux":
-
-    def write_at_offset(fd: int, data: memoryview, offset: int) -> int:
-        return os.pwrite(fd, data, offset)
-
-elif sys.platform == "darwin":
-    pwrite = sabnzbd.MACOSLIBC.pwrite
-    pwrite.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_longlong]
-    pwrite.restype = ctypes.c_ssize_t
-
-    def __pwrite_mac(fd: int, data, offset: int) -> int:
-        if isinstance(data, memoryview):
-            mv = data
-        else:
-            mv = memoryview(data)
-
-        # Make contiguous copy if needed
-        if not mv.contiguous:
-            mv = memoryview(bytearray(mv))
-
-        # Make writable copy if needed
-        if mv.readonly:
-            mv = memoryview(bytearray(mv))
-
-        buf = (ctypes.c_char * len(mv)).from_buffer(mv)
-        n = pwrite(fd, buf, len(mv), offset)
-        if n < 0:
-            errno = ctypes.get_errno()
-            raise OSError(errno, os.strerror(errno))
-        return n
-
-    def write_at_offset(fd: int, data: memoryview, offset: int) -> int:
-        return __pwrite_mac(fd, data, offset)
-
-else:
-
-    def write_at_offset(fd: int, data: memoryview, offset: int):
-        # Not implemented for Windows so fallback to os.lseek and os.write
-        # Must lock if writing from multiple threads
-        # Similar is possible with CreateFileW/WriteFile/Overlapped but more complicated
-        os.lseek(fd, offset, os.SEEK_SET)
-        return os.write(fd, data)
-
-
 def create_work_name(name: str) -> str:
     """Remove ".nzb" and ".par(2)" and sanitize, skip URL's"""
     if name.find("://") < 0:

@@ -23,7 +23,6 @@ import os
 import queue
 import logging
 import re
-import sys
 import threading
 from threading import Thread
 import ctypes
@@ -41,7 +40,6 @@ from sabnzbd.filesystem import (
     get_filename,
     has_unwanted_extension,
     get_basename,
-    write_at_offset,
 )
 from sabnzbd.constants import (
     Status,
@@ -373,15 +371,25 @@ class Assembler(Thread):
     @staticmethod
     def write_at_offset(fd: int, nzf: NzbFile, article: Article, data: bytearray):
         """Write data at position in a file"""
-        mv = memoryview(data)
-        written = 0
-        while written < len(data):
-            if sys.platform == "linux" or sys.platform == "darwin":
-                written += write_at_offset(fd, mv[written:], article.data_begin + written)
-            else:
-                # Fallback to os.lseek + os.write so need to lock
-                with nzf.file_lock:
-                    written += write_at_offset(fd, mv[written:], article.data_begin + written)
+        if sabnzbd.WINDOWS:
+            # Not implemented on Windows so fallback to os.lseek and os.write
+            # Must lock since it is possible to write from multiple threads (assembler + downloader)
+            with nzf.file_lock:
+                os.lseek(fd, article.data_begin, os.SEEK_SET)
+                written = os.write(fd, data)
+        else:
+            written = os.pwrite(fd, data, article.data_begin)
+        # In raw/non-buffered mode os.write may not write everything requested:
+        # https://docs.python.org/3/library/io.html?highlight=write#io.RawIOBase.write
+        if written < len(data):
+            mv = memoryview(data)
+            while written < len(data):
+                if sabnzbd.WINDOWS:
+                    with nzf.file_lock:
+                        os.lseek(fd, article.data_begin + written, os.SEEK_SET)
+                        written += os.write(fd, mv[written:])
+                else:
+                    written += os.pwrite(fd, mv[written:], article.data_begin + written)
         nzf.update_crc32(article.crc32, len(data))
         article.on_disk = True
 
