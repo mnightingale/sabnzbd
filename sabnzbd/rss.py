@@ -192,7 +192,7 @@ class RSSReader:
 
     def configure_rss(
         self, feed: str, ignore_first: bool
-    ) -> tuple[list[str], Optional[FeedConfig], bool, dict, Optional[str]]:
+    ) -> tuple[list[str], Optional["FeedConfig"], bool, dict, Optional[str]]:
         """Prepare configuration and state for a feed run.
 
         Returns (uris, filters, first, jobs, error_message).
