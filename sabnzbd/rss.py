@@ -344,14 +344,14 @@ class RSSReader:
     @staticmethod
     def _evaluate_entry(
         *,
-        entry: NormalisedEntry,
+        entry: "NormalisedEntry",
         jobs: dict,
         filters: FeedConfig,
         first: bool,
         download: bool,
         force: bool,
         readout: bool,
-    ) -> tuple[Optional[FeedEvaluation], Optional[bool], Optional[bool]]:
+    ) -> tuple[Optional["FeedEvaluation"], Optional[bool], Optional[bool]]:
         """Evaluate a normalised entry against filters
 
         Returns a tuple (evaluation, should_download, star) or None if the entry should be skipped.
@@ -380,7 +380,7 @@ class RSSReader:
         return evaluation, should_download, star
 
     @staticmethod
-    def update_job_entry(jobs: dict, update: ResolvedEntry) -> None:
+    def update_job_entry(jobs: dict, update: "ResolvedEntry") -> None:
         """Update the stored job entry"""
         jobs[update.link] = {
             "title": update.title,
@@ -404,7 +404,7 @@ class RSSReader:
             jobs[update.link]["time_downloaded"] = time.localtime()
 
     @staticmethod
-    def enqueue_download(feed: str, update: ResolvedEntry) -> None:
+    def enqueue_download(feed: str, update: "ResolvedEntry") -> None:
         if not update.download:
             return
 
@@ -426,8 +426,8 @@ class RSSReader:
         *,
         feed: str,
         jobs: dict[str, dict],
-        entry: NormalisedEntry,
-        evaluation: FeedEvaluation,
+        entry: "NormalisedEntry",
+        evaluation: "FeedEvaluation",
         should_download: bool,
         is_starred: bool,
     ) -> bool:
