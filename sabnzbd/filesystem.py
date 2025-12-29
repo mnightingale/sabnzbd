@@ -1464,4 +1464,4 @@ def is_sparse_supported(check_dir: str) -> bool:
         sparse_file.close()
         return is_sparse(sparse_file.name)
     finally:
-        os.unlink(sparse_file.name)
+        os.remove(sparse_file.name)
