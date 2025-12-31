@@ -320,7 +320,7 @@ class DownloadFlowBasics(SABnzbdBaseTest):
         # Change connections
         port_inp = self.selenium_wrapper(self.driver.find_element, By.NAME, "connections")
         port_inp.clear()
-        port_inp.send_keys(1)
+        port_inp.send_keys(20)
 
         # Test server-check
         self.selenium_wrapper(self.driver.find_element, By.ID, "serverTest").click()
