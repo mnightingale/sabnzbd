@@ -78,7 +78,7 @@ class Assembler(Thread):
                 # Prepare filepath
                 if filepath := nzf.prepare_filepath():
                     try:
-                        logging.debug("Decoding part of %s", filepath)
+                        logging.debug("Decoding part of %s :: %r", filepath, nzo.final_name)
                         self.assemble(nzo, nzf, file_done)
 
                         # Continue after partly written data
@@ -123,11 +123,15 @@ class Assembler(Thread):
                         logging.error(T("Fatal error in Assembler"), exc_info=True)
                         break
                 else:
-                    logging.debug("No filepath assembler is ignoring: %r :: %r", nzo.nzo_id, nzf.filename)
+                    logging.debug(
+                        "No filepath assembler is ignoring: %r :: %r :: %r", nzo.nzo_id, nzo.final_name, nzf.filename
+                    )
 
             else:
                 logging.debug(
-                    "Assembler received only NZO = DONE ... but did we write anything? %r %r", nzo.nzo_id, nzo.filename
+                    "Assembler received only NZO = DONE ... but did we write anything? %r :: %r",
+                    nzo.nzo_id,
+                    nzo.final_name,
                 )
                 sabnzbd.NzbQueue.remove(nzo.nzo_id, cleanup=False)
                 sabnzbd.PostProcessor.process(nzo)

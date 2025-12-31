@@ -278,7 +278,9 @@ class NewsWrapper:
             sabnzbd.Downloader.decode(article, response)
 
             if sabnzbd.LOG_ALL:
-                logging.debug("Thread %s@%s: %s done", self.thrdnum, server.host, article.article)
+                logging.debug(
+                    "Thread %s@%s: %s done %r", self.thrdnum, server.host, article.article, article.nzf.nzo.final_name
+                )
 
     def read(
         self,
