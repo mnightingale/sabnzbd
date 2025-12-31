@@ -398,8 +398,6 @@ class NewsWrapper:
                     and (not server.active or server.restart or not self.timeout or time.time() > self.timeout)
                 ):
                     # Make socket available again
-                    server.busy_threads.discard(self)
-                    server.idle_threads.add(self)
                     sabnzbd.Downloader.remove_socket(self)
 
         except (BlockingIOError, ssl.SSLWantWriteError):

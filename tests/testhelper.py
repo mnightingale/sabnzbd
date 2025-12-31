@@ -21,6 +21,7 @@ tests.testhelper - Basic helper functions
 import io
 import os
 import time
+import uuid
 from http.client import RemoteDisconnected
 from typing import BinaryIO, Optional
 
@@ -336,6 +337,10 @@ class DownloadFlowBasics(SABnzbdBaseTest):
         # Verify if the server was setup before we start
         self.is_server_configured()
 
+        # Delete all jobs from queue and history
+        for mode in ("queue", "history"):
+            get_api_result(mode=mode, extra_arguments={"name": "delete", "value": "all", "del_files": 1})
+
         # Create NZB
         nzb_path = create_nzb(nzb_dir)
 
@@ -343,41 +348,38 @@ class DownloadFlowBasics(SABnzbdBaseTest):
         if dir_name_as_job_name:
             test_job_name = os.path.basename(nzb_dir)
         else:
-            test_job_name = "testfile_%s" % time.time()
-        api_result = get_api_result("addlocalfile", extra_arguments={"name": nzb_path, "nzbname": test_job_name})
-        assert api_result["status"]
+            test_job_name = "testfile_%s" % uuid.uuid4()
+        job = get_api_result("addlocalfile", extra_arguments={"name": nzb_path, "nzbname": test_job_name})
+        assert job["nzo_ids"]
+        assert job["status"]
 
         # Remove NZB-file
         os.remove(nzb_path)
 
-        # See how it's doing
-        self.open_page("http://%s:%s/" % (SAB_HOST, SAB_PORT))
-
-        # We wait for 20 seconds to let it complete
+        # Wait for the job to be removed and appear in the history
         for _ in range(20):
             try:
-                # Locate status of our job
-                status_text = self.driver.find_element(
-                    By.XPATH,
-                    (
-                        '//div[@id="history-tab"]//tr[td/div/span[contains(text(), "%s")]]/td[contains(@class, "status")]'
-                        % test_job_name
-                    ),
-                ).text
-                # Always sleep to give it some time
-                time.sleep(1)
-                if status_text == "Completed":
-                    break
-            except WebDriverException:
+                queue = get_api_result(mode="queue", extra_arguments={"nzo_ids": job["nzo_ids"][0]})["queue"]
+                assert not queue["slots"]
+                history = get_api_result(mode="history", extra_arguments={"nzo_ids": job["nzo_ids"][0]})["history"]
+                assert history["slots"][0]["nzo_id"] == job["nzo_ids"][0]
+                assert history["slots"][0]["status"] == "Completed"
+                completed_dir = history["slots"][0]["storage"]
+                assert completed_dir  # has finished postproc
+                break
+            except (IndexError, AssertionError):
                 time.sleep(1)
         else:
             pytest.fail("Download did not complete")
+
+        if os.path.isfile(completed_dir):
+            completed_dir = os.path.dirname(completed_dir)
 
         # Verify all files in the expected file_output are present among the completed files.
         # Sometimes par2 can also be included, but we accept that. For example when small
         # par2 files get assembled in after the download already finished (see #1509)
         for _ in range(10):
-            completed_files = filesystem.globber(os.path.join(SAB_COMPLETE_DIR, test_job_name), "*")
+            completed_files = filesystem.globber(completed_dir, "*")
             try:
                 for filename in file_output:
                     assert filename in completed_files
@@ -392,7 +394,10 @@ class DownloadFlowBasics(SABnzbdBaseTest):
 
         # Verify if the garbage collection works (see #1628)
         # We need to give it a second to calm down and clear the variables
-        time.sleep(2)
-        gc_results = get_api_result("gc_stats")["value"]
-        if gc_results:
+        for _ in range(5):
+            time.sleep(2)
+            gc_results = get_api_result("gc_stats")["value"]
+            if not gc_results:
+                break
+        else:
             pytest.fail(f"Objects were left in memory after the job finished! {gc_results}")
