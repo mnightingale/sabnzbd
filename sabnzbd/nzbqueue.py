@@ -744,6 +744,10 @@ class NzbQueue:
                 elif sabnzbd.par2file.has_par2_in_filename(nzf.filename):
                     # Broken par2 file, try to get another one
                     nzo.promote_par2(nzf)
+        else:
+            logging.debug(
+                "Not telling assembler %r article=%r articles_left=%d", nzo.nzo_id, article.art_id, articles_left
+            )
 
         # Save bookkeeping in case of crash
         if file_done and (nzo.next_save is None or time.time() > nzo.next_save):

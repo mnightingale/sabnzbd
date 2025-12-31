@@ -122,7 +122,13 @@ class Assembler(Thread):
                     except Exception:
                         logging.error(T("Fatal error in Assembler"), exc_info=True)
                         break
+                else:
+                    logging.debug("No filepath assembler is ignoring: %r :: %r", nzo.nzo_id, nzf.filename)
+
             else:
+                logging.debug(
+                    "Assembler received only NZO = DONE ... but did we write anything? %r %r", nzo.nzo_id, nzo.filename
+                )
                 sabnzbd.NzbQueue.remove(nzo.nzo_id, cleanup=False)
                 sabnzbd.PostProcessor.process(nzo)
 
