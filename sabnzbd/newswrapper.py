@@ -201,8 +201,6 @@ class NewsWrapper:
     def on_response(self, response: sabctools.NNTPResponse, article: Optional["sabnzbd.nzb.Article"]) -> None:
         """A response to a NNTP request is received"""
         self.concurrent_requests.release()
-        if sabnzbd.LOG_ALL:
-            logging.debug("Thread %s@%s: %s", self.thrdnum, self.server.host, "on_response")
         sabnzbd.Downloader.modify_socket(self, EVENT_READ | EVENT_WRITE)
         server = self.server
         article_done = response.status_code in (220, 222) and article
@@ -312,9 +310,6 @@ class NewsWrapper:
         if bytes_recv == 0:
             raise ConnectionError("Server closed connection")
 
-        if sabnzbd.LOG_ALL:
-            logging.debug("Thread %s@%s: %s", self.thrdnum, self.server.host, "read %d bytes" % bytes_recv)
-
         # Success, move timeout
         self.timeout = time.time() + self.server.timeout
 
@@ -393,8 +388,6 @@ class NewsWrapper:
                         self.send_buffer = command
                 else:
                     # Concurrency limit reached
-                    if sabnzbd.LOG_ALL:
-                        logging.debug("Thread %s@%s: %s", self.thrdnum, server.host, "Concurrency limit reached")
                     sabnzbd.Downloader.modify_socket(self, EVENT_READ)
             else:
                 # Is it safe to shut down this socket?

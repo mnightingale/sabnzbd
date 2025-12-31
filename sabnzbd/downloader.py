@@ -374,8 +374,6 @@ class Downloader(Thread):
     @synchronized(DOWNLOADER_LOCK)
     def add_socket(self, nw: NewsWrapper):
         """Add a socket to be watched for read or write availability"""
-        if sabnzbd.LOG_ALL:
-            logging.debug("Thread %s@%s: %s", nw.thrdnum, nw.server.host, "add_socket")
         if nw.nntp:
             try:
                 self.selector.register(nw.nntp.fileno, selectors.EVENT_READ | selectors.EVENT_WRITE, nw)
@@ -386,9 +384,6 @@ class Downloader(Thread):
     @synchronized(DOWNLOADER_LOCK)
     def modify_socket(self, nw: NewsWrapper, events: int):
         """Modify the events socket are watched for"""
-        if sabnzbd.LOG_ALL:
-            s = ("R" if events & selectors.EVENT_READ else "") + ("W" if events & selectors.EVENT_WRITE else "")
-            logging.debug("Thread %s@%s: %s", nw.thrdnum, nw.server.host, "modify_socket: %s" % s)
         if nw.nntp and nw.selector_events != events:
             try:
                 self.selector.modify(nw.nntp.fileno, events, nw)
@@ -399,8 +394,6 @@ class Downloader(Thread):
     @synchronized(DOWNLOADER_LOCK)
     def remove_socket(self, nw: NewsWrapper):
         """Remove a socket to be watched"""
-        if sabnzbd.LOG_ALL:
-            logging.debug("Thread %s@%s: %s", nw.thrdnum, nw.server.host, "remove_socket")
         if nw.nntp:
             try:
                 self.selector.unregister(nw.nntp.fileno)
