@@ -150,7 +150,7 @@ LINUX_POWER = powersup.HAVE_DBUS
 LOGFILE = None
 WEBLOGFILE = None
 GUIHANDLER = None
-LOG_ALL = False
+LOG_ALL = True
 WIN_SERVICE = None  # Instance of our Win32 Service Class
 BROWSER_URL = None
 
