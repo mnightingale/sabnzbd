@@ -317,6 +317,11 @@ class DownloadFlowBasics(SABnzbdBaseTest):
         port_inp.clear()
         port_inp.send_keys(SAB_NEWSSERVER_PORT)
 
+        # Change connections
+        port_inp = self.selenium_wrapper(self.driver.find_element, By.NAME, "connections")
+        port_inp.clear()
+        port_inp.send_keys(1)
+
         # Test server-check
         self.selenium_wrapper(self.driver.find_element, By.ID, "serverTest").click()
         self.wait_for_ajax()
