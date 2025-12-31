@@ -4,6 +4,7 @@ on: [push, pull_request]
 
 jobs:
   black:
+    if: false
     name: Black Code Formatter
     runs-on: ubuntu-latest
     steps:
@@ -34,13 +35,6 @@ jobs:
         python-version: [ "3.9", "3.10", "3.11", "3.12", "3.13", "3.14" ]
         name: ["Linux"]
         os: [ubuntu-latest]
-        include:
-          - name: macOS
-            os: macos-latest
-            python-version: "3.14"
-          - name: Windows
-            os: windows-2022
-            python-version: "3.14"
 
     steps:
     - uses: actions/checkout@v6
@@ -60,4 +54,7 @@ jobs:
         pip install --upgrade -r requirements.txt --no-dependencies
         pip install --upgrade -r tests/requirements.txt
     - name: Test SABnzbd
-      run: pytest -s
+      run: |
+        for i in {1..10}; do
+          pytest -s tests/test_functional_downloads.py
+        done

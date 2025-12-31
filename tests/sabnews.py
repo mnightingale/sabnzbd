@@ -33,7 +33,7 @@ from random import randint
 
 import sabctools
 
-logging.getLogger().setLevel(logging.INFO)
+logging.getLogger().setLevel(logging.DEBUG)
 
 
 # Expecting the following message-id:
@@ -149,9 +149,14 @@ async def serve_sabnews(hostname, port):
     # Start server
     logging.info("Starting SABNews on %s:%d", hostname, port)
 
-    server = await asyncio.start_server(connection_handler, hostname, port)
-    async with server:
-        await server.serve_forever()
+    try:
+        server = await asyncio.start_server(connection_handler, hostname, port)
+        async with server:
+            await server.serve_forever()
+    except Exception:
+        logging.info("SABNews exception", exc_info=True)
+
+    logging.info("Shutting down SABNews")
 
 
 def create_nzb(nzb_file=None, nzb_dir=None, metadata=None):
