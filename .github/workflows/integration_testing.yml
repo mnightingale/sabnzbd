@@ -56,5 +56,5 @@ jobs:
     - name: Test SABnzbd
       run: |
         for i in {1..10}; do
-          pytest -s tests/test_functional_downloads.py
+          pytest -s tests/test_functional_downloads.py tests/test_functional_sorting.py
         done
