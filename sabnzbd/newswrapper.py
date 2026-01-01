@@ -37,6 +37,7 @@ from sabnzbd.constants import DEF_NETWORKING_TIMEOUT, NNTP_BUFFER_SIZE, Status, 
 from sabnzbd.encoding import utob
 from sabnzbd.get_addrinfo import AddrInfo
 from sabnzbd.decorators import synchronized, DOWNLOADER_LOCK
+from sabnzbd.misc import caller_name
 
 # Set pre-defined socket timeout
 socket.setdefaulttimeout(DEF_NETWORKING_TIMEOUT)
@@ -437,6 +438,13 @@ class NewsWrapper:
 
         # Wait before re-using this newswrapper
         if wait:
+            logging.debug(
+                "Thread %s@%s: hard reset with wait %d from [%s]",
+                self.thrdnum,
+                self.server.host,
+                self.server.timeout,
+                caller_name(),
+            )
             # Reset due to error condition, use server timeout
             self.timeout = time.time() + self.server.timeout
         else:
