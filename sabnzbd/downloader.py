@@ -37,7 +37,7 @@ from sabnzbd.decorators import synchronized, NzbQueueLocker, DOWNLOADER_CV, DOWN
 from sabnzbd.newswrapper import NewsWrapper, NNTPPermanentError
 import sabnzbd.config as config
 import sabnzbd.cfg as cfg
-from sabnzbd.misc import from_units, helpful_warning, int_conv, MultiAddQueue
+from sabnzbd.misc import from_units, helpful_warning, int_conv, MultiAddQueue, caller_name
 from sabnzbd.get_addrinfo import get_fastest_addrinfo, AddrInfo
 from sabnzbd.constants import SOFT_ASSEMBLER_QUEUE_LIMIT
 
@@ -375,6 +375,8 @@ class Downloader(Thread):
     def add_socket(self, nw: NewsWrapper):
         """Add a socket to be watched for read or write availability"""
         if nw.nntp:
+            if sabnzbd.LOG_ALL:
+                logging.debug("Thread %s@%s: add_socket [%s]", nw.thrdnum, nw.server.host, caller_name())
             try:
                 self.selector.register(nw.nntp.fileno, selectors.EVENT_READ | selectors.EVENT_WRITE, nw)
                 nw.selector_events = selectors.EVENT_READ | selectors.EVENT_WRITE
@@ -385,6 +387,10 @@ class Downloader(Thread):
     def modify_socket(self, nw: NewsWrapper, events: int):
         """Modify the events socket are watched for"""
         if nw.nntp and nw.selector_events != events:
+            if sabnzbd.LOG_ALL:
+                logging.debug(
+                    "Thread %s@%s: modify_socket [%s] %r", nw.thrdnum, nw.server.host, caller_name(), nw.article
+                )
             try:
                 self.selector.modify(nw.nntp.fileno, events, nw)
                 nw.selector_events = events
@@ -395,6 +401,10 @@ class Downloader(Thread):
     def remove_socket(self, nw: NewsWrapper):
         """Remove a socket to be watched"""
         if nw.nntp:
+            if sabnzbd.LOG_ALL:
+                logging.debug(
+                    "Thread %s@%s: remove_socket [%s] %r", nw.thrdnum, nw.server.host, caller_name(), nw.article
+                )
             try:
                 self.selector.unregister(nw.nntp.fileno)
                 nw.selector_events = 0
@@ -606,17 +616,23 @@ class Downloader(Thread):
                                     # Already showed error
                                     self.reset_nw(nw)
                                 else:
-                                    key = self.selector.get_key(nw.nntp.fileno)
-                                    s = ("R" if key.events & selectors.EVENT_READ else "") + (
-                                        "W" if key.events & selectors.EVENT_WRITE else ""
-                                    )
-                                    logging.debug(
-                                        "Thread %s@%s: timed out events=%s, article=%r",
-                                        nw.thrdnum,
-                                        nw.server.host,
-                                        s,
-                                        nw.article,
-                                    )
+                                    try:
+                                        key = self.selector.get_key(nw.nntp.fileno)
+                                        s = ("R" if key.events & selectors.EVENT_READ else "") + (
+                                            "W" if key.events & selectors.EVENT_WRITE else ""
+                                        )
+                                        logging.debug(
+                                            "Thread %s@%s: timed out events=%s, article=%r",
+                                            nw.thrdnum,
+                                            nw.server.host,
+                                            s,
+                                            nw.article,
+                                        )
+                                        del key
+                                    except KeyError:
+                                        logging.debug(
+                                            "Thread %s@%s: Timed out = not registered!", nw.thrdnum, nw.server.host
+                                        )
                                     self.reset_nw(nw, "Timed out", warn=True)
                                 server.bad_cons += 1
                                 self.maybe_block_server(server)
