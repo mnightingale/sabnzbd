@@ -400,8 +400,6 @@ class NewsWrapper:
                     and (not server.active or server.restart or not self.timeout or time.time() > self.timeout)
                 ):
                     # Make socket available again
-                    server.busy_threads.discard(self)
-                    server.idle_threads.add(self)
                     sabnzbd.Downloader.remove_socket(self)
 
         except (BlockingIOError, ssl.SSLWantWriteError):
@@ -589,6 +587,9 @@ class NNTP:
                 with DOWNLOADER_LOCK:
                     if not self.closed:
                         sabnzbd.Downloader.add_socket(self.nw)
+                    else:
+                        logging.info("%s@%s: connect but closed", nw.thrdnum, server.host)
+
         except OSError as e:
             self.error(e)
 

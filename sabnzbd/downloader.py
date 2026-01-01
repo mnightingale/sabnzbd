@@ -375,8 +375,9 @@ class Downloader(Thread):
     def add_socket(self, nw: NewsWrapper):
         """Add a socket to be watched for read or write availability"""
         if nw.nntp:
-            if sabnzbd.LOG_ALL:
-                logging.debug("Thread %s@%s: add_socket [%s]", nw.thrdnum, nw.server.host, caller_name())
+            server = nw.server
+            server.idle_threads.remove(nw)
+            server.busy_threads.add(nw)
             try:
                 self.selector.register(nw.nntp.fileno, selectors.EVENT_READ | selectors.EVENT_WRITE, nw)
                 nw.selector_events = selectors.EVENT_READ | selectors.EVENT_WRITE
@@ -387,10 +388,6 @@ class Downloader(Thread):
     def modify_socket(self, nw: NewsWrapper, events: int):
         """Modify the events socket are watched for"""
         if nw.nntp and nw.selector_events != events:
-            if sabnzbd.LOG_ALL:
-                logging.debug(
-                    "Thread %s@%s: modify_socket [%s] %r", nw.thrdnum, nw.server.host, caller_name(), nw.article
-                )
             try:
                 self.selector.modify(nw.nntp.fileno, events, nw)
                 nw.selector_events = events
@@ -401,10 +398,9 @@ class Downloader(Thread):
     def remove_socket(self, nw: NewsWrapper):
         """Remove a socket to be watched"""
         if nw.nntp:
-            if sabnzbd.LOG_ALL:
-                logging.debug(
-                    "Thread %s@%s: remove_socket [%s] %r", nw.thrdnum, nw.server.host, caller_name(), nw.article
-                )
+            server = nw.server
+            server.busy_threads.discard(nw)
+            server.idle_threads.add(nw)
             try:
                 self.selector.unregister(nw.nntp.fileno)
                 nw.selector_events = 0
@@ -622,11 +618,10 @@ class Downloader(Thread):
                                             "W" if key.events & selectors.EVENT_WRITE else ""
                                         )
                                         logging.debug(
-                                            "Thread %s@%s: timed out events=%s, article=%r",
+                                            "Thread %s@%s: timed out events=%s",
                                             nw.thrdnum,
                                             nw.server.host,
                                             s,
-                                            nw.article,
                                         )
                                         del key
                                     except KeyError:
@@ -675,9 +670,6 @@ class Downloader(Thread):
 
                         if not server.get_article(peek=True):
                             break
-
-                        server.idle_threads.remove(nw)
-                        server.busy_threads.add(nw)
 
                         if nw.connected:
                             self.add_socket(nw)
@@ -951,10 +943,6 @@ class Downloader(Thread):
             logging.info("Thread %s@%s: %s", nw.thrdnum, nw.server.host, reset_msg)
         elif reset_msg:
             logging.debug("Thread %s@%s: %s", nw.thrdnum, nw.server.host, reset_msg)
-
-        # Make sure this NewsWrapper is in the idle threads
-        nw.server.busy_threads.discard(nw)
-        nw.server.idle_threads.add(nw)
 
         # Make sure it is not in the readable sockets
         self.remove_socket(nw)
