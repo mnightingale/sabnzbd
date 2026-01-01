@@ -173,7 +173,10 @@ class PostProcessor(Thread):
         # Make sure we return the status "Waiting"
         nzo.status = Status.QUEUED
         if nzo not in self.history_queue:
+            logging.info("Adding job %r to history queue", nzo.final_name)
             self.history_queue.append(nzo)
+        else:
+            logging.info("SKIP add job %r to history queue", nzo.final_name)
 
         # Fast-track if it has DirectUnpacked jobs or if it's still going
         if nzo.direct_unpacker and (nzo.direct_unpacker.success_sets or not nzo.direct_unpacker.killed):

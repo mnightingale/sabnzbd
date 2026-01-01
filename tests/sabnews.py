@@ -33,7 +33,7 @@ from random import randint
 
 import sabctools
 
-logging.getLogger().setLevel(logging.DEBUG)
+logging.getLogger().setLevel(logging.INFO)
 
 
 # Expecting the following message-id:

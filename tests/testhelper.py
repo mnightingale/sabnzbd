@@ -21,6 +21,7 @@ tests.testhelper - Basic helper functions
 import io
 import os
 import time
+import uuid
 from http.client import RemoteDisconnected
 from typing import BinaryIO, Optional
 
@@ -336,6 +337,9 @@ class DownloadFlowBasics(SABnzbdBaseTest):
         # Verify if the server was setup before we start
         self.is_server_configured()
 
+        # Pause the queue at first
+        assert get_api_result(mode="pause")["status"] is True
+
         # Create NZB
         nzb_path = create_nzb(nzb_dir)
 
@@ -343,9 +347,18 @@ class DownloadFlowBasics(SABnzbdBaseTest):
         if dir_name_as_job_name:
             test_job_name = os.path.basename(nzb_dir)
         else:
-            test_job_name = "testfile_%s" % time.time()
+            test_job_name = "testfile_%s" % uuid.uuid4()
         api_result = get_api_result("addlocalfile", extra_arguments={"name": nzb_path, "nzbname": test_job_name})
         assert api_result["status"]
+        assert api_result["nzo_ids"]
+        nzo_ids = api_result["nzo_ids"]
+        queue = get_api_result(mode="queue", extra_arguments={"nzo_ids": nzo_ids[0]})
+        job_in_queue = queue["queue"]["slots"][0]
+        test_job_name_actual = job_in_queue["filename"]
+        assert test_job_name_actual
+
+        # Resume the queue
+        assert get_api_result(mode="resume")["status"] is True
 
         # Remove NZB-file
         os.remove(nzb_path)
@@ -361,7 +374,7 @@ class DownloadFlowBasics(SABnzbdBaseTest):
                     By.XPATH,
                     (
                         '//div[@id="history-tab"]//tr[td/div/span[contains(text(), "%s")]]/td[contains(@class, "status")]'
-                        % test_job_name
+                        % test_job_name_actual
                     ),
                 ).text
                 # Always sleep to give it some time
@@ -377,7 +390,7 @@ class DownloadFlowBasics(SABnzbdBaseTest):
         # Sometimes par2 can also be included, but we accept that. For example when small
         # par2 files get assembled in after the download already finished (see #1509)
         for _ in range(10):
-            completed_files = filesystem.globber(os.path.join(SAB_COMPLETE_DIR, test_job_name), "*")
+            completed_files = filesystem.globber(os.path.join(SAB_COMPLETE_DIR, test_job_name_actual), "*")
             try:
                 for filename in file_output:
                     assert filename in completed_files
