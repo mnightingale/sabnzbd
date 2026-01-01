@@ -21,6 +21,7 @@ tests.test_functional_downloads - Test the downloading flow
 from tests.testhelper import *
 
 
+@pytest.mark.repeat(10)
 class TestDownloadFlow(DownloadFlowBasics):
     def test_download_basic_rar5(self):
         self.download_nzb("basic_rar5", ["My_Test_Download.bin"], True)

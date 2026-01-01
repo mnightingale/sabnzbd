@@ -60,8 +60,6 @@ jobs:
         python -m pip install --upgrade pip wheel
         pip install --upgrade -r requirements.txt --no-dependencies
         pip install --upgrade -r tests/requirements.txt
+        pip install pytest-repeat
     - name: Test SABnzbd
-      run: |
-        for i in {1..5}; do
-          pytest -s tests/test_functional_downloads.py tests/test_functional_sorting.py
-        done
+      run: pytest -s tests/test_functional_downloads.py
