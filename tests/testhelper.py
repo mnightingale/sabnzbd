@@ -19,6 +19,7 @@
 tests.testhelper - Basic helper functions
 """
 import io
+import logging
 import os
 import time
 import uuid
@@ -337,6 +338,10 @@ class DownloadFlowBasics(SABnzbdBaseTest):
         # Verify if the server was setup before we start
         self.is_server_configured()
 
+        print("...")
+        print(":: DOWNLOAD NZB TEST - %s ::" % nzb_dir)
+        print("...")
+
         # Pause the queue at first
         assert get_api_result(mode="pause")["status"] is True
 
@@ -356,6 +361,10 @@ class DownloadFlowBasics(SABnzbdBaseTest):
         job_in_queue = queue["queue"]["slots"][0]
         test_job_name_actual = job_in_queue["filename"]
         assert test_job_name_actual
+
+        print("...")
+        print(":: QUEUED as %s ::" % test_job_name_actual)
+        print("...")
 
         # Resume the queue
         assert get_api_result(mode="resume")["status"] is True

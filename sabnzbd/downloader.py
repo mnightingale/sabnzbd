@@ -606,6 +606,17 @@ class Downloader(Thread):
                                     # Already showed error
                                     self.reset_nw(nw)
                                 else:
+                                    key = self.selector.get_key(nw.nntp.fileno)
+                                    s = ("R" if key.events & selectors.EVENT_READ else "") + (
+                                        "W" if key.events & selectors.EVENT_WRITE else ""
+                                    )
+                                    logging.debug(
+                                        "Thread %s@%s: timed out events=%s, article=%r",
+                                        nw.thrdnum,
+                                        nw.server.host,
+                                        s,
+                                        nw.article,
+                                    )
                                     self.reset_nw(nw, "Timed out", warn=True)
                                 server.bad_cons += 1
                                 self.maybe_block_server(server)
@@ -830,7 +841,7 @@ class Downloader(Thread):
         try:
             nw.finish_connect(response.status_code, response.message)
             if sabnzbd.LOG_ALL:
-                logging.debug("%s@%s last message -> %d", nw.thrdnum, server.host, response.status_code)
+                logging.debug("%s@%s last message -> %s", nw.thrdnum, server.host, response.message)
         except NNTPPermanentError as error:
             # Handle login problems
             block = False
