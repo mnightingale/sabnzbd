@@ -358,6 +358,8 @@ class DownloadFlowBasics(SABnzbdBaseTest):
         test_job_name_actual = job_in_queue["filename"]
         assert test_job_name_actual
 
+        print("download_nzb: %s = %s = %s = %s" % (nzb_dir, nzo_ids, test_job_name, test_job_name_actual))
+
         # Resume the queue
         assert get_api_result(mode="resume")["status"] is True
 
@@ -385,7 +387,7 @@ class DownloadFlowBasics(SABnzbdBaseTest):
             except WebDriverException:
                 time.sleep(1)
         else:
-            pytest.fail("Download did not complete")
+            pytest.fail("Download did not complete: name=%r" % test_job_name_actual)
 
         # Verify all files in the expected file_output are present among the completed files.
         # Sometimes par2 can also be included, but we accept that. For example when small
@@ -402,7 +404,10 @@ class DownloadFlowBasics(SABnzbdBaseTest):
                 # Wait a sec before trying again with a fresh list of completed files
                 time.sleep(1)
         else:
-            pytest.fail("Time ran out waiting for expected filenames to show up")
+            pytest.fail(
+                "Time ran out waiting for expected filenames to show up: name=%r, expected_files=%s, completed_files=%s"
+                % (test_job_name_actual, file_output, completed_files)
+            )
 
         # Verify if the garbage collection works (see #1628)
         # We need to give it a second to calm down and clear the variables
