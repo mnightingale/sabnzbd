@@ -231,19 +231,35 @@ class NzbQueue:
 
     @NzbQueueLocker
     def save(self, save_nzo: Union[NzbObject, None, bool] = None):
-        """Save queue, all nzo's or just the specified one"""
+        """Save queue, all nzo's or just the specified one
+
+        - save_nzo is None: save all NZOs + queue admin (used on shutdown)
+        - save_nzo is False: save only queue admin (used in remove)
+        - save_nzo is NzbObject: save only that NZO + queue admin (used in add)
+        """
         logging.info("Saving queue")
 
         # Aggregate nzo_ids and save each nzo
-        if save_nzo is not False:
+        if save_nzo is None:
+            # Save all NZOs
             for nzo in self.__nzo_list:
-                if not nzo.removed_from_queue:
-                    if save_nzo is None or nzo is save_nzo:
-                        if not nzo.futuretype:
-                            # Also includes save_data for NZO
-                            nzo.save_to_disk()
-                        else:
-                            sabnzbd.filesystem.save_data(nzo, nzo.nzo_id, nzo.admin_path)
+                if nzo.removed_from_queue:
+                    continue
+                if not nzo.futuretype:
+                    # Also includes save_data for NZO
+                    nzo.save_to_disk()
+                else:
+                    sabnzbd.filesystem.save_data(nzo, nzo.nzo_id, nzo.admin_path)
+        elif save_nzo is False:
+            # Only queue admin, no per-NZO writes
+            pass
+        else:
+            # Single NZO: no need to loop the queue just to find it again
+            if not save_nzo.removed_from_queue:
+                if not save_nzo.futuretype:
+                    save_nzo.save_to_disk()
+                else:
+                    sabnzbd.filesystem.save_data(save_nzo, save_nzo.nzo_id, save_nzo.admin_path)
 
         sabnzbd.filesystem.save_admin((QUEUE_VERSION, self.__nzo_ids, []), QUEUE_FILE_NAME)
 
