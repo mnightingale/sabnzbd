@@ -58,6 +58,7 @@ class NzbQueue:
     def __init__(self):
         self.__top_only: bool = cfg.top_only()
         self.__nzo_list: list[NzbObject] = []
+        self.__nzo_ids: list[str] = []
         self.__nzo_table: dict[str, NzbObject] = {}
 
     def read_queue(self, repair: int):
@@ -218,30 +219,33 @@ class NzbQueue:
         )
         if res == 0 and nzo_ids:
             # Swap to old position
-            new_nzo = self.get_nzo(nzo_ids[0])
-            self.__nzo_list.remove(new_nzo)
+            nzo_id = nzo_ids[0]
+            new_nzo = self.get_nzo(nzo_id)
+            cur_idx = self.__nzo_list.index(new_nzo)
+            self.__nzo_list.pop(cur_idx)
+            self.__nzo_ids.pop(cur_idx)
             self.__nzo_list.insert(old_position, new_nzo)
+            self.__nzo_ids.insert(old_position, os.path.join(new_nzo.work_name, new_nzo.nzo_id))
             # Reset reuse flag to make pause/abort on encryption possible
-            self.__nzo_table[nzo_ids[0]].reuse = None
+            self.__nzo_table[nzo_id].reuse = None
 
     @NzbQueueLocker
     def save(self, save_nzo: Union[NzbObject, None, bool] = None):
         """Save queue, all nzo's or just the specified one"""
         logging.info("Saving queue")
 
-        nzo_ids = []
         # Aggregate nzo_ids and save each nzo
-        for nzo in self.__nzo_list[:]:
-            if not nzo.removed_from_queue:
-                nzo_ids.append(os.path.join(nzo.work_name, nzo.nzo_id))
-                if save_nzo is None or nzo is save_nzo:
-                    if not nzo.futuretype:
-                        # Also includes save_data for NZO
-                        nzo.save_to_disk()
-                    else:
-                        sabnzbd.filesystem.save_data(nzo, nzo.nzo_id, nzo.admin_path)
+        if save_nzo is not False:
+            for nzo in self.__nzo_list:
+                if not nzo.removed_from_queue:
+                    if save_nzo is None or nzo is save_nzo:
+                        if not nzo.futuretype:
+                            # Also includes save_data for NZO
+                            nzo.save_to_disk()
+                        else:
+                            sabnzbd.filesystem.save_data(nzo, nzo.nzo_id, nzo.admin_path)
 
-        sabnzbd.filesystem.save_admin((QUEUE_VERSION, nzo_ids, []), QUEUE_FILE_NAME)
+        sabnzbd.filesystem.save_admin((QUEUE_VERSION, self.__nzo_ids, []), QUEUE_FILE_NAME)
 
     def set_top_only(self, value):
         self.__top_only = value
@@ -327,11 +331,14 @@ class NzbQueue:
             nzo.status = Status.PAUSED
 
         self.__nzo_table[nzo.nzo_id] = nzo
+        nzo_id = os.path.join(nzo.work_name, nzo.nzo_id)
         if priority > HIGH_PRIORITY:
             # Top and repair priority items are added to the top of the queue
             self.__nzo_list.insert(0, nzo)
+            self.__nzo_ids.insert(0, nzo_id)
         elif priority == LOW_PRIORITY:
             self.__nzo_list.append(nzo)
+            self.__nzo_ids.append(nzo_id)
         else:
             # for high priority we need to add the item at the bottom
             # of any other high priority items above the normal priority
@@ -343,6 +350,7 @@ class NzbQueue:
                 for position in self.__nzo_list:
                     if position.priority < priority:
                         self.__nzo_list.insert(pos, nzo)
+                        self.__nzo_ids.insert(pos, nzo_id)
                         added = True
                         break
                     pos += 1
@@ -350,9 +358,11 @@ class NzbQueue:
                     # if there are no other items classed as a lower priority
                     # then it will be added to the bottom of the queue
                     self.__nzo_list.append(nzo)
+                    self.__nzo_ids.append(nzo_id)
             else:
                 # if the queue is empty then simple append the item to the bottom
                 self.__nzo_list.append(nzo)
+                self.__nzo_ids.append(nzo_id)
         if save:
             self.save(nzo)
 
@@ -379,7 +389,10 @@ class NzbQueue:
 
             # Set statuses
             nzo.removed_from_queue = True
-            self.__nzo_list.remove(nzo)
+            # Find position once and remove from both lists
+            idx = self.__nzo_list.index(nzo)
+            del self.__nzo_list[idx]
+            del self.__nzo_ids[idx]
             if cleanup:
                 nzo.status = Status.DELETED
                 nzo.purge_data(delete_all_data=delete_all_data)
@@ -518,6 +531,7 @@ class NzbQueue:
                 item_id_pos2 = i
             if (item_id_pos1 > -1) and (item_id_pos2 > -1):
                 item = self.__nzo_list[item_id_pos1]
+                nzo_id = self.__nzo_ids[item_id_pos1]
                 logging.info(
                     "Switching job [%s] %s => [%s] %s",
                     item_id_pos1,
@@ -526,7 +540,9 @@ class NzbQueue:
                     self.__nzo_list[item_id_pos2].final_name,
                 )
                 del self.__nzo_list[item_id_pos1]
+                del self.__nzo_ids[item_id_pos1]
                 self.__nzo_list.insert(item_id_pos2, item)
+                self.__nzo_ids.insert(item_id_pos2, nzo_id)
                 return item_id_pos2, nzo1.priority
         # If moving failed/no movement took place
         return -1, nzo1.priority
@@ -628,14 +644,17 @@ class NzbQueue:
 
             if nzo_id_pos1 != -1:
                 del self.__nzo_list[nzo_id_pos1]
+                nzo_id = self.__nzo_ids.pop(nzo_id_pos1)
                 if priority == FORCE_PRIORITY:
                     # A top priority item (usually a completed download fetching pars)
                     # is added to the top of the queue
                     self.__nzo_list.insert(0, nzo)
+                    self.__nzo_ids.insert(0, nzo_id)
                     pos = 0
                 elif priority == LOW_PRIORITY:
                     pos = len(self.__nzo_list)
                     self.__nzo_list.append(nzo)
+                    self.__nzo_ids.append(nzo_id)
                 else:
                     # for high priority we need to add the item at the bottom
                     # of any other high priority items above the normal priority
@@ -647,6 +666,7 @@ class NzbQueue:
                         for position in self.__nzo_list:
                             if position.priority < priority:
                                 self.__nzo_list.insert(p, nzo)
+                                self.__nzo_ids.insert(p, nzo_id)
                                 pos = p
                                 added = True
                                 break
@@ -656,9 +676,11 @@ class NzbQueue:
                             # then it will be added to the bottom of the queue
                             pos = len(self.__nzo_list)
                             self.__nzo_list.append(nzo)
+                            self.__nzo_ids.append(nzo_id)
                     else:
                         # if the queue is empty then simple append the item to the bottom
                         self.__nzo_list.append(nzo)
+                        self.__nzo_ids.append(nzo_id)
                         pos = 0
 
             logging.info(
