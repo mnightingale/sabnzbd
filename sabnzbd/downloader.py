@@ -704,7 +704,6 @@ class Downloader(Thread):
 
                 # Use select to find sockets ready for reading/writing
                 if self.selector.get_map():
-                    assert len(self.selector.get_map()) <= 16
                     if events := self.selector.select(timeout=1.0):
                         last_event = time.monotonic()
                         for key, ev in events:
