@@ -581,6 +581,7 @@ class Downloader(Thread):
         BPSMeter = sabnzbd.BPSMeter
         BPSMeter.update()
         next_bpsmeter_update = 0
+        last_event: float = 0
 
         # Check server expiration dates
         check_server_expiration()
@@ -703,10 +704,20 @@ class Downloader(Thread):
 
                 # Use select to find sockets ready for reading/writing
                 if self.selector.get_map():
+                    assert len(self.selector.get_map()) <= 16
                     if events := self.selector.select(timeout=1.0):
+                        last_event = time.monotonic()
                         for key, ev in events:
                             nw = key.data
+                            if not nw.connected:
+                                logging.debug("Not connected: %r", key.data)
                             process_nw_queue.put((nw, ev, nw.generation))
+                    else:
+                        if time.monotonic() - last_event > 5:
+                            last_event = time.monotonic()
+                            logging.debug("No read/write in the last 5 seconds:")
+                            for fileno, key in self.selector.get_map().items():
+                                logging.debug("%r %d %d", key.data, fileno, key.events)
                 else:
                     events = []
                     BPSMeter.reset()
@@ -753,12 +764,17 @@ class Downloader(Thread):
     def process_nw(self, nw: NewsWrapper, event: int, generation: int):
         """Receive data from a NewsWrapper and handle the response"""
         # Drop stale items
+        if time.monotonic() - nw.last_response > 5:
+            e = ("R" if event & selectors.EVENT_READ else "") + ("W" if event & selectors.EVENT_WRITE else "")
+            logging.debug("No responses for 5 seconds [%r] [%s]", nw, e)
         if nw.generation != generation:
+            logging.debug("Skip process generation [%d != %d] for [%r]", nw.generation, generation, nw)
             return
         if event & selectors.EVENT_READ:
             self.process_nw_read(nw, generation)
             # If read caused a reset, don't proceed to write
             if nw.generation != generation:
+                logging.debug("Read caused a reset - dont write [%r]", nw)
                 return
             # The read may have removed the socket, so prevent calling prepare_request again
             if not (nw.selector_events & selectors.EVENT_WRITE):
@@ -777,6 +793,8 @@ class Downloader(Thread):
             except ssl.SSLWantReadError:
                 return
             except (ConnectionError, ConnectionAbortedError):
+                if nw.generation != generation:
+                    logging.debug("Reset called for a different generation [%d != %d]", nw.generation, generation)
                 # The ConnectionAbortedError is also thrown by sabctools in case of fatal SSL-layer problems
                 self.reset_nw(nw, "Server closed connection", wait=False)
                 return

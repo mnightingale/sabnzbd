@@ -75,6 +75,7 @@ class NewsWrapper:
         "selector_events",
         "lock",
         "generation",
+        "last_response",
     )
 
     def __init__(self, server: "sabnzbd.downloader.Server", thrdnum: int, block: bool = False, generation: int = 0):
@@ -106,6 +107,7 @@ class NewsWrapper:
         self.selector_events = 0
         if getattr(self, "lock", None) is None:
             self.lock: threading.Lock = threading.Lock()
+        self.last_response: float = 0
 
     @property
     def article(self) -> Optional["sabnzbd.nzb.Article"]:
@@ -125,6 +127,7 @@ class NewsWrapper:
         self.decoder = sabctools.Decoder(NNTP_BUFFER_SIZE)
         self.nntp = NNTP(self, self.server.addrinfo)
         self.timeout = time.time() + self.server.timeout
+        self.last_response = time.monotonic()
 
         # On connect the first "response" will be 200 Welcome
         self._response_queue.append(None)
@@ -203,6 +206,7 @@ class NewsWrapper:
         self.concurrent_requests.release()
         server = self.server
         article_done = response.status_code in (220, 222) and article
+        self.last_response = time.monotonic()
 
         if article_done:
             with DOWNLOADER_LOCK:
@@ -296,6 +300,7 @@ class NewsWrapper:
 
         # NewsWrapper is being reset
         if self.decoder is None:
+            logging.debug("Decoder is None [%r]", self)
             return 0, None
 
         # Receive data into the decoder pre-allocated buffer
@@ -316,10 +321,18 @@ class NewsWrapper:
         if self.decoder:
             for response in self.decoder:
                 if self.generation != generation:
+                    logging.debug("Generation %s is not %s [%r]", self.generation, generation, self)
                     break
                 with self.lock:
                     # Re-check under lock to avoid racing with hard_reset
                     if self.generation != generation or not self._response_queue:
+                        logging.debug(
+                            "Generation %s is not %s or not expecting responses %d [%r]",
+                            self.generation,
+                            generation,
+                            len(self._response_queue),
+                            self,
+                        )
                         break
                     article = self._response_queue.popleft()
                 if on_response:
@@ -474,11 +487,15 @@ class NewsWrapper:
                 article.allow_new_fetcher()
 
     def __repr__(self):
-        return "<NewsWrapper: server=%s:%s, thread=%s, connected=%s>" % (
+        return "<NewsWrapper: server=%s:%s, thread=%s, connected=%s, events=%s%s, has_next_request=%s, inflight=%d>" % (
             self.server.host,
             self.server.port,
             self.thrdnum,
             self.connected,
+            "R" if self.selector_events & EVENT_READ else "",
+            "W" if self.selector_events & EVENT_WRITE else "",
+            bool(self.next_request),
+            len(self._response_queue),
         )
 
 
