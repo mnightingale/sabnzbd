@@ -1222,10 +1222,11 @@ class NzbObject(TryList):
             for article_test in self.first_articles:
                 article = article_test.get_article(server, servers)
                 if not article:
-                    break
+                    continue
                 articles.append(article)
                 if len(articles) >= fetch_limit:
                     break
+            return
 
         # Move on to next ones
         if not articles:
