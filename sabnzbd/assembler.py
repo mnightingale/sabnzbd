@@ -26,7 +26,7 @@ import re
 import threading
 from threading import Thread
 import ctypes
-from typing import Optional, NamedTuple, Union
+from typing import Optional, NamedTuple, Union, Iterable
 import rarfile
 import time
 
@@ -80,6 +80,8 @@ class Assembler(Thread):
         self.queued_next_time: dict[str, float] = dict()
         self.ready_bytes_lock = threading.Lock()
         self.ready_bytes: dict[str, int] = dict()
+        self.open_files_lock = threading.Lock()
+        self.open_files: dict[str, int] = dict()
 
     def stop(self):
         self.queue.put(AssemblerTask())
@@ -133,11 +135,18 @@ class Assembler(Thread):
                 self.ready_bytes[nzf.nzf_id] = cur
             return cur
 
-    def clear_ready_bytes(self, *nzfs: NzbFile) -> None:
+    def clear_ready_bytes(self, nzfs: Iterable[NzbFile]) -> None:
         with self.ready_bytes_lock:
             for nzf in nzfs:
                 self.ready_bytes.pop(nzf.nzf_id, None)
                 self.queued_next_time.pop(nzf.nzf_id, None)
+
+    def close_files(self, nzfs: Iterable[NzbFile]) -> None:
+        with self.open_files_lock:
+            for nzf in nzfs:
+                fd = self.open_files.pop(nzf.nzf_id, None)
+                if fd is not None:
+                    os.close(fd)
 
     def process(
         self,
@@ -318,7 +327,8 @@ class Assembler(Thread):
             else:
                 sabnzbd.NzbQueue.remove(nzo.nzo_id, cleanup=False)
                 sabnzbd.PostProcessor.process(nzo)
-                self.clear_ready_bytes(*nzo.files)
+                self.clear_ready_bytes(nzo.files_table.values())
+                self.close_files(nzo.files_table.values())
 
     @staticmethod
     def diskspace_check(nzo: NzbObject, nzf: NzbFile):
@@ -442,28 +452,29 @@ class Assembler(Thread):
 
         # Final steps
         if file_done:
-            sabnzbd.Assembler.clear_ready_bytes(nzf)
+            sabnzbd.Assembler.clear_ready_bytes([nzf])
             set_permissions(nzf.filepath)
             nzf.assembled = True
 
-    @staticmethod
-    def assemble_article(article: Article, data: bytearray) -> bool:
+    def assemble_article(self, article: Article, data: bytearray) -> bool:
         """Write a single article to disk"""
         if not article.can_direct_write:
             return False
         nzf = article.nzf
-        with nzf.file_lock:
-            fd, _, direct_write = Assembler.open(nzf, True, article.file_size)
-            try:
+        with self.open_files_lock:
+            fd = self.open_files.get(nzf.nzf_id, None)
+            if fd is None:
+                fd, _, direct_write = Assembler.open(nzf, True, article.file_size)
                 if not direct_write:
                     cfg.direct_write.set(False)
+                    os.close(fd)
                     return False
-                Assembler.write(fd, None, nzf, article, data)
-            except FileNotFoundError:
-                # nzo has probably been deleted, ArticleCache tries the fallback and handles it
-                return False
-            finally:
-                os.close(fd)
+                self.open_files[nzf.nzf_id] = fd
+        try:
+            Assembler.write(fd, None, nzf, article, data)
+        except FileNotFoundError:
+            # nzo has probably been deleted, ArticleCache tries the fallback and handles it
+            return False
         return True
 
     @staticmethod

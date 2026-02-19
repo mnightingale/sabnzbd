@@ -1425,7 +1425,7 @@ class NzbObject(TryList):
 
         # Remove all cached files
         sabnzbd.ArticleCache.purge_articles(self.saved_articles)
-        sabnzbd.Assembler.clear_ready_bytes(*self.files)
+        sabnzbd.Assembler.clear_ready_bytes(self.files_table.values())
 
         # Delete all, or just basic files
         if self.futuretype:
