@@ -51,6 +51,7 @@
         var urlBase = '${url_base}'
         var folderBrowseUrl = '${root}api?mode=browse&output=json&apikey=$apikey';
         var folderSeperator = '#if $os.sep == '\\' then '\\\\' else '/'#'
+        var disableInterfaceDelays = #if $disable_interface_delays then 'true' else 'false'#;
 
         // Translations
         var configTranslate = new Object();

@@ -1853,6 +1853,8 @@ def build_header(webdir: str = "", for_template: bool = True, trans_functions: b
         header["apikey"] = cfg.api_key()
         header["new_release"], header["new_rel_url"] = sabnzbd.NEW_VERSION
 
+        header["disable_interface_delays"] = bool(os.environ.get("CI", False))
+
     header["version"] = sabnzbd.__version__
     header["paused"] = bool(sabnzbd.Downloader.paused or sabnzbd.Downloader.paused_for_postproc)
     header["pause_int"] = sabnzbd.Scheduler.pause_int()
