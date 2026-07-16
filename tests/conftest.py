@@ -98,9 +98,18 @@ def run_sabnzbd(clean_cache_dir, request):
             get_url_result("shutdown", SAB_HOST, SAB_PORT)
         except requests.ConnectionError:
             sabnzbd_process.kill()
-            sabnzbd_process.communicate(timeout=30)
         except Exception as err:
             warn("Failed to shutdown the sabnzbd process: %s" % err)
+
+        # Wait for the process to fully exit before returning. The shutdown request
+        # returns as soon as it is accepted, but the instance keeps saving state to
+        # the shared cache dir and holds the fixed port for a moment afterwards. The
+        # next module's clean_cache_dir/start-up would otherwise race with it.
+        try:
+            sabnzbd_process.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            sabnzbd_process.kill()
+            sabnzbd_process.communicate(timeout=30)
 
     # Allow the test file to specify what ini to load; if none given, use the basic one by default
     ini_file = getattr(request.module, "INI_FILE", "sabnzbd.basic.ini")
