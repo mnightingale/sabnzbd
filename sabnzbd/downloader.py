@@ -52,6 +52,8 @@ _PENALTY_VERYSHORT = 0.1  # Error 400 without cause clues
 
 # Wait this many seconds between checking idle servers for new articles or busy threads for timeout
 _SERVER_CHECK_DELAY = 0.5
+# Run the per-server housekeeping scan in the Downloader loop at most this often, unless triggered
+_SERVER_SCAN_DELAY = 0.1
 # Wait this many seconds between updates of the BPSMeter
 _BPSMETER_UPDATE_DELAY = 0.05
 # How many articles should be prefetched when checking the next articles?
@@ -259,6 +261,7 @@ class Downloader(Thread):
         "paused_for_postproc",
         "shutdown",
         "server_restarts",
+        "server_scan_needed",
         "force_disconnect",
         "selector",
         "servers",
@@ -297,6 +300,9 @@ class Downloader(Thread):
         # A user might change server parms again before server restart is ready.
         # Keep a counter to prevent multiple restarts
         self.server_restarts: int = 0
+
+        # Request an immediate run of the server scan in the loop
+        self.server_scan_needed: bool = True
 
         self.force_disconnect: bool = False
 
@@ -408,6 +414,8 @@ class Downloader(Thread):
             nw.server.busy_threads.discard(nw)
             nw.server.idle_threads.add(nw)
             nw.timeout = None
+            # The connection is idle again, have the loop look for new work
+            self.server_scan_needed = True
             try:
                 self.selector.unregister(nw.nntp.fileno)
                 nw.selector_events = 0
@@ -593,83 +601,99 @@ class Downloader(Thread):
             # The Downloader code will make sure shutdown is handled gracefully
             Thread(target=self.process_nw_worker, args=(process_nw_queue,), daemon=True).start()
 
+        # Hoist frequently used lookups out of the loop
+        selector_get_map = self.selector.get_map
+        selector_select = self.selector.select
+        put_multiple = process_nw_queue.put_multiple
+        queue_join = process_nw_queue.join
+        time_time = time.time
+        next_server_scan: float = 0.0
+
         # Catch all errors, just in case
         try:
             while 1:
-                now = time.time()
-                for server in self.servers:
-                    # Skip this server if there's no point searching for new stuff to do
-                    if server.addrinfo and not server.busy_threads and server.next_article_search > now:
-                        continue
-
-                    if server.next_busy_threads_check < now:
-                        server.next_busy_threads_check = now + _SERVER_CHECK_DELAY
-                        for nw in server.busy_threads.copy():
-                            if (nw.nntp and nw.nntp.error_msg) or (nw.timeout and now > nw.timeout):
-                                if nw.nntp and nw.nntp.error_msg:
-                                    # Already showed error
-                                    self.reset_nw(nw)
-                                else:
-                                    self.reset_nw(nw, "Timed out", warn=True)
-                                server.bad_cons += 1
-                                self.maybe_block_server(server)
-
-                    if server.restart:
-                        if not server.busy_threads:
-                            server.stop()
-                            self.servers.remove(server)
-                            if newid := server.newid:
-                                self.init_server(None, newid)
-                            self.server_restarts -= 1
-                            # Have to leave this loop, because we removed element
-                            break
-                        else:
-                            # Restart pending, don't add new articles
+                now = time_time()
+                # The server scan only assigns work to idle connections, everything else it
+                # does is time-throttled, so it can be skipped on most iterations
+                if self.server_scan_needed or now > next_server_scan:
+                    # Clear before scanning, so triggers set during the scan are not lost
+                    self.server_scan_needed = False
+                    next_server_scan = now + _SERVER_SCAN_DELAY
+                    for server in self.servers:
+                        # Skip this server if there's no point searching for new stuff to do
+                        if server.addrinfo and not server.busy_threads and server.next_article_search > now:
                             continue
 
-                    if (
-                        not server.idle_threads
-                        or self.no_active_jobs()
-                        or self.shutdown
-                        or self.paused_for_postproc
-                        or not server.active
-                    ):
-                        continue
+                        if server.next_busy_threads_check < now:
+                            server.next_busy_threads_check = now + _SERVER_CHECK_DELAY
+                            for nw in server.busy_threads.copy():
+                                if (nw.nntp and nw.nntp.error_msg) or (nw.timeout and now > nw.timeout):
+                                    if nw.nntp and nw.nntp.error_msg:
+                                        # Already showed error
+                                        self.reset_nw(nw)
+                                    else:
+                                        self.reset_nw(nw, "Timed out", warn=True)
+                                    server.bad_cons += 1
+                                    self.maybe_block_server(server)
 
-                    for nw in server.idle_threads.copy():
-                        if nw.timeout:
-                            if now < nw.timeout:
-                                continue
+                        if server.restart:
+                            if not server.busy_threads:
+                                server.stop()
+                                self.servers.remove(server)
+                                if newid := server.newid:
+                                    self.init_server(None, newid)
+                                self.server_restarts -= 1
+                                # Have to leave this loop, because we removed element
+                                # Scan again right away for any other pending restarts
+                                self.server_scan_needed = True
+                                break
                             else:
-                                nw.timeout = None
+                                # Restart pending, don't add new articles
+                                continue
 
-                        if not server.addrinfo:
-                            # Only request info if there's stuff in the queue
-                            if not sabnzbd.NzbQueue.is_empty():
-                                self.maybe_block_server(server)
-                                server.request_addrinfo()
-                            break
+                        if (
+                            not server.idle_threads
+                            or self.no_active_jobs()
+                            or self.shutdown
+                            or self.paused_for_postproc
+                            or not server.active
+                        ):
+                            continue
 
-                        if not server.get_article(peek=True):
-                            break
+                        for nw in server.idle_threads.copy():
+                            if nw.timeout:
+                                if now < nw.timeout:
+                                    continue
+                                else:
+                                    nw.timeout = None
 
-                        if nw.connected:
-                            # Assign a request immediately if NewsWrapper is ready, if we wait until the socket is
-                            # selected all idle connections will be activated when there may only be one request
-                            nw.prepare_request()
-                            self.add_socket(nw)
-                        elif not nw.nntp:
-                            try:
-                                logging.info("%s@%s: Initiating connection", nw.thrdnum, server.host)
-                                nw.init_connect()
-                            except Exception:
-                                logging.error(
-                                    T("Failed to initialize %s@%s with reason: %s"),
-                                    nw.thrdnum,
-                                    server.host,
-                                    sys.exc_info()[1],
-                                )
-                                self.reset_nw(nw, "Failed to initialize", warn=True)
+                            if not server.addrinfo:
+                                # Only request info if there's stuff in the queue
+                                if not sabnzbd.NzbQueue.is_empty():
+                                    self.maybe_block_server(server)
+                                    server.request_addrinfo()
+                                break
+
+                            if not server.get_article(peek=True):
+                                break
+
+                            if nw.connected:
+                                # Assign a request immediately if NewsWrapper is ready, if we wait until the socket is
+                                # selected all idle connections will be activated when there may only be one request
+                                nw.prepare_request()
+                                self.add_socket(nw)
+                            elif not nw.nntp:
+                                try:
+                                    logging.info("%s@%s: Initiating connection", nw.thrdnum, server.host)
+                                    nw.init_connect()
+                                except Exception:
+                                    logging.error(
+                                        T("Failed to initialize %s@%s with reason: %s"),
+                                        nw.thrdnum,
+                                        server.host,
+                                        sys.exc_info()[1],
+                                    )
+                                    self.reset_nw(nw, "Failed to initialize", warn=True)
 
                 if self.force_disconnect or self.shutdown:
                     for server in self.servers:
@@ -696,15 +720,18 @@ class Downloader(Thread):
                         self.max_chunk_size = self.last_max_chunk_size
                     elif self.last_max_chunk_size < self.max_chunk_size / 3:
                         time.sleep(self.sleep_time)
-                        now = time.time()
+                        now = time_time()
                     self.last_max_chunk_size = 0
 
                 # Use select to find sockets ready for reading/writing
-                if self.selector.get_map():
-                    if events := self.selector.select(timeout=1.0):
+                if selector_get_map():
+                    if events := selector_select(timeout=1.0):
+                        # Batch all events into a single queue operation
+                        nw_events = []
                         for key, ev in events:
                             nw = key.data
-                            process_nw_queue.put((nw, ev, nw.generation))
+                            nw_events.append((nw, ev, nw.generation))
+                        put_multiple(nw_events)
                 else:
                     events = []
                     BPSMeter.reset()
@@ -729,7 +756,7 @@ class Downloader(Thread):
                     continue
 
                 # Wait for socket operation completion
-                process_nw_queue.join()
+                queue_join()
 
         except Exception:
             logging.error(T("Fatal error in Downloader"), exc_info=True)
@@ -814,14 +841,14 @@ class Downloader(Thread):
             sabnzbd.BPSMeter.update(server.id, bytes_received)
             if bytes_received > self.last_max_chunk_size:
                 self.last_max_chunk_size = bytes_received
-            # Check speedlimit
-            if (
-                self.bandwidth_limit
-                and sabnzbd.BPSMeter.bps + sabnzbd.BPSMeter.sum_cached_amount > self.bandwidth_limit
-            ):
+
+        # Check speedlimit, sleeping outside DOWNLOADER_LOCK so other threads are not stalled
+        if self.bandwidth_limit and sabnzbd.BPSMeter.bps + sabnzbd.BPSMeter.sum_cached_amount > self.bandwidth_limit:
+            with DOWNLOADER_LOCK:
                 sabnzbd.BPSMeter.update()
-                while self.bandwidth_limit and sabnzbd.BPSMeter.bps > self.bandwidth_limit:
-                    time.sleep(0.01)
+            while self.bandwidth_limit and sabnzbd.BPSMeter.bps > self.bandwidth_limit:
+                time.sleep(0.01)
+                with DOWNLOADER_LOCK:
                     sabnzbd.BPSMeter.update()
 
     def check_assembler_levels(self):
@@ -1054,8 +1081,8 @@ class Downloader(Thread):
 
     @NzbQueueLocker
     def wakeup(self):
-        """Just rattle the semaphore"""
-        pass
+        """Trigger a server scan and rattle the semaphore"""
+        self.server_scan_needed = True
 
     @NzbQueueLocker
     def stop(self):
