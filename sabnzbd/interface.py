@@ -2242,17 +2242,36 @@ async def config_notify_save(request: Request):
 class ThreadedServer(uvicorn.Server):
     def __init__(self, *args, **kwargs):
         self.thread = None
+        self._startup_exc: Optional[BaseException] = None
         super().__init__(*args, **kwargs)
 
     def install_signal_handlers(self):
         pass
 
+    def _run(self):
+        # Capture any start-up failure (bad cert, port grabbed after the free
+        # check, bad host, etc.) so run_in_thread() can report it. uvicorn raises
+        # SystemExit on a bind error, so catch BaseException rather than Exception.
+        try:
+            self.run()
+        except BaseException as exc:
+            self._startup_exc = exc
+
     def run_in_thread(self):
-        self.thread = threading.Thread(target=self.run)
+        """Start the server in a background thread and block until it is serving.
+
+        Raises RuntimeError if the server thread exits before signalling that it
+        has started, so the caller can abort instead of looping forever.
+        """
+        self.thread = threading.Thread(target=self._run)
         self.thread.start()
 
-        while not self.started:
+        # Wait until the server is up, or the thread dies during start-up
+        while not self.started and self.thread.is_alive():
             time.sleep(1e-3)
+
+        if not self.started:
+            raise RuntimeError("Web server failed to start") from self._startup_exc
 
     def stop(self):
         self.should_exit = True
