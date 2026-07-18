@@ -2430,6 +2430,11 @@ async def app_lifespan(app: Starlette):
     await sabnzbd.session_store.close()
 
 
+async def not_found_redirect(request: Request, exc):
+    """Catch-all for unknown URLs: redirect to the UI root"""
+    return RedirectResponse(url=f"{cfg.url_base()}/", status_code=302)
+
+
 def create_app() -> Starlette:
     """Build the Starlette application.
 
@@ -2480,4 +2485,9 @@ def create_app() -> Starlette:
         ),
     ]
 
-    return Starlette(middleware=middleware, routes=routes, lifespan=app_lifespan)
+    return Starlette(
+        middleware=middleware,
+        routes=routes,
+        lifespan=app_lifespan,
+        exception_handlers={404: not_found_redirect},
+    )
