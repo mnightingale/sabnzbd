@@ -28,7 +28,7 @@ import gc
 import socket
 import time
 import getpass
-from threading import Thread
+from threading import Thread, Lock
 from typing import Any, Callable, Optional, TypeAlias
 
 from starlette.concurrency import run_in_threadpool
@@ -125,6 +125,8 @@ _MSG_OUTPUT_FORMAT = "Format not supported"
 _MSG_NO_SUCH_CONFIG = "Config item does not exist"
 _MSG_CONFIG_LOCKED = "Configuration locked"
 
+# Guards the performance benchmarks in build_status, which must not run concurrently
+_PERFORMANCE_LOCK = Lock()
 
 
 async def api_handler(kwargs: QueryParams) -> Response:
@@ -1578,17 +1580,23 @@ def build_status(calculate_performance: bool = False, skip_dashboard: bool = Fal
     info["configfn"] = clip_path(config.get_filename())
     info["warnings"] = sabnzbd.GUIHANDLER.content()
 
-    # Calculate performance measures, if requested
-    if calculate_performance:
-        # PyStone
-        sabnzbd.PYSTONE_SCORE = getpystone()
+    # Calculate performance measures, if requested. Never run the benchmarks
+    # concurrently: parallel disk and bandwidth measurements corrupt each other's
+    # results. If another request is already measuring, skip the run and report
+    # the previous (or the in-progress) results instead of queueing another one.
+    if calculate_performance and _PERFORMANCE_LOCK.acquire(blocking=False):
+        try:
+            # PyStone
+            sabnzbd.PYSTONE_SCORE = getpystone()
 
-        # Disk speed of download (aka incomplete) and complete directory:
-        sabnzbd.DOWNLOAD_DIR_SPEED = diskspeedmeasure(sabnzbd.cfg.download_dir.get_path())
-        sabnzbd.COMPLETE_DIR_SPEED = diskspeedmeasure(sabnzbd.cfg.complete_dir.get_path())
+            # Disk speed of download (aka incomplete) and complete directory:
+            sabnzbd.DOWNLOAD_DIR_SPEED = diskspeedmeasure(sabnzbd.cfg.download_dir.get_path())
+            sabnzbd.COMPLETE_DIR_SPEED = diskspeedmeasure(sabnzbd.cfg.complete_dir.get_path())
 
-        # Internet bandwidth
-        sabnzbd.INTERNET_BANDWIDTH = internetspeed()
+            # Internet bandwidth
+            sabnzbd.INTERNET_BANDWIDTH = internetspeed()
+        finally:
+            _PERFORMANCE_LOCK.release()
 
     # How often did we delay?
     info["delayed_assembler"] = sabnzbd.BPSMeter.delayed_assembler
