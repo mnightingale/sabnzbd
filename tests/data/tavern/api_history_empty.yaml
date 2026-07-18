@@ -18,7 +18,6 @@ stages:
         content-type: !re_match "application/json"
         content-type: !re_search "charset=(UTF|utf)-8"
         pragma: "no-cache"
-        access-control-allow-origin: "*"
       json:
         history:
           # all four sizes may have a single digit value, so anything beyond that is optional
@@ -50,7 +49,6 @@ stages:
         content-type: !re_match "text/xml"
         content-type: !re_search "charset=(UTF|utf)-8"
         pragma: "no-cache"
-        access-control-allow-origin: "*"
         content-length: !re_match "[0-9]+"
       verify_response_with:
         function: tavalidate:assert_xml

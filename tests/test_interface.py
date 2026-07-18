@@ -432,8 +432,8 @@ class TestAnonymousSession:
         assert response.set_cookie.call_args.args[0] == interface.SESSION_COOKIE
 
 
-def run_xframe_middleware() -> Headers:
-    """Run a minimal request through XFrameOptionsMiddleware and return the response headers"""
+def run_response_middleware(middleware_cls, path: str = "/") -> Headers:
+    """Run a minimal request through a response-header middleware and return the response headers"""
     captured = {}
 
     async def asgi_app(scope, receive, send):
@@ -444,15 +444,43 @@ def run_xframe_middleware() -> Headers:
         if message["type"] == "http.response.start":
             captured["headers"] = Headers(raw=message["headers"])
 
-    asyncio.run(interface.XFrameOptionsMiddleware(asgi_app)({"type": "http", "headers": []}, None, send))
+    asyncio.run(middleware_cls(asgi_app)({"type": "http", "path": path, "headers": []}, None, send))
     return captured["headers"]
 
 
 class TestXFrameOptionsMiddleware:
     @pytest.mark.config({"x_frame_options": True})
     def test_header_added_when_enabled(self):
-        assert run_xframe_middleware().get("X-Frame-Options") == "SAMEORIGIN"
+        assert run_response_middleware(interface.XFrameOptionsMiddleware).get("X-Frame-Options") == "SAMEORIGIN"
 
     @pytest.mark.config({"x_frame_options": False})
     def test_header_absent_when_disabled(self):
-        assert run_xframe_middleware().get("X-Frame-Options") is None
+        assert run_response_middleware(interface.XFrameOptionsMiddleware).get("X-Frame-Options") is None
+
+
+class TestApiCorsMiddleware:
+    @pytest.mark.config({"api_cors": "*", "url_base": "/sabnzbd"})
+    def test_header_added_on_api_routes_when_set(self):
+        assert run_response_middleware(interface.ApiCorsMiddleware, "/api").get("Access-Control-Allow-Origin") == "*"
+        assert (
+            run_response_middleware(interface.ApiCorsMiddleware, "/sabnzbd/api").get("Access-Control-Allow-Origin")
+            == "*"
+        )
+
+    @pytest.mark.config({"api_cors": "https://example.com"})
+    def test_header_uses_configured_value(self):
+        assert (
+            run_response_middleware(interface.ApiCorsMiddleware, "/api").get("Access-Control-Allow-Origin")
+            == "https://example.com"
+        )
+
+    @pytest.mark.config({"api_cors": "*"})
+    def test_header_absent_on_other_routes(self):
+        assert run_response_middleware(interface.ApiCorsMiddleware, "/").get("Access-Control-Allow-Origin") is None
+        assert (
+            run_response_middleware(interface.ApiCorsMiddleware, "/config").get("Access-Control-Allow-Origin") is None
+        )
+
+    @pytest.mark.config({"api_cors": ""})
+    def test_header_absent_when_empty(self):
+        assert run_response_middleware(interface.ApiCorsMiddleware, "/api").get("Access-Control-Allow-Origin") is None
