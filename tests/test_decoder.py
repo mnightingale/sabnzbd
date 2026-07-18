@@ -228,6 +228,11 @@ class TestUuDecoder:
         [
             VALID_UU_LINES[-1][:10] + bytes("ваше здоровье", encoding="utf8") + VALID_UU_LINES[-1][-10:],  # Non-ascii
         ],
+        # The value embeds os.urandom-derived data (VALID_UU_LINES), which differs
+        # per process and cannot be seeded. Pin an explicit id so the collected
+        # node id is stable across xdist workers; each worker still runs its own
+        # random payload.
+        ids=["non_ascii"],
     )
     def test_broken_uu(self, bad_data):
         mock_nzf = mock.Mock()

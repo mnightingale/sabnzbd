@@ -21,6 +21,7 @@ These have to be separate otherwise SABnzbd is started multiple times!
 """
 
 import os
+import random
 import shutil
 import socket
 import subprocess
@@ -41,6 +42,8 @@ from tests.testhelper import (
     SAB_CACHE_DIR,
     SAB_DATA_DIR,
     SAB_HOST,
+    SAB_NEWSSERVER_HOST,
+    SAB_NEWSSERVER_PORT,
     SAB_PORT,
     SABnzbdBaseTest,
     get_api_result,
@@ -53,6 +56,33 @@ from tests.testhelper import (
 # fixtures (config_env, platform_env) are what apply the @pytest.mark.config
 # and @pytest.mark.platform markers, so they must be globally visible.
 from tests.testhelper import config_env, platform_env, fake_fs, sleepless  # noqa: F401
+
+
+def pytest_configure(config):
+    """Make randomized test parameters identical across pytest-xdist workers.
+
+    Several tests build their @pytest.mark.parametrize values with the random
+    module (e.g. random.sample of a large parameter space to keep the matrix
+    small). Those expressions are evaluated at collection time, separately in
+    every worker process. With an unseeded RNG each worker draws a different
+    subset, so the collected test IDs disagree and xdist aborts the run with
+    "Different tests were collected between gw...".
+
+    All workers of a single run share one testrunuid, so seeding Python's RNG
+    from it makes every worker draw the same parameters (identical collection)
+    while still varying from run to run. A serial run collects only once and
+    needs no seeding, so we leave the RNG untouched there.
+
+    Note: this cannot fix parameters derived from os.urandom (not seedable);
+    those must instead pin an explicit `ids=` on the parametrize.
+    """
+    testrunuid = None
+    workerinput = getattr(config, "workerinput", None)
+    if workerinput:
+        testrunuid = workerinput.get("testrunuid")
+    testrunuid = testrunuid or os.environ.get("PYTEST_XDIST_TESTRUNUID")
+    if testrunuid:
+        random.seed(testrunuid)
 
 
 def _port_is_open(host, port):
@@ -91,17 +121,11 @@ def clean_cache_dir(request):
 
     yield request
 
-    # Remove cache dir with retries in case it's still running
-    for x in range(100):
-        try:
-            shutil.rmtree(SAB_CACHE_DIR)
-            break
-        except (FileNotFoundError, PermissionError):
-            break
-        except OSError:
-            time.sleep(0.1)
-    else:
-        print("Unable to remove cache dir")
+    # Best-effort cleanup. A lingering handle on Windows (from the just-stopped
+    # instance, Defender, or the indexer) shouldn't fail teardown, and every
+    # worker uses its own isolated cache dir, so leftovers can't leak between
+    # workers. The setup phase above re-freshens the dir anyway.
+    shutil.rmtree(SAB_CACHE_DIR, ignore_errors=True)
 
 
 @pytest.fixture(scope="module")
@@ -129,12 +153,14 @@ def run_sabnzbd(clean_cache_dir, request):
             sabnzbd_process.kill()
             sabnzbd_process.communicate(timeout=30)
 
-        # The tracked PID exiting is not proof the instance is gone: SAB_PORT is a
-        # single random port reused by every module in the session, and a lingering
-        # instance (slow shutdown, re-exec, orphaned worker) keeps re-saving its own
-        # config over the shared cache dir. That is what intermittently wipes the
+        # The tracked PID exiting is not proof the instance is gone. Within a single
+        # worker the port and cache dir are reused by every module, so a lingering
+        # instance (slow shutdown, re-exec, orphaned worker) can keep re-saving its
+        # own config over the cache dir. That is what intermittently wipes the
         # freshly-copied module ini (e.g. dropping the converted [sorters] section).
         # Block until the port is actually free so the next module starts clean.
+        # (Across xdist workers the port/dir are already distinct, so this barrier
+        # only serializes consecutive modules on the same worker, not the whole run.)
         if not _wait_for_port_release(SAB_HOST, SAB_PORT):
             sabnzbd_process.kill()
             warn("Port %s:%s still in use after SABnzbd shutdown" % (SAB_HOST, SAB_PORT))
@@ -217,8 +243,18 @@ def run_sabnews_and_selenium(request):
     driver = webdriver.Chrome(options=driver_options)
     SABnzbdBaseTest.driver = driver
 
-    # Start SABNews
-    sabnews_process = subprocess.Popen([sys.executable, os.path.join(SAB_BASE_DIR, "sabnews.py")])
+    # Start SABNews on this worker's own host/port so parallel workers don't
+    # collide on a single fixed newsserver port.
+    sabnews_process = subprocess.Popen(
+        [
+            sys.executable,
+            os.path.join(SAB_BASE_DIR, "sabnews.py"),
+            "-s",
+            SAB_NEWSSERVER_HOST,
+            "-p",
+            str(SAB_NEWSSERVER_PORT),
+        ]
+    )
 
     # Now we run the tests
     yield
