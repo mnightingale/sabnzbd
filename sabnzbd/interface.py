@@ -2241,7 +2241,7 @@ async def config_notify_save(request: Request):
 
 class ThreadedServer(uvicorn.Server):
     def __init__(self, *args, **kwargs):
-        self.thread = None
+        self.thread: Optional[threading.Thread] = None
         self._startup_exc: Optional[BaseException] = None
         super().__init__(*args, **kwargs)
 
@@ -2275,7 +2275,9 @@ class ThreadedServer(uvicorn.Server):
 
     def stop(self):
         self.should_exit = True
-        self.thread.join()
+        # thread is None if the server was never started or start-up failed
+        if self.thread:
+            self.thread.join()
 
 
 def create_app() -> Starlette:

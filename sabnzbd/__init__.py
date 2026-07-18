@@ -437,7 +437,8 @@ def shutdown_program():
     if not sabnzbd.SABSTOP:
         logging.info("[%s] Performing SABnzbd shutdown", misc.caller_name())
         sabnzbd.halt()
-        sabnzbd.WEB_SERVER.stop()
+        if sabnzbd.WEB_SERVER:
+            sabnzbd.WEB_SERVER.stop()
         sabnzbd.SABSTOP = True
         notify_shutdown_loop()
 
