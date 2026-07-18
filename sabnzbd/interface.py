@@ -878,12 +878,7 @@ def get_access_info(request: Optional[Request] = None) -> list[str]:
 
 @secured_expose(route="/login", check_for_login=False)
 async def login_index(request: Request):
-    # Use unified params - works for both GET and POST requests
-    username = request_params(request).get("username")
-    password = request_params(request).get("password")
-    remember_me = request_params(request).get("remember_me", False)
-
-    # Check if there's even a username/password set
+    # Already logged in, or no username/password set at all
     if await check_login(request):
         return base_redirect_response("/")
 
@@ -894,11 +889,16 @@ async def login_index(request: Request):
         password = request_params(request).get("password")
         remember_me = bool(request_params(request).get("remember_me", False))
 
-        if username == cfg.username() and password == cfg.password():
+        # Constant-time comparison of submitted credentials against the configured
+        # username/password. Both fields are always compared (no short-circuit), so
+        # neither the comparison time nor an early exit leaks which field matched.
+        username_ok = hmac.compare_digest(utob(username or ""), utob(cfg.username()))
+        password_ok = hmac.compare_digest(utob(password or ""), utob(cfg.password()))
+        if username_ok and password_ok:
             # Create redirect response
             response = base_redirect_response("/")
             # Create a database-backed session and set the session cookie
-            await create_session(request, response, remember_me=bool(remember_me))
+            await create_session(request, response, remember_me=remember_me)
             # Log the success
             logging.info("Successful login from %s", client_address_info(request))
             return response
