@@ -73,10 +73,10 @@ class TestInterfaceFunctions:
             ("10.11.12.13", None, None, True),
             ("10.11.12.13", None, "127.0.0.1", True),
             ("10.11.12.13", None, "127.1.2.3", True),
-            ("10.11.12.13", None, "127.0.0.1:8080", False),  # Port number in XFF
+            ("10.11.12.13", None, "127.0.0.1:8080", True),  # Port stripped from XFF, leaving loopback
             ("10.11.12.13", None, "::1", True),
             ("10.11.12.13", None, "[::1]", True),
-            ("10.11.12.13", None, "[::1]:8080", False),  # Port number in XFF
+            ("10.11.12.13", None, "[::1]:8080", True),  # Port stripped from XFF, leaving loopback
             ("10.11.12.13", None, "localhost", False),  # Hostname in XFF
             ("10.11.12.13", None, "example.org", False),  # Hostname in XFF
             ("10.11.12.13", None, "192.168.1.1", True),
@@ -122,10 +122,10 @@ class TestInterfaceFunctions:
             ("127.6.6.6", None, None, True),
             ("127.6.6.6", None, "127.0.0.1", True),
             ("127.6.6.6", None, "127.1.2.3", True),
-            ("127.6.6.6", None, "127.0.0.1:8080", False),  # Port number in XFF
+            ("127.6.6.6", None, "127.0.0.1:8080", True),  # Port stripped from XFF, leaving loopback
             ("127.6.6.6", None, "::1", True),
             ("127.6.6.6", None, "[::1]", True),
-            ("127.6.6.6", None, "[::1]:8080", False),  # Port number in XFF
+            ("127.6.6.6", None, "[::1]:8080", True),  # Port stripped from XFF, leaving loopback
             ("127.6.6.6", None, "localhost", False),  # Hostname in XFF
             ("127.6.6.6", None, "example.org", False),  # Hostname in XFF
             ("127.6.6.6", None, "192.168.1.1", True),
@@ -256,7 +256,7 @@ class TestInterfaceFunctions:
             (["666::/48"], ["4.3.2.1", "192.168.0.1", "10.10.10.10", "127.0.0.1"], "10.10.10.10"),
             (["8.8.8.8"], ["4.3.2.1", "192.168.0.1", "10.10.10.10", "::1"], "10.10.10.10"),
             (["666::/48"], ["4.3.2.1", "192.168.0.1", "10.10.10.10", "::1"], "10.10.10.10"),
-            ([], ["4.3.2.1:56789"], "4.3.2.1:56789"),  # Garbage in, garbage out.
+            ([], ["4.3.2.1:56789"], "4.3.2.1"),  # Port stripped from XFF entry
         ],
     )
     @pytest.mark.config(
