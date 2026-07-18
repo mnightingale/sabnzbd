@@ -46,6 +46,7 @@ from typing import Any
 try:
     import sabctools
     import Cheetah
+    import aiosqlite
     import feedparser
     import configobj
     import cryptography

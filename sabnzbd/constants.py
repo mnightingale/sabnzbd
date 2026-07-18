@@ -58,6 +58,12 @@ SABCTOOLS_VERSION_REQUIRED = "9.6.2"
 DB_HISTORY_VERSION = 1
 DB_HISTORY_NAME = "history%s.db" % DB_HISTORY_VERSION
 
+# Web-UI login sessions (see sabnzbd.sessionstore). Deliberately kept out of
+# CONFIG_BACKUP_FILES: sessions are per-browser state that shouldn't move to a
+# restored install, and a lost sessions database only means logging in again.
+DB_SESSIONS_VERSION = 1
+DB_SESSIONS_NAME = "sessions%s.db" % DB_SESSIONS_VERSION
+
 DEF_DOWNLOAD_DIR = os.path.normpath("Downloads/incomplete")
 DEF_COMPLETE_DIR = os.path.normpath("Downloads/complete")
 DEF_ADMIN_DIR = "admin"

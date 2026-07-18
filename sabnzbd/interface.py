@@ -19,6 +19,7 @@
 sabnzbd.interface - webinterface
 """
 
+import contextlib
 import os
 import inspect
 import secrets
@@ -28,11 +29,11 @@ import logging
 import urllib.parse
 import re
 import hashlib
+import hmac
 import socket
 import ssl
 import functools
 import copy
-from random import randint
 
 import uvicorn
 from starlette.applications import Starlette
@@ -159,7 +160,7 @@ def secured_expose(
             return PlainTextResponse("", status_code=403)
 
         # Verify login status, only for non-key pages
-        if check_for_login and not check_api_key and not check_login(request):
+        if check_for_login and not check_api_key and not await check_login(request):
             return RedirectResponse(url=f"{cfg.url_base()}/login")
 
         # Verify host used for the visit
@@ -170,7 +171,7 @@ def secured_expose(
 
         # Some pages need correct API key
         if check_api_key:
-            if msg := check_apikey(request):
+            if msg := await check_apikey(request):
                 if cfg.api_warnings():
                     return PlainTextResponse(msg, status_code=403)
                 return PlainTextResponse("", status_code=403)
@@ -180,8 +181,26 @@ def secured_expose(
         # blocking work (template rendering, disk and database access) cannot stall
         # the event loop.
         if inspect.iscoroutinefunction(wrap_func):
-            return await wrap_func(request, *args, **kwargs)
-        return await run_in_threadpool(wrap_func, request, *args, **kwargs)
+            response = await wrap_func(request, *args, **kwargs)
+        else:
+            response = await run_in_threadpool(wrap_func, request, *args, **kwargs)
+
+        # When authentication is disabled, issue a stateless anonymous session cookie on
+        # the UI page routes so the frontend authenticates API calls by cookie instead of
+        # the apikey. Limited to check_for_login routes (the real UI pages) so bots hitting
+        # robots.txt/favicon and the login/logout routes don't get cookies. API routes never
+        # set the cookie: the browser always loads a page (and its cookie) first.
+        if (
+            check_for_login
+            and not check_api_key
+            and not cfg.username()
+            and not cfg.password()
+            and isinstance(response, Response)
+            and not validate_anonymous_session(request)
+        ):
+            create_anonymous_session(response)
+
+        return response
 
     if route:
         INTERFACE_ROUTES.append(Route(route, endpoint=internal_wrap, methods=methods))
@@ -258,72 +277,134 @@ def check_hostname(request: Request) -> bool:
     return False
 
 
-# Create a more unique ID for each instance
-COOKIE_SECRET = str(randint(1000, 100000) * os.getpid())
+# Name of the cookie holding the session token: a database-backed login token, or the
+# stateless anonymous tag when no credentials are configured. Deliberately distinct
+# from the Starlette SessionMiddleware cookie ("sabnzbd_flash", see create_app), which is
+# an unrelated signed client-side cookie used only for transient RSS flash messages.
+SESSION_COOKIE = "sabnzbd_user_session"
+# Sessions last 30 days; expiry slides forward on use (throttled by SESSION_REFRESH_THRESHOLD)
+SESSION_DURATION = 3600 * 24 * 30  # 30 days
+# Only extend a session's expiry once it has less than (duration - threshold) remaining,
+# so an active session triggers at most ~1 database write per day
+SESSION_REFRESH_THRESHOLD = 3600 * 24  # 1 day
 
 
-def set_login_cookie(request: Request, response: Response, remove=False, remember_me=False):
-    """Set login cookie for Starlette (updated version)
-    We try to set a cookie as unique as possible
-    to the current user. Based on it's IP and the
-    current process ID of the SAB instance and a random
-    number, so cookies cannot be re-used
-    """
-    salt = randint(1, 1000)
-
-    # request.client is the effective client: uvicorn resolves the XFF header
-    # from trusted proxies when verify_xff_header is enabled
-    cookie_str = utob(str(salt) + client_address(request).host + COOKIE_SECRET)
-    cookie_value = hashlib.sha1(cookie_str).hexdigest()
-
-    secure = cfg.enable_https()
-    if remove:
-        # Remove cookies
-        response.set_cookie(
-            "login_cookie",
-            "",
-            path="/",
-            httponly=True,
-            secure=secure,
-            samesite="strict",
-            expires="Thu, 01 Jan 1970 00:00:00 GMT",
-        )
-        response.set_cookie(
-            "login_salt",
-            "",
-            path="/",
-            httponly=True,
-            secure=secure,
-            samesite="strict",
-            expires="Thu, 01 Jan 1970 00:00:00 GMT",
-        )
-    else:
-        # Set cookies
-        max_age = None
-        if remember_me:
-            max_age = 3600 * 24 * 14  # 14 days
-
-        response.set_cookie(
-            "login_cookie",
-            cookie_value,
-            path="/",
-            httponly=True,
-            secure=secure,
-            samesite="strict",
-            max_age=max_age,
-        )
-        response.set_cookie(
-            "login_salt",
-            str(salt),
-            path="/",
-            httponly=True,
-            secure=secure,
-            samesite="strict",
-            max_age=max_age,
-        )
+def credential_fingerprint() -> str:
+    """Fingerprint of the current username/password. Stored with each session and
+    compared on validation, so changing either credential invalidates all sessions."""
+    return hashlib.sha256(utob("%s:%s" % (cfg.username(), cfg.password()))).hexdigest()
 
 
-def check_login(request: Request) -> bool:
+def hash_session_token(token: str) -> str:
+    """Hash of the raw cookie token; only the hash is stored server-side"""
+    return hashlib.sha256(utob(token)).hexdigest()
+
+
+async def create_session(request: Request, response: Response, remember_me: bool = False):
+    """Create a new database-backed login session and set the session cookie on the response"""
+    token = secrets.token_urlsafe(32)
+    now = int(time.time())
+    await sabnzbd.session_store.add_session(
+        token_hash=hash_session_token(token),
+        created=now,
+        expires=now + SESSION_DURATION,
+        cred_fingerprint=credential_fingerprint(),
+        last_ip=client_address(request).host,
+        user_agent=request.headers.get("User-Agent"),
+    )
+
+    # remember_me yields a persistent cookie; a plain login without remember_me
+    # yields a browser-session cookie, while the row still lives 30 days
+    max_age = SESSION_DURATION if remember_me else None
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        path="/",
+        httponly=True,
+        secure=cfg.enable_https(),
+        samesite="strict",
+        max_age=max_age,
+    )
+
+
+# Anonymous sessions (used when no username/password is set, so the frontend can
+# authenticate API calls by cookie without the apikey) are stateless: the cookie
+# holds an HMAC tag instead of a database-backed token, so cookie-less clients
+# (bots, scanners) cannot grow the sessions table by minting a row per request.
+# The key is regenerated each run; after a restart the next page load simply
+# receives a fresh cookie. All anonymous clients share the same tag: it carries
+# no identity, it only proves the client loaded a UI page from this instance.
+_ANONYMOUS_SESSION_KEY = secrets.token_bytes(32)
+
+
+def anonymous_session_tag() -> str:
+    """The stateless anonymous session cookie value for this run"""
+    return hmac.new(_ANONYMOUS_SESSION_KEY, b"anonymous-session", hashlib.sha256).hexdigest()
+
+
+def validate_anonymous_session(request: Request) -> bool:
+    """Return True when no credentials are configured and the request
+    carries a valid anonymous session cookie"""
+    if cfg.username() and cfg.password():
+        return False
+    return hmac.compare_digest(request.cookies.get(SESSION_COOKIE, ""), anonymous_session_tag())
+
+
+def create_anonymous_session(response: Response):
+    """Set the stateless anonymous session cookie on the response"""
+    response.set_cookie(
+        SESSION_COOKIE,
+        anonymous_session_tag(),
+        path="/",
+        httponly=True,
+        secure=cfg.enable_https(),
+        samesite="strict",
+        max_age=SESSION_DURATION,
+    )
+
+
+async def clear_session(request: Request, response: Response):
+    """Delete the request's session (if any) and clear the session cookie"""
+    if token := request.cookies.get(SESSION_COOKIE):
+        await sabnzbd.session_store.delete_session(hash_session_token(token))
+    response.set_cookie(
+        SESSION_COOKIE,
+        "",
+        path="/",
+        httponly=True,
+        secure=cfg.enable_https(),
+        samesite="strict",
+        expires="Thu, 01 Jan 1970 00:00:00 GMT",
+    )
+
+
+async def validate_session(request: Request) -> bool:
+    """Return True when the request carries a valid, non-expired session cookie whose
+    credential fingerprint still matches the configured username/password. Expired or
+    stale sessions are deleted, and a still-valid session slides its expiry forward."""
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token:
+        return False
+
+    token_hash = hash_session_token(token)
+    now = int(time.time())
+    session = await sabnzbd.session_store.get_session(token_hash)
+    if not session:
+        return False
+
+    # Reject (and clean up) expired sessions or sessions from before a credential change
+    if session["expires"] < now or session["cred_fingerprint"] != credential_fingerprint():
+        await sabnzbd.session_store.delete_session(token_hash)
+        return False
+
+    # Sliding expiry, throttled to roughly one write per day per session
+    if session["expires"] - now < SESSION_DURATION - SESSION_REFRESH_THRESHOLD:
+        await sabnzbd.session_store.touch_session(token_hash, now + SESSION_DURATION)
+
+    return True
+
+
+async def check_login(request: Request) -> bool:
     """Check if user is logged in (Starlette version)"""
     # No authentication required when no username/password is set
     if not cfg.username() or not cfg.password():
@@ -333,25 +414,11 @@ def check_login(request: Request) -> bool:
     if cfg.inet_exposure() == 5 and check_access(request, access_type=6):
         return True
 
-    # Check the cookie
-    return check_login_cookie(request)
+    # Check the session cookie
+    return await validate_session(request)
 
 
-def check_login_cookie(request: Request) -> bool:
-    """Check login cookie validity (Starlette version)"""
-    # Do we have everything?
-    login_cookie = request.cookies.get("login_cookie")
-    login_salt = request.cookies.get("login_salt")
-    if not login_cookie or not login_salt:
-        return False
-
-    # request.client is the effective client: uvicorn resolves the XFF header
-    # from trusted proxies when verify_xff_header is enabled
-    cookie_str = utob(str(login_salt) + client_address(request).host + COOKIE_SECRET)
-    return login_cookie == hashlib.sha1(cookie_str).hexdigest()
-
-
-def check_apikey(request: Request) -> Optional[str]:
+async def check_apikey(request: Request) -> Optional[str]:
     """Check API-key or NZB-key (Starlette version)
     Return None when OK, otherwise an error message
     """
@@ -365,6 +432,12 @@ def check_apikey(request: Request) -> Optional[str]:
 
     # Skip for auth and version calls
     if mode in ("version", "auth"):
+        return None
+
+    # A valid browser session (login or anonymous cookie) authorizes API calls without
+    # the apikey, so the frontend no longer needs the key embedded in the page. The
+    # anonymous check comes first: it is a pure HMAC compare, no database access.
+    if validate_anonymous_session(request) or await validate_session(request):
         return None
 
     # First check API-key, if OK that's sufficient
@@ -688,26 +761,23 @@ def get_access_info(request: Optional[Request] = None):
 
 
 @secured_expose(route="/login", check_for_login=False)
-def login_index(request: Request):
-    # Base output var
-    info = build_header(sabnzbd.WEB_DIR_CONFIG)
-    info["error"] = ""
-
+async def login_index(request: Request):
     # Use unified params - works for both GET and POST requests
     username = request_params(request).get("username")
     password = request_params(request).get("password")
     remember_me = request_params(request).get("remember_me", False)
 
     # Check if there's even a username/password set
-    if check_login(request):
+    if await check_login(request):
         return RedirectResponse(url=f"{cfg.url_base()}/", status_code=302)
 
     # Check login info
+    error = None
     if username == cfg.username() and password == cfg.password():
         # Create redirect response
         response = RedirectResponse(url=f"{cfg.url_base()}/", status_code=302)
-        # Save login cookie
-        set_login_cookie(request, response, remember_me=remember_me)
+        # Create a database-backed session and set the session cookie
+        await create_session(request, response, remember_me=bool(remember_me))
         # Log the success
         remote_info = "%s:%s" % client_address(request)
         if cfg.verify_xff_header() and (xff_ips := request.headers.get("X-Forwarded-For")):
@@ -715,24 +785,30 @@ def login_index(request: Request):
         logging.info("Successful login from %s", remote_info)
         return response
     elif username or password:
-        info["error"] = T("Authentication failed, check username/password.")
+        error = T("Authentication failed, check username/password.")
         # Warn about the potential security problem
         remote_info = "%s:%s" % client_address(request)
         if cfg.verify_xff_header() and (xff_ips := request.headers.get("X-Forwarded-For")):
             remote_info += f" (X-Forwarded-For: {xff_ips})"
         logging.warning(T("Unsuccessful login attempt from %s"), remote_info)
 
-    # Show login
-    return template_filtered_response(
-        file=os.path.join(sabnzbd.WEB_DIR_CONFIG, "login", "main.tmpl"),
-        search_list=info,
-    )
+    # Show login. Building the header and rendering the Cheetah template are
+    # blocking work, so keep them off the event loop.
+    def render_login_page():
+        info = build_header(sabnzbd.WEB_DIR_CONFIG)
+        info["error"] = error
+        return template_filtered_response(
+            file=os.path.join(sabnzbd.WEB_DIR_CONFIG, "login", "main.tmpl"),
+            search_list=info,
+        )
+
+    return await run_in_threadpool(render_login_page)
 
 
 @secured_expose(route="/logout", check_for_login=False, methods=["GET"])
-def logout_index(request: Request):
+async def logout_index(request: Request):
     response = RedirectResponse(url=f"{cfg.url_base()}/", status_code=302)
-    set_login_cookie(request, response, remove=True)
+    await clear_session(request, response)
     return response
 
 
@@ -1034,6 +1110,10 @@ def index_config_general(request: Request):
         conf[kw] = config.get_config("misc", kw)()
 
     conf["nzb_key"] = cfg.nzb_key()
+
+    # Config -> General is the one page that intentionally displays the user's apikey
+    # (for 3rd-party programs); it is no longer part of build_header
+    conf["apikey"] = cfg.api_key()
 
     return template_filtered_response(
         file=os.path.join(sabnzbd.WEB_DIR_CONFIG, "config_general.tmpl"),
@@ -2266,6 +2346,15 @@ class ThreadedServer(uvicorn.Server):
             self.thread.join()
 
 
+@contextlib.asynccontextmanager
+async def app_lifespan(app: Starlette):
+    """Close the async session store when the server's event loop shuts down.
+    The store is opened lazily on the first session lookup, so there is no
+    startup counterpart."""
+    yield
+    await sabnzbd.session_store.close()
+
+
 def create_app() -> Starlette:
     """Build the Starlette application.
 
@@ -2303,13 +2392,15 @@ def create_app() -> Starlette:
         # Signed session cookie, used for short-lived per-client UI state such as the
         # RSS read-out result message (flash). Secret key is regenerated each run,
         # so sessions naturally expire on restart, which is fine for flash messages.
+        # This is NOT authentication: the authenticated-user session lives in a separate,
+        # DB-backed cookie (SESSION_COOKIE = "sabnzbd_user_session").
         Middleware(
             SessionMiddleware,
             secret_key=secrets.token_hex(),
-            session_cookie="sabnzbd_session",
+            session_cookie="sabnzbd_flash",
             same_site="lax",
             https_only=bool(cfg.enable_https()),
         ),
     ]
 
-    return Starlette(middleware=middleware, routes=routes)
+    return Starlette(middleware=middleware, routes=routes, lifespan=app_lifespan)

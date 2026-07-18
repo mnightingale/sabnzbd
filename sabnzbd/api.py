@@ -1944,7 +1944,6 @@ def build_header(webdir: str = "", for_template: bool = True, trans_functions: b
         header["power_options"] = sabnzbd.WINDOWS or sabnzbd.MACOS or sabnzbd.LINUX_POWER
         header["pp_pause_event"] = sabnzbd.Scheduler.pp_pause_event
 
-        header["apikey"] = cfg.api_key()
         header["new_release"], header["new_rel_url"] = sabnzbd.NEW_VERSION
 
         # Add the commit hash so static files are refreshed on nightly/development builds

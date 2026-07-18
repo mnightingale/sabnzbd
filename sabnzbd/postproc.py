@@ -95,7 +95,6 @@ from sabnzbd.decorators import synchronized
 import sabnzbd.emailer as emailer
 import sabnzbd.config as config
 import sabnzbd.cfg as cfg
-import sabnzbd.database as database
 import sabnzbd.notifier as notifier
 import sabnzbd.utils.rarvolinfo as rarvolinfo
 import sabnzbd.utils.checkdir
