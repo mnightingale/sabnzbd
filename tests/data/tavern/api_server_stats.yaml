@@ -42,7 +42,6 @@ stages:
         content-type: !re_match "text/xml"
         content-type: !re_search "charset=(UTF|utf)-8"
         pragma: "no-cache"
-        access-control-allow-origin: "*"
         content-length: !re_match "[0-9]+"
       status_code: 200
       verify_response_with:

@@ -1247,10 +1247,7 @@ def report(
     return Response(
         response,
         media_type=content,
-        headers={
-            "Pragma": "no-cache",
-            "Access-Control-Allow-Origin": "*",
-        },
+        headers={"Pragma": "no-cache"},
     )
 
 
