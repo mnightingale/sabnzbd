@@ -50,3 +50,4 @@ markers = [
     "platform",
     "fake_fs"
 ]
+asyncio_default_fixture_loop_scope = "session"
