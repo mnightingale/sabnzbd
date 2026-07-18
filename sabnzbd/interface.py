@@ -788,35 +788,37 @@ def get_access_info(request: Optional[Request] = None):
 
 @secured_expose(route="/login", check_for_login=False)
 async def login_index(request: Request):
-    # Use unified params - works for both GET and POST requests
-    username = request_params(request).get("username")
-    password = request_params(request).get("password")
-    remember_me = request_params(request).get("remember_me", False)
-
-    # Check if there's even a username/password set
+    # Already logged in, or no username/password set at all
     if await check_login(request):
         return RedirectResponse(url=f"{cfg.url_base()}/", status_code=302)
 
-    # Check login info
+    # Only a POST (the login form) is a credential submission; a GET just renders the form.
+    # Accepting credentials from the query string would leak them into browser history,
+    # access logs and the Referer header.
     error = None
-    if check_login_credentials(username, password):
-        # Create redirect response
-        response = RedirectResponse(url=f"{cfg.url_base()}/", status_code=302)
-        # Create a database-backed session and set the session cookie
-        await create_session(request, response, remember_me=bool(remember_me))
-        # Log the success
-        remote_info = "%s:%s" % client_address(request)
-        if cfg.verify_xff_header() and (xff_ips := request.headers.get("X-Forwarded-For")):
-            remote_info += f" (X-Forwarded-For: {xff_ips})"
-        logging.info("Successful login from %s", remote_info)
-        return response
-    elif username or password:
-        error = T("Authentication failed, check username/password.")
-        # Warn about the potential security problem
-        remote_info = "%s:%s" % client_address(request)
-        if cfg.verify_xff_header() and (xff_ips := request.headers.get("X-Forwarded-For")):
-            remote_info += f" (X-Forwarded-For: {xff_ips})"
-        logging.warning(T("Unsuccessful login attempt from %s"), remote_info)
+    if request.method == "POST":
+        username = request_params(request).get("username")
+        password = request_params(request).get("password")
+        remember_me = bool(request_params(request).get("remember_me", False))
+
+        if check_login_credentials(username, password):
+            # Create redirect response
+            response = RedirectResponse(url=f"{cfg.url_base()}/", status_code=302)
+            # Create a database-backed session and set the session cookie
+            await create_session(request, response, remember_me=remember_me)
+            # Log the success
+            remote_info = "%s:%s" % client_address(request)
+            if cfg.verify_xff_header() and (xff_ips := request.headers.get("X-Forwarded-For")):
+                remote_info += f" (X-Forwarded-For: {xff_ips})"
+            logging.info("Successful login from %s", remote_info)
+            return response
+        elif username or password:
+            error = T("Authentication failed, check username/password.")
+            # Warn about the potential security problem
+            remote_info = "%s:%s" % client_address(request)
+            if cfg.verify_xff_header() and (xff_ips := request.headers.get("X-Forwarded-For")):
+                remote_info += f" (X-Forwarded-For: {xff_ips})"
+            logging.warning(T("Unsuccessful login attempt from %s"), remote_info)
 
     # Show login. Building the header and rendering the Cheetah template are
     # blocking work, so keep them off the event loop.
