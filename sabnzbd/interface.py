@@ -307,6 +307,15 @@ SESSION_DURATION = 3600 * 24 * 30  # 30 days
 SESSION_REFRESH_THRESHOLD = 3600 * 24  # 1 day
 
 
+def check_login_credentials(username: Optional[str], password: Optional[str]) -> bool:
+    """Constant-time comparison of submitted credentials against the configured
+    username/password. Both fields are always compared (no short-circuit), so
+    neither the comparison time nor an early exit leaks which field matched."""
+    username_ok = hmac.compare_digest(utob(username or ""), utob(cfg.username()))
+    password_ok = hmac.compare_digest(utob(password or ""), utob(cfg.password()))
+    return username_ok and password_ok
+
+
 def credential_fingerprint() -> str:
     """Fingerprint of the current username/password. Stored with each session and
     compared on validation, so changing either credential invalidates all sessions."""
@@ -790,7 +799,7 @@ async def login_index(request: Request):
 
     # Check login info
     error = None
-    if username == cfg.username() and password == cfg.password():
+    if check_login_credentials(username, password):
         # Create redirect response
         response = RedirectResponse(url=f"{cfg.url_base()}/", status_code=302)
         # Create a database-backed session and set the session cookie
