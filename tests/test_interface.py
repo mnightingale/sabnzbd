@@ -26,12 +26,17 @@ interface.check_access previously implemented in-app.
 """
 
 import asyncio
+import inspect
+import time
 import pytest
 from unittest.mock import Mock
 from starlette.requests import Request
 from starlette.datastructures import Headers, Address
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
+import sabnzbd
+import sabnzbd.cfg as cfg
+import sabnzbd.sessionstore as sessionstore
 from sabnzbd import interface
 from sabnzbd.misc import is_local_addr, is_loopback_addr, xff_trusted_networks
 
@@ -308,3 +313,146 @@ class TestInterfaceFunctions:
                 assert network not in networks
 
         _func()
+
+
+def request_with_cookie(token: str | None = None, params: dict | None = None, remote_ip: str = "127.0.0.1"):
+    """Mock request carrying an optional session cookie and merged API params"""
+    request = create_mock_request(remote_ip=remote_ip)
+    request.cookies = {interface.SESSION_COOKIE: token} if token else {}
+    request.state.params = params or {}
+    return request
+
+
+class TestSessionAuth:
+    """The auth path is async: session lookups run through the AsyncSessionStore
+    (sessions1.db) so the event loop never blocks on database access"""
+
+    @pytest.fixture
+    def session_store(self, tmp_path, monkeypatch):
+        """Wire sabnzbd.session_store to a fresh sessions database"""
+        store = sessionstore.AsyncSessionStore(db_path=str(tmp_path / "sessions1.db"))
+        monkeypatch.setattr(sabnzbd, "session_store", store)
+        yield store
+        asyncio.run(store.close())
+
+    def _store_session(self, store, token: str, expires_offset: int = interface.SESSION_DURATION):
+        now = int(time.time())
+        asyncio.run(
+            store.add_session(
+                interface.hash_session_token(token),
+                now,
+                now + expires_offset,
+                interface.credential_fingerprint(),
+            )
+        )
+
+    @pytest.mark.config({"username": "user", "password": "pass"})
+    def test_valid_session_authorizes(self, session_store):
+        self._store_session(session_store, "good-token")
+        assert asyncio.run(interface.validate_session(request_with_cookie("good-token"))) is True
+
+    @pytest.mark.config({"username": "user", "password": "pass"})
+    def test_no_cookie_rejected(self, session_store):
+        assert asyncio.run(interface.validate_session(request_with_cookie(None))) is False
+
+    @pytest.mark.config({"username": "user", "password": "pass"})
+    def test_expired_session_rejected_and_deleted(self, session_store):
+        self._store_session(session_store, "old-token", expires_offset=-10)
+        assert asyncio.run(interface.validate_session(request_with_cookie("old-token"))) is False
+        # The stale row is cleaned up on rejection
+        assert asyncio.run(session_store.get_session(interface.hash_session_token("old-token"))) is None
+
+    @pytest.mark.config({"username": "user", "password": "pass"})
+    def test_credential_change_invalidates_session(self, session_store):
+        self._store_session(session_store, "tok")
+        assert asyncio.run(interface.validate_session(request_with_cookie("tok"))) is True
+        # Changing the password changes the fingerprint, invalidating existing sessions
+        cfg.password.set("newpass")
+        assert asyncio.run(interface.validate_session(request_with_cookie("tok"))) is False
+
+    @pytest.mark.config({"username": "user", "password": "pass"})
+    def test_sliding_expiry_extends(self, session_store):
+        # Store a session already past its refresh threshold so validation touches it
+        self._store_session(session_store, "tok", expires_offset=interface.SESSION_REFRESH_THRESHOLD)
+        token_hash = interface.hash_session_token("tok")
+        before = asyncio.run(session_store.get_session(token_hash))["expires"]
+        assert asyncio.run(interface.validate_session(request_with_cookie("tok"))) is True
+        after = asyncio.run(session_store.get_session(token_hash))["expires"]
+        assert after > before
+
+    @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 0})
+    def test_check_apikey_accepts_session_without_key(self, session_store):
+        self._store_session(session_store, "browser-token")
+        # A local browser call with a valid session and no apikey is authorized
+        request = request_with_cookie("browser-token", params={"mode": "queue", "name": ""})
+        assert asyncio.run(interface.check_apikey(request)) is None
+
+    @pytest.mark.config({"username": "user", "password": "pass"})
+    def test_auth_functions_are_async(self):
+        """Guard against a sync regression: these run on the event loop inside
+        secured_expose, so they must stay awaitable (blocking work belongs in
+        the session store or a threadpool)"""
+        for func in (
+            interface.validate_session,
+            interface.check_login,
+            interface.check_apikey,
+            interface.create_session,
+            interface.clear_session,
+        ):
+            assert inspect.iscoroutinefunction(func)
+
+
+class TestAnonymousSession:
+    """Anonymous sessions are stateless (HMAC cookie), never database rows"""
+
+    @pytest.mark.config({"username": "", "password": ""})
+    def test_valid_tag_accepted(self):
+        assert interface.validate_anonymous_session(request_with_cookie(interface.anonymous_session_tag())) is True
+
+    @pytest.mark.config({"username": "", "password": ""})
+    def test_missing_or_wrong_tag_rejected(self):
+        assert interface.validate_anonymous_session(request_with_cookie(None)) is False
+        assert interface.validate_anonymous_session(request_with_cookie("forged-tag")) is False
+
+    @pytest.mark.config({"username": "user", "password": "pass"})
+    def test_rejected_when_credentials_configured(self):
+        # A tag minted while auth was off grants nothing once credentials are set
+        assert interface.validate_anonymous_session(request_with_cookie(interface.anonymous_session_tag())) is False
+
+    @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
+    def test_check_apikey_accepts_anonymous_without_key(self):
+        request = request_with_cookie(interface.anonymous_session_tag(), params={"mode": "queue", "name": ""})
+        assert asyncio.run(interface.check_apikey(request)) is None
+
+    @pytest.mark.config({"username": "", "password": ""})
+    def test_create_sets_matching_cookie(self):
+        response = Mock()
+        interface.create_anonymous_session(response)
+        assert response.set_cookie.call_args.args[1] == interface.anonymous_session_tag()
+        assert response.set_cookie.call_args.args[0] == interface.SESSION_COOKIE
+
+
+def run_xframe_middleware() -> Headers:
+    """Run a minimal request through XFrameOptionsMiddleware and return the response headers"""
+    captured = {}
+
+    async def asgi_app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/html")]})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            captured["headers"] = Headers(raw=message["headers"])
+
+    asyncio.run(interface.XFrameOptionsMiddleware(asgi_app)({"type": "http", "headers": []}, None, send))
+    return captured["headers"]
+
+
+class TestXFrameOptionsMiddleware:
+    @pytest.mark.config({"x_frame_options": True})
+    def test_header_added_when_enabled(self):
+        assert run_xframe_middleware().get("X-Frame-Options") == "SAMEORIGIN"
+
+    @pytest.mark.config({"x_frame_options": False})
+    def test_header_absent_when_disabled(self):
+        assert run_xframe_middleware().get("X-Frame-Options") is None
