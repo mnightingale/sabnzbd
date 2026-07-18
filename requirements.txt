@@ -49,7 +49,7 @@ winrt-Windows.Data.Xml.Dom==3.2.1; sys_platform == 'win32'
 winrt-Windows.Foundation==3.2.1; sys_platform == 'win32'
 winrt-Windows.Foundation.Collections==3.2.1; sys_platform == 'win32'
 winrt-Windows.UI.Notifications==3.2.1; sys_platform == 'win32'
-typing_extensions==4.15.0; sys_platform == 'win32'
+typing_extensions==4.15.0; sys_platform == 'win32' or python_version < '3.13'
 
 # macOS system calls
 pyobjc-core==12.2.1; sys_platform == 'darwin'
