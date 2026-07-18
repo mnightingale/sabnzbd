@@ -313,6 +313,7 @@ class FakeHistoryDB(db.HistoryDB):
     ]
 
     def __init__(self, db_path):
+        # Pooled connections pointing at another path are discarded automatically
         db.HistoryDB.db_path = db_path
         super().__init__()
 
