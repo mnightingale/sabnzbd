@@ -38,7 +38,7 @@ import copy
 import uvicorn
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
-from starlette.datastructures import Address, MultiDict, QueryParams
+from starlette.datastructures import Address, MultiDict, MutableHeaders, QueryParams
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, PlainTextResponse, Response, FileResponse
 from starlette.middleware import Middleware
@@ -2305,6 +2305,28 @@ def config_notify_save(request: Request):
 ##############################################################################
 
 
+class XFrameOptionsMiddleware:
+    """Add X-Frame-Options to every response when cfg.x_frame_options is enabled,
+    mitigating clickjacking. Applied as middleware rather than in secured_expose so
+    it also covers static file mounts, redirects, the login page and error responses.
+    The setting is read per request, so toggling it needs no restart. Implemented as
+    pure ASGI (not BaseHTTPMiddleware) to keep streaming responses untouched."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not cfg.x_frame_options():
+            return await self.app(scope, receive, send)
+
+        async def send_with_header(message):
+            if message["type"] == "http.response.start":
+                MutableHeaders(scope=message)["X-Frame-Options"] = "SAMEORIGIN"
+            await send(message)
+
+        await self.app(scope, receive, send_with_header)
+
+
 class ThreadedServer(uvicorn.Server):
     def __init__(self, *args, **kwargs):
         self.thread: Optional[threading.Thread] = None
@@ -2388,6 +2410,7 @@ def create_app() -> Starlette:
     routes.append(Mount("/", routes=interface_routes))
 
     middleware = [
+        Middleware(XFrameOptionsMiddleware),
         Middleware(GZipMiddleware, minimum_size=1000, compresslevel=2),
         # Signed session cookie, used for short-lived per-client UI state such as the
         # RSS read-out result message (flash). Secret key is regenerated each run,
