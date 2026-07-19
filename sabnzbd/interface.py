@@ -117,6 +117,7 @@ _MSG_ACCESS_DENIED_HOSTNAME = "Access denied - Hostname verification failed: htt
 _MSG_MISSING_AUTH = "Missing authentication"
 _MSG_APIKEY_REQUIRED = "API Key Required"
 _MSG_APIKEY_INCORRECT = "API Key Incorrect"
+_MSG_MISSING_SESSION = "Access denied - Missing session cookie, reload the page and try again"
 
 RE_HOST_PORT = re.compile(":[0-9]+$")
 
@@ -592,15 +593,17 @@ class SecurityMiddleware:
                 return await response(scope, receive, send)
             # When authentication is disabled, issue a stateless anonymous session cookie on
             # the UI page routes so the frontend authenticates API calls by cookie instead of
-            # the apikey. Limited to check_for_login routes (the real UI pages) so bots hitting
-            # robots.txt/favicon and the login/logout routes don't get one, and API routes
-            # never set it: the browser always loads a page (and its cookie) first. Pure ASGI,
-            # so the cookie is injected into the response start rather than onto a Response.
+            # the apikey, and POSTs pass the CSRF guard in denied_response. Limited to
+            # check_for_login routes (the real UI pages) so bots hitting robots.txt/favicon and
+            # the login/logout routes don't get one, and API routes never set it: the browser
+            # always loads a page (and its cookie) first. Pure ASGI, so the cookie is injected
+            # into the response start rather than onto a Response. The credentials condition
+            # matches check_login's definition of "no authentication required" (either field
+            # missing), so partial credentials cannot leave the UI without a cookie.
             if (
                 self.check_for_login
                 and not self.check_api_key
-                and not cfg.username()
-                and not cfg.password()
+                and (not cfg.username() or not cfg.password())
                 and not validate_anonymous_session(request)
             ):
                 send = _anonymous_session_sender(send)
@@ -610,19 +613,34 @@ class SecurityMiddleware:
         """Return the response to send when a check fails, or None when allowed."""
         # Check if config is locked
         if self.check_configlock and cfg.configlock():
-            return PlainTextResponse(_MSG_ACCESS_DENIED_CONFIG_LOCK if cfg.api_warnings() else "", status_code=403)
+            return forbidden(_MSG_ACCESS_DENIED_CONFIG_LOCK)
 
         # Check if external access and if it's allowed
         if not check_access(request, access_type=self.access_type, warn_user=True):
-            return PlainTextResponse(_MSG_ACCESS_DENIED if cfg.api_warnings() else "", status_code=403)
+            return forbidden(_MSG_ACCESS_DENIED)
 
         # Verify login status, only for non-key pages
         if self.check_for_login and not self.check_api_key and not await check_login(request):
             return base_redirect_response("/login")
 
+        # CSRF guard for state-changing requests. With credentials configured, the
+        # check_login above already required the SameSite=Strict login cookie, which
+        # cross-site requests never carry. Without (full) credentials check_login passes
+        # with no cookie at all, so a cross-site form could otherwise POST config changes:
+        # require the SameSite=Strict anonymous session cookie, which every UI page load issues.
+        if (
+            self.check_for_login
+            and not self.check_api_key
+            and request.method == "POST"
+            and (not cfg.username() or not cfg.password())
+            and not validate_anonymous_session(request)
+        ):
+            log_warning_and_ip(request, T("Refused connection from:"))
+            return forbidden(_MSG_MISSING_SESSION)
+
         # Some pages need the correct API key
         if self.check_api_key and (msg := await check_apikey(request)):
-            return PlainTextResponse(msg if cfg.api_warnings() else "", status_code=403)
+            return forbidden(msg)
 
         return None
 
@@ -687,10 +705,15 @@ def main_index(request: Request):
 
 @secured_expose(route="/shutdown")
 async def shutdown(request: Request):
-    # Check for PID
-    pid_in = request_params(request).get("pid")
-    if pid_in and int_conv(pid_in) != os.getpid():
-        return PlainTextResponse("Incorrect PID for this instance, remove PID from URL to initiate shutdown.")
+    """Shut down and show a goodbye page, for UI users; automation should use
+    the mode=shutdown API-call. Only a POST shuts down: the UI submits it as a
+    form, so the browser navigates to this response, and it is authorized like
+    any other page POST — a SameSite=Strict session cookie (login or anonymous),
+    which a cross-site page cannot send, so it cannot trigger a shutdown. A GET
+    (stale bookmark, typed URL or pre-1.x link) must never shut down anything
+    and is sent back to the main page."""
+    if request.method != "POST":
+        return base_redirect_response("/")
 
     await halt_and_shutdown()
     return PlainTextResponse(T("SABnzbd shutdown finished"))
@@ -756,8 +779,9 @@ def wizard_index(request: Request):
 
 @secured_expose(route="/wizard/one", check_configlock=True, methods=["GET", "POST"])
 def wizard_page_one(request: Request):
-    """Accept language and show server page"""
-    if request_params(request).get("lang"):
+    """Accept language (POSTed by the index page form) and show server page.
+    A GET only renders the page, e.g. when navigating back from page two."""
+    if request.method == "POST" and request_params(request).get("lang"):
         cfg.language.set(request_params(request).get("lang"))
 
     info = build_header(sabnzbd.WIZARD_DIR, request=request)
@@ -800,9 +824,12 @@ def wizard_page_one(request: Request):
 
 @secured_expose(route="/wizard/two", check_configlock=True, methods=["GET", "POST"])
 def wizard_page_two(request: Request):
-    """Accept server and show the final page for restart"""
+    """Accept server (POSTed by the page one form) and show the final page for restart.
+    A GET only renders the page: handle_server mutates its parameters, which is
+    only valid for the mutable form MultiDict of a POST, and saving state on GET
+    would invite replays from the browser history."""
     # Save server details if submitted — no host means the user skipped server setup
-    if request_params(request).get("host"):
+    if request.method == "POST" and request_params(request).get("host"):
         handle_server(request_params(request))
 
     # Show Restart screen

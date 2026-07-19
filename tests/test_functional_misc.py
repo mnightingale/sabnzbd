@@ -39,7 +39,6 @@ from tests.testhelper import (
     SABnzbdBaseTest,
     create_and_read_nzb_fp,
     get_api_result,
-    get_url_result,
     wait_for,
 )
 
@@ -230,8 +229,8 @@ class TestDaemonizing(SABnzbdBaseTest):
         assert os.path.getsize(error_log_path) < 1024
 
         try:
-            # Let's shut it down and give it some time to do so
-            get_url_result("shutdown", daemon_host, daemon_port)
+            # Let's shut it down via the API and give it some time to do so
+            get_api_result("shutdown", daemon_host, daemon_port)
             wait_for(
                 lambda: not os.path.exists(pid_file),
                 timeout=3,

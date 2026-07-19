@@ -137,7 +137,7 @@ def run_sabnzbd(clean_cache_dir, compiled_language_files, request):
     def shutdown_sabnzbd():
         # Shutdown SABnzbd
         try:
-            get_url_result("shutdown", SAB_HOST, SAB_PORT)
+            get_api_result("shutdown", SAB_HOST, SAB_PORT)
         except requests.ConnectionError:
             sabnzbd_process.kill()
         except Exception as err:
