@@ -426,8 +426,9 @@ class TestAnonymousSession:
 
     @pytest.mark.config({"username": "", "password": ""})
     def test_create_sets_matching_cookie(self):
+        request = Mock()
         response = Mock()
-        interface.create_anonymous_session(response)
+        interface.create_anonymous_session(request, response)
         assert response.set_cookie.call_args.args[1] == interface.anonymous_session_tag()
         assert response.set_cookie.call_args.args[0] == interface.SESSION_COOKIE
 

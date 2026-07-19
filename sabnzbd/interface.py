@@ -254,7 +254,7 @@ def secured_expose(
             and isinstance(response, Response)
             and not validate_anonymous_session(request)
         ):
-            create_anonymous_session(response)
+            create_anonymous_session(request, response)
 
         return response
 
@@ -386,7 +386,7 @@ async def create_session(request: Request, response: Response, remember_me: bool
         token,
         path="/",
         httponly=True,
-        secure=cfg.enable_https(),
+        secure=is_https(request),
         samesite="strict",
         max_age=max_age,
     )
@@ -416,14 +416,14 @@ def validate_anonymous_session(request: Request) -> bool:
     return hmac.compare_digest(request.cookies.get(SESSION_COOKIE, ""), anonymous_session_tag())
 
 
-def create_anonymous_session(response: Response):
+def create_anonymous_session(request: Request, response: Response):
     """Set the stateless anonymous session cookie on the response"""
     response.set_cookie(
         SESSION_COOKIE,
         anonymous_session_tag(),
         path="/",
         httponly=True,
-        secure=cfg.enable_https(),
+        secure=is_https(request),
         samesite="strict",
         max_age=SESSION_DURATION,
     )
@@ -438,7 +438,7 @@ async def clear_session(request: Request, response: Response):
         "",
         path="/",
         httponly=True,
-        secure=cfg.enable_https(),
+        secure=is_https(request),
         samesite="strict",
         expires="Thu, 01 Jan 1970 00:00:00 GMT",
     )
@@ -603,6 +603,11 @@ def request_params(request: Request) -> MultiDict | QueryParams:
     with the query string for an /api POST. See get_request_params for the
     exact rules and the returned types."""
     return request.state.params
+
+
+def is_https(request: Request) -> bool:
+    """Check if a request is HTTPS"""
+    return request.url.scheme == "https"
 
 
 # Disable over-active logging for the form parser
@@ -2449,6 +2454,37 @@ class XFrameOptionsMiddleware:
         await self.app(scope, receive, send_with_header)
 
 
+class SchemeAwareSessionMiddleware(SessionMiddleware):
+    """SessionMiddleware whose cookie Secure flag tracks the per-request scheme.
+
+    Starlette fixes https_only at construction time, so it can't observe the
+    actual scheme — which matters behind a TLS-terminating reverse proxy, where
+    cfg.enable_https() is False yet the client is on HTTPS. uvicorn's
+    ProxyHeadersMiddleware has already resolved scope["scheme"] from
+    X-Forwarded-Proto (when verify_xff_header is enabled) before we run, so mark
+    the cookie Secure whenever this request arrived over HTTPS.
+    """
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("scheme") != "https":
+            await super().__call__(scope, receive, send)
+            return
+
+        async def send_secure(message):
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                cookies = headers.getlist("Set-Cookie")
+                if cookies:
+                    del headers["Set-Cookie"]
+                    for cookie in cookies:
+                        if cookie.startswith(f"{self.session_cookie}=") and "secure" not in cookie.lower():
+                            cookie += "; Secure"
+                        headers.append("Set-Cookie", cookie)
+            await send(message)
+
+        await super().__call__(scope, receive, send_secure)
+
+
 class ThreadedServer(uvicorn.Server):
     def __init__(self, *args, **kwargs):
         self.thread: Optional[threading.Thread] = None
@@ -2546,11 +2582,10 @@ def create_app() -> Starlette:
         # This is NOT authentication: the authenticated-user session lives in a separate,
         # DB-backed cookie (SESSION_COOKIE = "sabnzbd_user_session").
         Middleware(
-            SessionMiddleware,
+            SchemeAwareSessionMiddleware,
             secret_key=secrets.token_hex(),
             session_cookie="sabnzbd_flash",
             same_site="lax",
-            https_only=bool(cfg.enable_https()),
         ),
     ]
 
