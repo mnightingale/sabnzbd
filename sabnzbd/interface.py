@@ -120,6 +120,7 @@ _MSG_MISSING_AUTH = "Missing authentication"
 _MSG_APIKEY_REQUIRED = "API Key Required"
 _MSG_APIKEY_INCORRECT = "API Key Incorrect"
 _MSG_MISSING_SESSION = "Access denied - Missing session cookie, reload the page and try again"
+_MSG_SESSION_EXPIRED = "Session expired, reload the page"
 
 INTERFACE_ROUTES: list[Route | Mount] = []
 
@@ -224,10 +225,10 @@ def secured_expose(
         if not check_hostname(request):
             return forbidden_response(_MSG_ACCESS_DENIED_HOSTNAME)
 
-        # Some pages need correct API key
+        # The /api route: session cookie or apikey (see check_apikey)
         if check_api_key:
-            if msg := await check_apikey(request):
-                return forbidden_response(msg)
+            if error_response := await check_apikey(request):
+                return error_response
 
         # All good, cool! Coroutine handlers are awaited on the event loop, so they
         # must never block; plain sync handlers are executed in the threadpool so
@@ -490,9 +491,9 @@ async def check_login(request: Request) -> bool:
     return await validate_session(request)
 
 
-async def check_apikey(request: Request) -> Optional[str]:
-    """Check API-key or NZB-key (Starlette version)
-    Return None when OK, otherwise an error message
+async def check_apikey(request: Request) -> Optional[Response]:
+    """Check session cookie, API-key or NZB-key (Starlette version)
+    Return None when OK, otherwise the error response to send
     """
     mode = request_params(request).get("mode", "")
     name = request_params(request).get("name", "")
@@ -500,7 +501,7 @@ async def check_apikey(request: Request) -> Optional[str]:
     # Lookup required access level for the specific api-call
     req_access = sabnzbd.api.api_level(mode, name)
     if not check_access(request, access_type=req_access, warn_user=True):
-        return _MSG_ACCESS_DENIED
+        return forbidden_response(_MSG_ACCESS_DENIED)
 
     # Skip for auth and version calls
     if mode in ("version", "auth"):
@@ -515,10 +516,17 @@ async def check_apikey(request: Request) -> Optional[str]:
     # First check API-key, if OK that's sufficient
     key = request_params(request).get("apikey")
     if not key:
+        # A session cookie was presented but did not validate above: this is the
+        # bundled frontend with a stale session (a restart regenerated the anonymous
+        # key, the login session expired, or credentials changed), not a keyless
+        # 3rd-party program. Answer 401 so the frontend reloads the page for a fresh
+        # session, and skip the misleading apikey warning.
+        if SESSION_COOKIE in request.cookies:
+            return PlainTextResponse(_MSG_SESSION_EXPIRED, status_code=401)
         log_warning_and_ip(
             request, T("API Key missing, please enter the api key from Config->General into your 3rd party program:")
         )
-        return _MSG_APIKEY_REQUIRED
+        return forbidden_response(_MSG_APIKEY_REQUIRED)
     elif req_access == 1 and key == cfg.nzb_key():
         return None
     elif key == cfg.api_key():
@@ -527,7 +535,7 @@ async def check_apikey(request: Request) -> Optional[str]:
         log_warning_and_ip(
             request, T("API Key incorrect, Use the api key from Config->General in your 3rd party program:")
         )
-        return _MSG_APIKEY_INCORRECT
+        return forbidden_response(_MSG_APIKEY_INCORRECT)
 
 
 def template_filtered_response(file: str, search_list: dict[str, Any]):
