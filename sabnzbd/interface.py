@@ -307,7 +307,7 @@ async def create_session(request: Request, response: Response, remember_me: bool
         token,
         path="/",
         httponly=True,
-        secure=cfg.enable_https(),
+        secure=use_secure_cookies(request),
         samesite="strict",
         max_age=max_age,
     )
@@ -336,14 +336,14 @@ def validate_anonymous_session(request: Request) -> bool:
     return hmac.compare_digest(request.cookies.get(SESSION_COOKIE, ""), anonymous_session_tag())
 
 
-def create_anonymous_session(response: Response):
+def create_anonymous_session(request: Request, response: Response):
     """Set the stateless anonymous session cookie on the response"""
     response.set_cookie(
         SESSION_COOKIE,
         anonymous_session_tag(),
         path="/",
         httponly=True,
-        secure=cfg.enable_https(),
+        secure=use_secure_cookies(request),
         samesite="strict",
         max_age=SESSION_DURATION,
     )
@@ -358,7 +358,7 @@ async def clear_session(request: Request, response: Response):
         "",
         path="/",
         httponly=True,
-        secure=cfg.enable_https(),
+        secure=use_secure_cookies(request),
         samesite="strict",
         expires="Thu, 01 Jan 1970 00:00:00 GMT",
     )
@@ -556,13 +556,13 @@ class ParamsMiddleware:
         await self.app(scope, receive, send)
 
 
-def _anonymous_session_sender(send):
+def _anonymous_session_sender(request: Request, send):
     """Wrap an ASGI send so the anonymous session cookie is added to the response start.
     SecurityMiddleware is pure ASGI, so there is no Response object to set the cookie on;
     create_anonymous_session builds it on a throwaway Response and its Set-Cookie header
     is injected into the http.response.start message."""
     carrier = Response()
-    create_anonymous_session(carrier)
+    create_anonymous_session(request, carrier)
     cookie_headers = [(key, value) for key, value in carrier.raw_headers if key == b"set-cookie"]
 
     async def send_with_cookie(message):
@@ -614,7 +614,7 @@ class SecurityMiddleware:
                 and (not cfg.username() or not cfg.password())
                 and not validate_anonymous_session(request)
             ):
-                send = _anonymous_session_sender(send)
+                send = _anonymous_session_sender(request, send)
         await self.app(scope, receive, send)
 
     async def denied_response(self, request: Request) -> Optional[Response]:
