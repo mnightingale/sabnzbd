@@ -118,6 +118,7 @@ _MSG_MISSING_AUTH = "Missing authentication"
 _MSG_APIKEY_REQUIRED = "API Key Required"
 _MSG_APIKEY_INCORRECT = "API Key Incorrect"
 _MSG_MISSING_SESSION = "Access denied - Missing session cookie, reload the page and try again"
+_MSG_SESSION_EXPIRED = "Session expired, reload the page"
 
 RE_HOST_PORT = re.compile(":[0-9]+$")
 
@@ -403,9 +404,9 @@ async def check_login(request: Request) -> bool:
     return await validate_session(request)
 
 
-async def check_apikey(request: Request) -> Optional[str]:
-    """Check API-key or NZB-key (Starlette version)
-    Return None when OK, otherwise an error message
+async def check_apikey(request: Request) -> Optional[Response]:
+    """Check session cookie, API-key or NZB-key (Starlette version)
+    Return None when OK, otherwise the error response to send
     """
     mode = request_params(request).get("mode", "")
 
@@ -417,7 +418,7 @@ async def check_apikey(request: Request) -> Optional[str]:
     # The entry carries the access level required for this specific api-call
     req_access = entry.access_level
     if not check_access(request, access_type=req_access, warn_user=True):
-        return _MSG_ACCESS_DENIED
+        return forbidden(_MSG_ACCESS_DENIED)
 
     # Skip for auth and version calls
     if mode in ("version", "auth"):
@@ -432,10 +433,17 @@ async def check_apikey(request: Request) -> Optional[str]:
     # First check API-key, if OK that's sufficient
     key = request_params(request).get("apikey")
     if not key:
+        # A session cookie was presented but did not validate above: this is the
+        # bundled frontend with a stale session (a restart regenerated the anonymous
+        # key, the login session expired, or credentials changed), not a keyless
+        # 3rd-party program. Answer 401 so the frontend reloads the page for a fresh
+        # session, and skip the misleading apikey warning.
+        if SESSION_COOKIE in request.cookies:
+            return PlainTextResponse(_MSG_SESSION_EXPIRED, status_code=401)
         log_warning_and_ip(
             request, T("API Key missing, please enter the api key from Config->General into your 3rd party program:")
         )
-        return _MSG_APIKEY_REQUIRED
+        return forbidden(_MSG_APIKEY_REQUIRED)
     elif req_access == 1 and key == cfg.nzb_key():
         return None
     elif key == cfg.api_key():
@@ -444,7 +452,7 @@ async def check_apikey(request: Request) -> Optional[str]:
         log_warning_and_ip(
             request, T("API Key incorrect, Use the api key from Config->General in your 3rd party program:")
         )
-        return _MSG_APIKEY_INCORRECT
+        return forbidden(_MSG_APIKEY_INCORRECT)
 
 
 def template_filtered_response(file: str, search_list: dict[str, Any]):
@@ -638,9 +646,10 @@ class SecurityMiddleware:
             log_warning_and_ip(request, T("Refused connection from:"))
             return forbidden(_MSG_MISSING_SESSION)
 
-        # Some pages need the correct API key
-        if self.check_api_key and (msg := await check_apikey(request)):
-            return forbidden(msg)
+        # The /api route: session cookie or apikey (see check_apikey), which returns
+        # the error response to send (403, or 401 for a stale frontend session)
+        if self.check_api_key and (error_response := await check_apikey(request)):
+            return error_response
 
         return None
 
