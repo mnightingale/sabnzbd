@@ -659,20 +659,18 @@ def main_index(request: Request):
         return BaseRedirectResponse("/wizard")
 
 
-@secured_expose(route="/shutdown", methods=["GET"])
-def shutdown_get(request: Request):
-    """A GET (stale bookmark, typed URL or pre-1.x link) must never shut down
-    anything; send it back to the main page"""
-    return BaseRedirectResponse("/")
-
-
-@secured_expose(route="/shutdown", methods=["POST"])
+@secured_expose(route="/shutdown")
 async def shutdown(request: Request):
     """Shut down and show a goodbye page, for UI users; automation should use
-    the mode=shutdown API-call. POST-only and the UI submits it as a form, so
-    the browser navigates to this response. Authorized like any other page
-    POST: a SameSite=Strict session cookie (login or anonymous), which a
-    cross-site page cannot send, so it cannot trigger a shutdown."""
+    the mode=shutdown API-call. Only a POST shuts down: the UI submits it as a
+    form, so the browser navigates to this response, and it is authorized like
+    any other page POST — a SameSite=Strict session cookie (login or anonymous),
+    which a cross-site page cannot send, so it cannot trigger a shutdown. A GET
+    (stale bookmark, typed URL or pre-1.x link) must never shut down anything
+    and is sent back to the main page."""
+    if request.method != "POST":
+        return BaseRedirectResponse("/")
+
     await halt_and_shutdown()
     return PlainTextResponse(T("SABnzbd shutdown finished"))
 
