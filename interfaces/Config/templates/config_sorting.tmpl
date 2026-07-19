@@ -491,7 +491,7 @@
                         jQuery(elm).extractFormDataTo(data);
                         jQuery.ajax({
                             type: "POST",
-                            url: window.location.pathname + 'save_sorter',
+                            url: "$url('config/sorting/save_sorter')",
                             data: data,
                             async: false // To prevent race-conditions when updating sorters
                         })

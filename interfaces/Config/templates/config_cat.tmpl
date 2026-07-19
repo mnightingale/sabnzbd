@@ -128,7 +128,7 @@
                         jQuery(elm).extractFormDataTo(data);
                         jQuery.ajax({
                             type: "POST",
-                            url: window.location.pathname + 'save',
+                            url: "$url('config/categories/save')",
                             data: data,
                             async: false // To prevent race-conditions when updating categories
                         })
