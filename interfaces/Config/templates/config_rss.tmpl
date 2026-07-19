@@ -480,7 +480,7 @@
                         <!--#for $job in $matched#-->
                             <tr class="infoTableSeperator">
                                 <td>
-                                    <form action="$url('config/rss/download')" method="get">
+                                    <form action="$url('config/rss/download')" method="post">
                                         <input type="hidden" value="$active_feed" name="feed" />
                                         <input type="hidden" name="url" value="$job['url']" />
                                         <input type="hidden" name="nzbname" value="$job['nzbname']" />
