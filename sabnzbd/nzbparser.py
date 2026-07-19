@@ -30,7 +30,7 @@ import datetime
 import zipfile
 import tempfile
 
-from typing import Optional, Any
+from typing import Optional, Any, BinaryIO
 from starlette.datastructures import UploadFile
 
 import sabnzbd
@@ -79,6 +79,8 @@ def add_nzbfile(
     # Base conversion of input
     cat, pp, script = cat_pp_script_sanitizer(cat, pp, script)
 
+    # Source of the NZB-data: either an on-disk path or an in-memory upload stream
+    fileobj: Optional[BinaryIO] = None
     if isinstance(nzbfile, str):
         # File coming from queue repair or local file-path
         path = nzbfile
@@ -90,68 +92,66 @@ def add_nzbfile(
             path = path.replace("\\", "/")
         logging.info("Attempting to add %s [%s]", filename, path)
     else:
-        # File from file-upload object
+        # File from file-upload object; process the stream directly instead of
+        # spooling it to a temporary file first
+        path = None
+        fileobj = nzbfile.file
         filename = nzbfile.filename
-        logging.info("Attempting to add %s", filename)
         keep_default = False
-        try:
-            # We have to create a temp file copy; just to be sure we add the extension to detect file type later on
-            nzb_temp_file, path = tempfile.mkstemp(suffix=get_ext(filename))
-            os.write(nzb_temp_file, nzbfile.file.read())
-            os.close(nzb_temp_file)
-        except OSError:
-            logging.error(T("Cannot create temp file for %s"), filename)
-            logging.info("Traceback: ", exc_info=True)
-            return None
-        finally:
-            # Close the CherryPy reference
-            nzbfile.file.close()
+        logging.info("Attempting to add %s", filename)
 
     # Externally defined if we should keep the file?
     if keep is None:
         keep = keep_default
 
-    if get_ext(filename) in VALID_ARCHIVES:
-        return process_nzb_archive_file(
-            filename,
-            path=path,
-            pp=pp,
-            script=script,
-            cat=cat,
-            catdir=catdir,
-            priority=priority,
-            nzbname=nzbname,
-            keep=keep,
-            reuse=reuse,
-            nzo_info=nzo_info,
-            url=url,
-            password=password,
-            nzo_id=nzo_id,
-            dup_check=dup_check,
-        )
-    else:
-        return process_single_nzb(
-            filename,
-            path=path,
-            pp=pp,
-            script=script,
-            cat=cat,
-            catdir=catdir,
-            priority=priority,
-            nzbname=nzbname,
-            keep=keep,
-            reuse=reuse,
-            nzo_info=nzo_info,
-            url=url,
-            password=password,
-            nzo_id=nzo_id,
-            dup_check=dup_check,
-        )
+    try:
+        if get_ext(filename) in VALID_ARCHIVES:
+            return process_nzb_archive_file(
+                filename,
+                path=path,
+                fileobj=fileobj,
+                pp=pp,
+                script=script,
+                cat=cat,
+                catdir=catdir,
+                priority=priority,
+                nzbname=nzbname,
+                keep=keep,
+                reuse=reuse,
+                nzo_info=nzo_info,
+                url=url,
+                password=password,
+                nzo_id=nzo_id,
+                dup_check=dup_check,
+            )
+        else:
+            return process_single_nzb(
+                filename,
+                path=path,
+                fileobj=fileobj,
+                pp=pp,
+                script=script,
+                cat=cat,
+                catdir=catdir,
+                priority=priority,
+                nzbname=nzbname,
+                keep=keep,
+                reuse=reuse,
+                nzo_info=nzo_info,
+                url=url,
+                password=password,
+                nzo_id=nzo_id,
+                dup_check=dup_check,
+            )
+    finally:
+        if fileobj is not None:
+            # Close the upload reference
+            fileobj.close()
 
 
 def process_nzb_archive_file(
     filename: str,
-    path: str,
+    path: Optional[str] = None,
     pp: Optional[int] = None,
     script: Optional[str] = None,
     cat: Optional[str] = None,
@@ -165,27 +165,60 @@ def process_nzb_archive_file(
     password: Optional[str] = None,
     nzo_id: Optional[str] = None,
     dup_check: bool = True,
+    fileobj: Optional[BinaryIO] = None,
 ) -> tuple[AddNzbFileResult, list[str]]:
     """Analyse archive and create job(s).
     Accepts archive files with ONLY nzb/nfo/folder files in it.
+    The archive can be provided as an on-disk ``path`` or as a seekable
+    ``fileobj`` (e.g. an upload stream) that is processed without a temp file.
     """
     nzo_ids = []
     if catdir is None:
         catdir = cat
     filename, cat = name_to_cat(filename, catdir)
 
+    # Prefer the in-memory stream when available, otherwise use the on-disk path
+    source = fileobj if fileobj is not None else path
+    # A temp file we may have to create for handlers that need a real path
+    temp_path = None
+
+    def _rewind():
+        """Reset the stream so each archive detection reads from the start"""
+        if fileobj is not None:
+            fileobj.seek(0)
+
     try:
-        if zipfile.is_zipfile(path):
-            zf = zipfile.ZipFile(path)
-        elif rarfile.is_rarfile(path):
-            zf = SABRarFile(path)
-        elif sabnzbd.newsunpack.is_sevenfile(path):
-            zf = sabnzbd.newsunpack.SevenZip(path)
+        _rewind()
+        is_zip = zipfile.is_zipfile(source)
+        _rewind()
+        is_rar = not is_zip and rarfile.is_rarfile(source)
+        if is_zip:
+            _rewind()
+            zf = zipfile.ZipFile(source)
+        elif is_rar:
+            _rewind()
+            zf = SABRarFile(source)
         else:
-            logging.info("File %s is not a supported archive!", filename)
-            return AddNzbFileResult.ERROR, []
+            # 7Zip shells out to the 7z binary and therefore needs a real file
+            # on disk; only then do we spool the stream to a temporary file
+            seven_path = path
+            if seven_path is None and fileobj is not None:
+                _rewind()
+                temp_fd, temp_path = tempfile.mkstemp(suffix=get_ext(filename))
+                os.write(temp_fd, fileobj.read())
+                os.close(temp_fd)
+                seven_path = temp_path
+            if seven_path and sabnzbd.newsunpack.is_sevenfile(seven_path):
+                zf = sabnzbd.newsunpack.SevenZip(seven_path)
+            else:
+                logging.info("File %s is not a supported archive!", filename)
+                if temp_path:
+                    remove_file(temp_path)
+                return AddNzbFileResult.ERROR, []
     except Exception:
-        logging.info(T("Cannot read %s"), path, exc_info=True)
+        logging.info(T("Cannot read %s"), path or filename, exc_info=True)
+        if temp_path:
+            remove_file(temp_path)
         return AddNzbFileResult.RETRY, []
 
     status: AddNzbFileResult = AddNzbFileResult.NO_FILES_FOUND
@@ -253,13 +286,20 @@ def process_nzb_archive_file(
         zf.close()
 
         try:
-            if not keep:
+            if path and not keep:
                 remove_file(path)
         except OSError:
             logging.error(T("Error removing %s"), clip_path(path))
             logging.info("Traceback: ", exc_info=True)
     else:
         zf.close()
+
+    # Always clean up a temp file we created ourselves for 7Zip handling
+    if temp_path:
+        try:
+            remove_file(temp_path)
+        except OSError:
+            logging.info("Traceback: ", exc_info=True)
 
     # If all were rejected/empty/etc, update status
     if not nzo_ids:
@@ -270,7 +310,7 @@ def process_nzb_archive_file(
 
 def process_single_nzb(
     filename: str,
-    path: str,
+    path: Optional[str] = None,
     pp: Optional[int] = None,
     script: Optional[str] = None,
     cat: Optional[str] = None,
@@ -284,30 +324,49 @@ def process_single_nzb(
     password: Optional[str] = None,
     nzo_id: Optional[str] = None,
     dup_check: bool = True,
+    fileobj: Optional[BinaryIO] = None,
 ) -> tuple[AddNzbFileResult, list[str]]:
     """Analyze file and create a job from it
     Supports NZB, NZB.BZ2, NZB.GZ and GZ.NZB-in-disguise
+    The NZB can be provided as an on-disk ``path`` or as a seekable ``fileobj``
+    (e.g. an upload stream) that is processed without a temp file.
     """
     if catdir is None:
         catdir = cat
 
     try:
-        with open(path, "rb") as nzb_file:
-            check_bytes = nzb_file.read(2)
-
-        if check_bytes == b"\x1f\x8b":
-            # gzip file or gzip in disguise
-            filename = filename.replace(".nzb.gz", ".nzb")
-            nzb_fp = gzip.GzipFile(path, "rb")
-        elif check_bytes == b"BZ":
-            # bz2 file or bz2 in disguise
-            filename = filename.replace(".nzb.bz2", ".nzb")
-            nzb_fp = bz2.BZ2File(path, "rb")
+        if fileobj is not None:
+            # Process the upload stream directly
+            fileobj.seek(0)
+            check_bytes = fileobj.read(2)
+            fileobj.seek(0)
+            if check_bytes == b"\x1f\x8b":
+                # gzip file or gzip in disguise
+                filename = filename.replace(".nzb.gz", ".nzb")
+                nzb_fp = gzip.GzipFile(fileobj=fileobj, mode="rb")
+            elif check_bytes == b"BZ":
+                # bz2 file or bz2 in disguise
+                filename = filename.replace(".nzb.bz2", ".nzb")
+                nzb_fp = bz2.BZ2File(fileobj)
+            else:
+                nzb_fp = fileobj
         else:
-            nzb_fp = open(path, "rb")
+            with open(path, "rb") as nzb_file:
+                check_bytes = nzb_file.read(2)
+
+            if check_bytes == b"\x1f\x8b":
+                # gzip file or gzip in disguise
+                filename = filename.replace(".nzb.gz", ".nzb")
+                nzb_fp = gzip.GzipFile(path, "rb")
+            elif check_bytes == b"BZ":
+                # bz2 file or bz2 in disguise
+                filename = filename.replace(".nzb.bz2", ".nzb")
+                nzb_fp = bz2.BZ2File(path, "rb")
+            else:
+                nzb_fp = open(path, "rb")
 
     except OSError:
-        logging.warning(T("Cannot read %s"), clip_path(path))
+        logging.warning(T("Cannot read %s"), clip_path(path) if path else filename)
         logging.info("Traceback: ", exc_info=True)
         return AddNzbFileResult.RETRY, []
 
@@ -362,7 +421,7 @@ def process_single_nzb(
         nzo_ids.append(sabnzbd.NzbQueue.add(nzo, quiet=bool(reuse)))
 
     try:
-        if not keep and result in {AddNzbFileResult.ERROR, AddNzbFileResult.OK}:
+        if path and not keep and result in {AddNzbFileResult.ERROR, AddNzbFileResult.OK}:
             remove_file(path)
     except OSError:
         # Job was still added to the queue, so throw error but don't report failed add
