@@ -179,7 +179,7 @@ def secured_expose(
 
         # Verify login status, only for non-key pages
         if check_for_login and not check_api_key and not await check_login(request):
-            return RedirectResponse(url=f"{cfg.url_base()}/login")
+            return BaseRedirectResponse("/login")
 
         # Verify host used for the visit
         if not check_hostname(request):
@@ -583,7 +583,7 @@ def main_index(request: Request):
         return template_filtered_response(file=os.path.join(sabnzbd.WEB_DIR, "main.tmpl"), search_list=info)
     else:
         # Redirect to the setup wizard
-        return RedirectResponse(url="%s/wizard/" % cfg.url_base())
+        return BaseRedirectResponse("/wizard/")
 
 
 @secured_expose(route="/shutdown")
@@ -790,7 +790,7 @@ def get_access_info(request: Optional[Request] = None):
 async def login_index(request: Request):
     # Already logged in, or no username/password set at all
     if await check_login(request):
-        return RedirectResponse(url=f"{cfg.url_base()}/", status_code=302)
+        return BaseRedirectResponse("/")
 
     # Only a POST (the login form) is a credential submission; a GET just renders the form.
     # Accepting credentials from the query string would leak them into browser history,
@@ -803,7 +803,7 @@ async def login_index(request: Request):
 
         if check_login_credentials(username, password):
             # Create redirect response
-            response = RedirectResponse(url=f"{cfg.url_base()}/", status_code=302)
+            response = BaseRedirectResponse("/")
             # Create a database-backed session and set the session cookie
             await create_session(request, response, remember_me=remember_me)
             # Log the success
@@ -835,7 +835,7 @@ async def login_index(request: Request):
 
 @secured_expose(route="/logout", check_for_login=False, methods=["GET"])
 async def logout_index(request: Request):
-    response = RedirectResponse(url=f"{cfg.url_base()}/", status_code=302)
+    response = BaseRedirectResponse("/")
     await clear_session(request, response)
     return response
 
@@ -2432,7 +2432,7 @@ async def app_lifespan(app: Starlette):
 
 async def not_found_redirect(request: Request, exc):
     """Catch-all for unknown URLs: redirect to the UI root"""
-    return RedirectResponse(url=f"{cfg.url_base()}/", status_code=302)
+    return BaseRedirectResponse("/")
 
 
 def create_app() -> Starlette:
