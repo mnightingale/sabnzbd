@@ -119,8 +119,14 @@ _MSG_ACCESS_DENIED_HOSTNAME = "Access denied - Hostname verification failed: htt
 _MSG_MISSING_AUTH = "Missing authentication"
 _MSG_APIKEY_REQUIRED = "API Key Required"
 _MSG_APIKEY_INCORRECT = "API Key Incorrect"
+_MSG_MISSING_SESSION = "Access denied - Missing session cookie, reload the page and try again"
 
 INTERFACE_ROUTES: list[Route | Mount] = []
+
+
+def forbidden_response(msg: str) -> PlainTextResponse:
+    """403 response, with the reason in the body only when api_warnings is enabled"""
+    return PlainTextResponse(msg if cfg.api_warnings() else "", status_code=403)
 
 
 def secured_expose(
@@ -146,9 +152,12 @@ def secured_expose(
 
     @functools.wraps(wrap_func)
     async def internal_wrap(request: Request, *args, **kwargs):
-        # Store the merged parameters for this method on request.state,
-        # to be retrieved with request_params(request) in the handlers
-        request.state.params = await get_request_params(request)
+        # Store the parameters for this method on request.state, to be retrieved
+        # with request_params(request) in the handlers. Page routes are strict:
+        # GET reads the query string and POST reads the form body only. The /api
+        # route additionally falls back to the query string for POSTs without a
+        # form body, which third-party API clients rely on.
+        request.state.params = await get_request_params(request, query_fallback=check_api_key)
 
         # Log all requests
         if cfg.api_logging():
@@ -170,32 +179,40 @@ def secured_expose(
 
         # Check if config is locked
         if check_configlock and cfg.configlock():
-            if cfg.api_warnings():
-                return PlainTextResponse(_MSG_ACCESS_DENIED_CONFIG_LOCK, status_code=403)
-            return PlainTextResponse("", status_code=403)
+            return forbidden_response(_MSG_ACCESS_DENIED_CONFIG_LOCK)
 
         # Check if external access and if it's allowed
         if not check_access(request, access_type=access_type, warn_user=True):
-            if cfg.api_warnings():
-                return PlainTextResponse(_MSG_ACCESS_DENIED, status_code=403)
-            return PlainTextResponse("", status_code=403)
+            return forbidden_response(_MSG_ACCESS_DENIED)
 
         # Verify login status, only for non-key pages
         if check_for_login and not check_api_key and not await check_login(request):
             return BaseRedirectResponse("/login")
 
+        # CSRF guard for state-changing requests. With credentials configured,
+        # check_login above already required the SameSite=Strict login cookie,
+        # which cross-site requests never carry. Without (full) credentials
+        # check_login passes with no cookie at all, so a cross-site form could
+        # otherwise POST config changes: require the SameSite=Strict anonymous
+        # session cookie, which every UI page load issues.
+        if (
+            check_for_login
+            and not check_api_key
+            and request.method == "POST"
+            and (not cfg.username() or not cfg.password())
+            and not validate_anonymous_session(request)
+        ):
+            log_warning_and_ip(request, T("Refused connection from:"))
+            return forbidden_response(_MSG_MISSING_SESSION)
+
         # Verify host used for the visit
         if not check_hostname(request):
-            if cfg.api_warnings():
-                return PlainTextResponse(_MSG_ACCESS_DENIED_HOSTNAME, status_code=403)
-            return PlainTextResponse("", status_code=403)
+            return forbidden_response(_MSG_ACCESS_DENIED_HOSTNAME)
 
         # Some pages need correct API key
         if check_api_key:
             if msg := await check_apikey(request):
-                if cfg.api_warnings():
-                    return PlainTextResponse(msg, status_code=403)
-                return PlainTextResponse("", status_code=403)
+                return forbidden_response(msg)
 
         # All good, cool! Coroutine handlers are awaited on the event loop, so they
         # must never block; plain sync handlers are executed in the threadpool so
@@ -208,14 +225,16 @@ def secured_expose(
 
         # When authentication is disabled, issue a stateless anonymous session cookie on
         # the UI page routes so the frontend authenticates API calls by cookie instead of
-        # the apikey. Limited to check_for_login routes (the real UI pages) so bots hitting
-        # robots.txt/favicon and the login/logout routes don't get cookies. API routes never
-        # set the cookie: the browser always loads a page (and its cookie) first.
+        # the apikey, and POSTs pass the CSRF guard above. Limited to check_for_login
+        # routes (the real UI pages) so bots hitting robots.txt/favicon and the
+        # login/logout routes don't get cookies. API routes never set the cookie: the
+        # browser always loads a page (and its cookie) first. The credentials condition
+        # matches check_login's definition of "no authentication required" (either field
+        # missing), so partial credentials cannot leave the UI without a cookie.
         if (
             check_for_login
             and not check_api_key
-            and not cfg.username()
-            and not cfg.password()
+            and (not cfg.username() or not cfg.password())
             and isinstance(response, Response)
             and not validate_anonymous_session(request)
         ):
@@ -508,13 +527,18 @@ def log_warning_and_ip(request: Request, txt: str):
         logging.warning("%s %s", txt, remote_info)
 
 
-async def get_request_params(request: Request) -> MultiDict | QueryParams:
+async def get_request_params(request: Request, query_fallback: bool = False) -> MultiDict | QueryParams:
     """Return request parameters as a mutable MultiDict.
 
-    For POST requests the form body is read (both urlencoded and multipart).
-    File uploads in multipart bodies are kept as UploadFile objects.
+    For GET only the URL query string is used: a GET renders a page and never
+    changes state, so nothing else is needed.
 
-    For GET (and any non-form POST) only the URL query string is used.
+    For POST requests the form body is read (both urlencoded and multipart).
+    File uploads in multipart bodies are kept as UploadFile objects. A POST
+    never reads the query string, so parameters cannot be smuggled into form
+    handlers via the URL. The one exception is query_fallback (the /api route):
+    API clients traditionally send parameters in the query string of a POST, so
+    a POST without a form body falls back to the query string there.
 
     secured_expose stores the result on request.state.params so that
     request_params(request) returns it in every handler without an extra await.
@@ -524,6 +548,8 @@ async def get_request_params(request: Request) -> MultiDict | QueryParams:
             ("application/x-www-form-urlencoded", "multipart/form-data")
         ):
             return MultiDict(await request.form())
+        if not query_fallback:
+            return MultiDict()
 
     return request.query_params
 
@@ -587,13 +613,21 @@ def main_index(request: Request):
         return BaseRedirectResponse("/wizard")
 
 
-@secured_expose(route="/shutdown")
-async def shutdown(request: Request):
-    # Check for PID
-    pid_in = request_params(request).get("pid")
-    if pid_in and int_conv(pid_in) != os.getpid():
-        return PlainTextResponse("Incorrect PID for this instance, remove PID from URL to initiate shutdown.")
+@secured_expose(route="/shutdown", methods=["GET"])
+def shutdown_get(request: Request):
+    """A GET (stale bookmark, typed URL or pre-1.x link) must never shut down
+    anything; send it back to the main page"""
+    return BaseRedirectResponse("/")
 
+
+@secured_expose(route="/shutdown", check_api_key=True, methods=["POST"])
+async def shutdown(request: Request):
+    """Shut down and show a goodbye page, for UI users; automation should use
+    the mode=shutdown API-call. POST-only and the UI submits it as a form, so
+    the browser navigates to this response. check_api_key rather than the plain
+    login check: the form POST is authorized by the SameSite=Strict session
+    cookie in check_apikey (or the apikey), neither of which a cross-site page
+    can send, so it cannot trigger a shutdown."""
     await halt_and_shutdown()
     return PlainTextResponse(T("SABnzbd shutdown finished"))
 
@@ -658,8 +692,9 @@ def wizard_index(request: Request):
 
 @secured_expose(route="/wizard/one", check_configlock=True, methods=["GET", "POST"])
 def wizard_page_one(request: Request):
-    """Accept language and show server page"""
-    if request_params(request).get("lang"):
+    """Accept language (POSTed by the index page form) and show server page.
+    A GET only renders the page, e.g. when navigating back from page two."""
+    if request.method == "POST" and request_params(request).get("lang"):
         cfg.language.set(request_params(request).get("lang"))
 
     info = build_header(sabnzbd.WIZARD_DIR, request=request)
@@ -702,9 +737,12 @@ def wizard_page_one(request: Request):
 
 @secured_expose(route="/wizard/two", check_configlock=True, methods=["GET", "POST"])
 def wizard_page_two(request: Request):
-    """Accept server and show the final page for restart"""
+    """Accept server (POSTed by the page one form) and show the final page for restart.
+    A GET only renders the page: handle_server mutates its parameters, which is
+    only valid for the mutable form MultiDict of a POST, and saving state on GET
+    would invite replays from the browser history."""
     # Save server details if submitted — no host means the user skipped server setup
-    if request_params(request).get("host"):
+    if request.method == "POST" and request_params(request).get("host"):
         handle_server(request_params(request))
 
     # Show Restart screen

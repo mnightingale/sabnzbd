@@ -956,7 +956,8 @@ function ViewModel() {
     // Shutdown
     self.shutdownSAB = function() {
         if (confirm(glitterTranslate.shutdown)) {
-            // Show notification and return true to follow the URL
+            // Show notification and return true so the intercepted form POST
+            // proceeds and the browser navigates to the shutdown-finished page
             showNotification('.main-notification-box-shutdown')
             return true
         }
