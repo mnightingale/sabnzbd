@@ -103,7 +103,7 @@
         <div class="padTable">
             <a class="main-helplink" href="$help_uri" target="_blank"><span class="glyphicon glyphicon-question-sign"></span></a>
             <h2 class="nomargin activeRSS">
-                <a href="${root}config/rss/">$T('cmenu-rss')</a> &raquo;
+                <a href="$url('config/rss')">$T('cmenu-rss')</a> &raquo;
                 $active_feed
             </h2>
             <!--#if $error#-->
@@ -540,7 +540,7 @@
     </div><!-- /.modal-dialog -->
 </form><!-- /.modal -->
 
-<script type="text/javascript" src="${root}staticcfg/js/jquery.tablesort.min.js"></script>
+<script type="text/javascript" src="$url('staticcfg/js/jquery.tablesort.min.js')"></script>
 <script type="text/javascript">
 function urlencode(str) {
     return encodeURIComponent(str).replace(/!/g, '%21').replace(/'/g, '%27').replace(/\(/g, '%28').replace(/\)/g, '%29').replace(/\*/g, '%2A').replace(/%20/g, '+');

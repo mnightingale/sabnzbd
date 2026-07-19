@@ -102,6 +102,9 @@ from sabnzbd.api import (
     api_handler,
     halt_and_shutdown,
     build_header,
+    url_for,
+    url_origin,
+    url_netloc,
     Ttemplate,
 )
 from sabnzbd.nzb import NzoInfo
@@ -539,12 +542,10 @@ logging.getLogger("python_multipart.multipart").setLevel(logging.WARNING)
 ##############################################################################
 def BaseRedirectResponse(root: str = "", **kwargs) -> RedirectResponse:
     """Create a Starlette RedirectResponse with SABnzbd URL base and query parameters"""
-    # Add query parameters if provided
-    if kwargs:
-        root = "%s?%s" % (root, urllib.parse.urlencode(kwargs))
-
-    # Add the leading /sabnzbd/ (or what the user set)
-    url = cfg.url_base() + root
+    # Shares url_for with the templates so redirect targets and links stay in step.
+    # Root-relative on purpose: a Location header should send the client back to the
+    # host it just used, not to whatever origin this process thinks it is on.
+    url = url_for(root, absolute=False, **kwargs)
 
     # Log the redirect if API logging is enabled
     if cfg.api_logging():
@@ -562,7 +563,7 @@ def BaseRedirectResponse(root: str = "", **kwargs) -> RedirectResponse:
 def main_index(request: Request):
     # Redirect to wizard if no servers are set
     if request_params(request).get("skip_wizard") or config.get_servers():
-        info = build_header()
+        info = build_header(request=request)
 
         info["have_rss_defined"] = bool(config.get_rss())
         info["have_watched_dir"] = bool(cfg.dirscan_dir())
@@ -649,7 +650,7 @@ def wizard_index(request: Request):
         cfg.language.set(get_install_lng())
         logging.debug('Installer language code "%s"', cfg.language())
 
-    info = build_header(sabnzbd.WIZARD_DIR)
+    info = build_header(sabnzbd.WIZARD_DIR, request=request)
     info["languages"] = list_languages()
 
     return template_filtered_response(file=os.path.join(sabnzbd.WIZARD_DIR, "index.html"), search_list=info)
@@ -661,7 +662,7 @@ def wizard_page_one(request: Request):
     if request_params(request).get("lang"):
         cfg.language.set(request_params(request).get("lang"))
 
-    info = build_header(sabnzbd.WIZARD_DIR)
+    info = build_header(sabnzbd.WIZARD_DIR, request=request)
 
     # Just in case, add server
     servers = config.get_servers()
@@ -707,18 +708,17 @@ def wizard_page_two(request: Request):
         handle_server(request_params(request))
 
     # Show Restart screen
-    info = build_header(sabnzbd.WIZARD_DIR)
+    info = build_header(sabnzbd.WIZARD_DIR, request=request)
 
-    info["access_url"], info["urls"] = get_access_info(request)
+    info["urls"] = get_access_info(request)
     info["download_dir"] = cfg.download_dir.get_clipped_path()
     info["complete_dir"] = cfg.complete_dir.get_clipped_path()
 
     return template_filtered_response(file=os.path.join(sabnzbd.WIZARD_DIR, "two.html"), search_list=info)
 
 
-def get_access_info(request: Optional[Request] = None):
+def get_access_info(request: Optional[Request] = None) -> set[str]:
     """Build up a list of url's that sabnzbd can be accessed from"""
-    # Access_url is used to provide the user a link to SABnzbd depending on the host
     web_host = cfg.web_host()
     host = socket.gethostname().lower()
     socks = [host]
@@ -749,36 +749,24 @@ def get_access_info(request: Optional[Request] = None):
     elif web_host:
         socks = [web_host]
 
-    # Add the current requested URL as the base
-    if request:
-        # For Starlette: build URL from request
-        scheme = "https" if cfg.enable_https() else "http"
-        port = cfg.https_port() if cfg.enable_https() else cfg.web_port()
-        host_header = request.headers.get("host", "localhost")
-        if ":" in host_header:
-            host_part = host_header.split(":")[0]
-        else:
-            host_part = host_header
-        access_url = f"{scheme}://{host_part}:{port}{cfg.url_base()}"
-    else:
-        # Fallback for backward compatibility
-        scheme = "https" if cfg.enable_https() else "http"
-        port = cfg.https_port() if cfg.enable_https() else cfg.web_port()
-        access_url = f"{scheme}://localhost:{port}{cfg.url_base()}"
+    # Lead with the URL this page was actually reached by, which is the one we know works.
+    # Built from the origin rather than url_for() so it matches the bare "scheme://host+base"
+    # shape of the entries below and dedupes against them.
+    urls = [url_origin(request) + cfg.url_base()]
 
-    urls = [access_url]
+    if cfg.enable_https():
+        scheme = "https"
+        port = cfg.https_port() or cfg.web_port()
+    else:
+        scheme = "http"
+        port = cfg.web_port()
+
     for sock in socks:
         if sock:
-            if cfg.enable_https() and cfg.https_port():
-                url = "https://%s:%s%s" % (sock, cfg.https_port(), cfg.url_base())
-            elif cfg.enable_https():
-                url = "https://%s:%s%s" % (sock, cfg.web_port(), cfg.url_base())
-            else:
-                url = "http://%s:%s%s" % (sock, cfg.web_port(), cfg.url_base())
-            urls.append(url)
+            urls.append("%s://%s%s" % (scheme, url_netloc(sock, scheme, port), cfg.url_base()))
 
     # Return a unique list
-    return access_url, set(urls)
+    return set(urls)
 
 
 ##############################################################################
@@ -823,7 +811,7 @@ async def login_index(request: Request):
     # Show login. Building the header and rendering the Cheetah template are
     # blocking work, so keep them off the event loop.
     def render_login_page():
-        info = build_header(sabnzbd.WEB_DIR_CONFIG)
+        info = build_header(sabnzbd.WEB_DIR_CONFIG, request=request)
         info["error"] = error
         return template_filtered_response(
             file=os.path.join(sabnzbd.WEB_DIR_CONFIG, "login", "main.tmpl"),
@@ -847,7 +835,7 @@ async def logout_index(request: Request):
 
 @secured_expose(route="/config", check_configlock=True, methods=["GET"])
 def config_general_index(request: Request):
-    conf = build_header(sabnzbd.WEB_DIR_CONFIG)
+    conf = build_header(sabnzbd.WEB_DIR_CONFIG, request=request)
     conf["configfn"] = clip_path(config.get_filename())
     conf["cmdline"] = sabnzbd.CMDLINE
     conf["build"] = sabnzbd.__baseline__[:7]
@@ -888,7 +876,7 @@ LIST_BOOL_DIRPAGE = ("fulldisk_autoresume",)
 
 @secured_expose(route="/config/folders", check_configlock=True, methods=["GET"])
 def index_config_folders(request: Request):
-    conf = build_header(sabnzbd.WEB_DIR_CONFIG)
+    conf = build_header(sabnzbd.WEB_DIR_CONFIG, request=request)
     conf["file_exts"] = ", ".join(VALID_NZB_FILES + VALID_ARCHIVES)
 
     for kw in LIST_DIRPAGE + LIST_BOOL_DIRPAGE:
@@ -961,7 +949,7 @@ SWITCH_LIST = (
 
 @secured_expose(route="/config/switches", check_configlock=True, methods=["GET"])
 def index_config_switches(request: Request):
-    conf = build_header(sabnzbd.WEB_DIR_CONFIG)
+    conf = build_header(sabnzbd.WEB_DIR_CONFIG, request=request)
     conf["have_nice"] = bool(sabnzbd.newsunpack.NICE_COMMAND)
     conf["have_ionice"] = bool(sabnzbd.newsunpack.IONICE_COMMAND)
 
@@ -1059,7 +1047,7 @@ SPECIAL_LIST_LIST = (
 
 @secured_expose(route="/config/special", check_configlock=True, methods=["GET"])
 def index_config_special(request: Request):
-    conf = build_header(sabnzbd.WEB_DIR_CONFIG)
+    conf = build_header(sabnzbd.WEB_DIR_CONFIG, request=request)
     conf["switches"] = [
         (kw, config.get_config("misc", kw)(), config.get_config("misc", kw).default) for kw in SPECIAL_BOOL_LIST
     ]
@@ -1115,7 +1103,7 @@ GENERAL_LIST = (
 
 @secured_expose(route="/config/general", check_configlock=True, methods=["GET"])
 def index_config_general(request: Request):
-    conf = build_header(sabnzbd.WEB_DIR_CONFIG)
+    conf = build_header(sabnzbd.WEB_DIR_CONFIG, request=request)
 
     web_list = []
     for interface_dir in globber_full(sabnzbd.DIR_INTERFACES):
@@ -1203,7 +1191,7 @@ def change_web_dir(web_dir):
 
 @secured_expose(route="/config/server", check_configlock=True, methods=["GET"])
 def index_config_server(request: Request):
-    conf = build_header(sabnzbd.WEB_DIR_CONFIG)
+    conf = build_header(sabnzbd.WEB_DIR_CONFIG, request=request)
     new = []
     servers = config.get_servers()
     server_names = sorted(
@@ -1425,7 +1413,7 @@ def _rss_flash_redirect(request: Request, feed: str, msg: str = "") -> RedirectR
 
 @secured_expose(route="/config/rss", check_configlock=True, methods=["GET"])
 def config_rss_index(request: Request):
-    conf = build_header(sabnzbd.WEB_DIR_CONFIG)
+    conf = build_header(sabnzbd.WEB_DIR_CONFIG, request=request)
 
     conf["scripts"] = list_scripts(default=True)
     pick_script = conf["scripts"] != []
@@ -1749,7 +1737,7 @@ def config_scheduling_index(request: Request):
         }
         return days
 
-    conf = build_header(sabnzbd.WEB_DIR_CONFIG)
+    conf = build_header(sabnzbd.WEB_DIR_CONFIG, request=request)
 
     actions = []
     actions.extend(_SCHED_ACTIONS)
@@ -1914,7 +1902,7 @@ def config_scheduling_toggle(request: Request):
 
 @secured_expose(route="/config/categories", check_configlock=True, methods=["GET"])
 def index_config_categories(request: Request):
-    conf = build_header(sabnzbd.WEB_DIR_CONFIG)
+    conf = build_header(sabnzbd.WEB_DIR_CONFIG, request=request)
 
     conf["scripts"] = list_scripts(default=True)
     conf["defdir"] = cfg.complete_dir.get_clipped_path()
@@ -1988,7 +1976,7 @@ _SORTING_ROOT = "/config/sorting"
 
 @secured_expose(route="/config/sorting", check_configlock=True, methods=["GET"])
 def config_sorting_index(request: Request):
-    conf = build_header(sabnzbd.WEB_DIR_CONFIG)
+    conf = build_header(sabnzbd.WEB_DIR_CONFIG, request=request)
 
     sorters = config.get_ordered_sorters()
     # Add empty sorter entry, used as a template at the top of the page
@@ -2299,7 +2287,7 @@ NOTIFY_OPTIONS = {
 
 @secured_expose(route="/config/notify", check_configlock=True, methods=["GET"])
 def index_config_notify(request: Request):
-    conf = build_header(sabnzbd.WEB_DIR_CONFIG)
+    conf = build_header(sabnzbd.WEB_DIR_CONFIG, request=request)
     conf["notify_types"] = sabnzbd.notifier.NOTIFICATION_TYPES
     conf["categories"] = list_cats(False)
     conf["have_ntfosd"] = sabnzbd.notifier.have_ntfosd()
