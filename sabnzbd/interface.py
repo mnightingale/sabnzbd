@@ -138,7 +138,22 @@ def secured_expose(
     access_type: int = 4,
     methods: Collection = ("GET", "POST"),
 ) -> Callable | str:
-    """Wrapper for both starlette routing and login/access check"""
+    """Wrapper for both starlette routing and login/access checks.
+
+    The flags select which authentication a route accepts:
+     - check_for_login: a browser session cookie — a database-backed login
+       session, or the stateless anonymous cookie when no login is required
+       (see login_without_session). GETs render pages and are allowed once
+       check_login passes; POSTs change state and additionally require the
+       SameSite=Strict cookie itself, so cross-site requests cannot forge them.
+     - check_api_key: the apikey (or nzb_key, depending on the call's access
+       level). Reserved for the /api route; check_apikey also accepts a valid
+       session cookie there, because the bundled frontend calls the API by
+       cookie instead of embedding the key in pages.
+    """
+    # The apikey must only ever authorize API calls, never page routes
+    assert not check_api_key or route == "/api", "check_api_key is reserved for the /api route"
+
     if not wrap_func:
         return functools.partial(
             secured_expose,
@@ -189,17 +204,17 @@ def secured_expose(
         if check_for_login and not check_api_key and not await check_login(request):
             return BaseRedirectResponse("/login")
 
-        # CSRF guard for state-changing requests. With credentials configured,
-        # check_login above already required the SameSite=Strict login cookie,
-        # which cross-site requests never carry. Without (full) credentials
-        # check_login passes with no cookie at all, so a cross-site form could
-        # otherwise POST config changes: require the SameSite=Strict anonymous
-        # session cookie, which every UI page load issues.
+        # CSRF guard for state-changing requests. When a login session was
+        # required, check_login above accepted only the SameSite=Strict login
+        # cookie, which cross-site requests never carry. When no session is
+        # required check_login passes with no cookie at all, so a cross-site
+        # form could otherwise POST config changes: require the SameSite=Strict
+        # anonymous session cookie, which every UI page load issues.
         if (
             check_for_login
             and not check_api_key
             and request.method == "POST"
-            and (not cfg.username() or not cfg.password())
+            and login_without_session(request)
             and not validate_anonymous_session(request)
         ):
             log_warning_and_ip(request, T("Refused connection from:"))
@@ -223,18 +238,17 @@ def secured_expose(
         else:
             response = await run_in_threadpool(wrap_func, request, *args, **kwargs)
 
-        # When authentication is disabled, issue a stateless anonymous session cookie on
-        # the UI page routes so the frontend authenticates API calls by cookie instead of
-        # the apikey, and POSTs pass the CSRF guard above. Limited to check_for_login
+        # When no login session is required (no credentials, or a local client under
+        # inet_exposure=5), issue the stateless anonymous session cookie on the UI page
+        # routes so the frontend authenticates API calls by cookie instead of the
+        # apikey, and POSTs pass the CSRF guard above. Limited to check_for_login
         # routes (the real UI pages) so bots hitting robots.txt/favicon and the
         # login/logout routes don't get cookies. API routes never set the cookie: the
-        # browser always loads a page (and its cookie) first. The credentials condition
-        # matches check_login's definition of "no authentication required" (either field
-        # missing), so partial credentials cannot leave the UI without a cookie.
+        # browser always loads a page (and its cookie) first.
         if (
             check_for_login
             and not check_api_key
-            and (not cfg.username() or not cfg.password())
+            and login_without_session(request)
             and isinstance(response, Response)
             and not validate_anonymous_session(request)
         ):
@@ -392,9 +406,10 @@ def anonymous_session_tag() -> str:
 
 
 def validate_anonymous_session(request: Request) -> bool:
-    """Return True when no credentials are configured and the request
-    carries a valid anonymous session cookie"""
-    if cfg.username() and cfg.password():
+    """Return True when the request may use the web-UI without a login session
+    (see login_without_session) and carries a valid anonymous session cookie.
+    Once a login session is required, previously issued tags grant nothing."""
+    if not login_without_session(request):
         return False
     return hmac.compare_digest(request.cookies.get(SESSION_COOKIE, ""), anonymous_session_tag())
 
@@ -453,14 +468,22 @@ async def validate_session(request: Request) -> bool:
     return True
 
 
-async def check_login(request: Request) -> bool:
-    """Check if user is logged in (Starlette version)"""
-    # No authentication required when no username/password is set
+def login_without_session(request: Request) -> bool:
+    """True when this request may use the web-UI without a login session:
+    no (full) username/password is configured, or inet_exposure=5 shows the
+    login only to external clients and this client is local. Such requests
+    still need the anonymous session cookie for POSTs (CSRF) and API calls."""
     if not cfg.username() or not cfg.password():
         return True
 
     # If we show login for external IP, by using access_type=6 we can check if IP match
-    if cfg.inet_exposure() == 5 and check_access(request, access_type=6):
+    return cfg.inet_exposure() == 5 and check_access(request, access_type=6)
+
+
+async def check_login(request: Request) -> bool:
+    """Check if the request may use the web-UI: no login session
+    required, or a valid session cookie is presented"""
+    if login_without_session(request):
         return True
 
     # Check the session cookie
@@ -620,14 +643,13 @@ def shutdown_get(request: Request):
     return BaseRedirectResponse("/")
 
 
-@secured_expose(route="/shutdown", check_api_key=True, methods=["POST"])
+@secured_expose(route="/shutdown", methods=["POST"])
 async def shutdown(request: Request):
     """Shut down and show a goodbye page, for UI users; automation should use
     the mode=shutdown API-call. POST-only and the UI submits it as a form, so
-    the browser navigates to this response. check_api_key rather than the plain
-    login check: the form POST is authorized by the SameSite=Strict session
-    cookie in check_apikey (or the apikey), neither of which a cross-site page
-    can send, so it cannot trigger a shutdown."""
+    the browser navigates to this response. Authorized like any other page
+    POST: a SameSite=Strict session cookie (login or anonymous), which a
+    cross-site page cannot send, so it cannot trigger a shutdown."""
     await halt_and_shutdown()
     return PlainTextResponse(T("SABnzbd shutdown finished"))
 
