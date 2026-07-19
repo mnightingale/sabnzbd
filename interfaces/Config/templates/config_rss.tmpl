@@ -8,7 +8,7 @@
         <div class="padTable">
             <a class="main-helplink" href="$help_uri" target="_blank"><span class="glyphicon glyphicon-question-sign"></span></a>
             <p>$T('explain-RSS')</p>
-            <form action="rss/add_rss_feed" method="post" autocomplete="off">
+            <form data-form="add-rss-feed" action="$url('config/rss/add_rss_feed')" method="post" autocomplete="off">
                 <table class="catTable addRssTable">
                     <tr>
                         <th>&nbsp;</th>
@@ -37,7 +37,7 @@
     <!--#if $rss#-->
     <div class="section">
         <div class="padTable">
-            <form action="rss/save_rss_feed" method="post" autocomplete="off">
+            <form action="$url('config/rss/save_rss_feed')" method="post" autocomplete="off">
                 <table id="subscriptions">
                     <tbody>
                         <!--#set $feeds = sorted($rss.keys(), key=lambda x: x.lower())#-->
@@ -73,7 +73,7 @@
             </form>
             <!--#if $feeds#-->
             <br/>
-            <form action="rss/rss_now" method="post" autocomplete="off">
+            <form action="$url('config/rss/rss_now')" method="post" autocomplete="off">
                 <button type="submit" class="btn btn-default readAll"><span class="glyphicon glyphicon-sort"></span> $T('button-rssNow')</button>
             </form>
             <!--#end if#-->
@@ -81,7 +81,7 @@
     </div>
     <!--#end if#-->
     <div class="section">
-        <form action="rss/save_rss_rate" method="post" autocomplete="off">
+        <form action="$url('config/rss/save_rss_rate')" method="post" autocomplete="off">
             <div class="col1">
                 <fieldset>
                     <div class="field-pair">
@@ -112,7 +112,7 @@
                 $error
             </div>
             <!--#end if#-->
-            <form action="rss/upd_rss_feed" method="post">
+            <form action="$url('config/rss/upd_rss_feed')" method="post">
                 <input type="hidden" name="feed" value="$active_feed" />
                 <input type="hidden" name="uri" value="$rss[$feed]['uris']" />
                 <table class="catTable">
@@ -203,7 +203,7 @@
                 </table>
             </form>
             <!-- add new filter -->
-            <form action="rss/upd_rss_filter" method="post">
+            <form data-form="update-rss-filter" action="$url('config/rss/upd_rss_filter')" method="post">
                 <input type="hidden" name="index" value="$rss[$feed]['filtercount']" />
                 <input type="hidden" name="feed" value="$active_feed" />
                 <table class="catTable">
@@ -279,7 +279,7 @@
             <!--#set $fnum = 0#-->
             <!--#for $filter in $rss[$feed].filters#-->
                 <!--#set $odd = not $odd#-->
-                <form action="rss/upd_rss_filter" method="post" autocomplete="off">
+                <form data-form="update-rss-filter" action="$url('config/rss/upd_rss_filter')" method="post" autocomplete="off">
                     <input type="hidden" name="index" value="$fnum" />
                     <input type="hidden" name="feed" value="$active_feed" />
                     <table class="catTable">
@@ -357,7 +357,7 @@
                 </form>
                 <!--#set $fnum = $fnum+1#-->
             <!--#end for#-->
-            <form action="rss/download_rss_feed" method="post">
+            <form action="$url('config/rss/download_rss_feed')" method="post">
                 <input type="hidden" name="feed" value="$active_feed" />
                 <div class="padding">
                     <button type="button" class="btn btn-default testFeed" rel="$active_feed"><span class="glyphicon glyphicon-sort"></span> $T('button-preFeed')</button>
@@ -392,7 +392,7 @@
                     <!--#for $job in $matched#-->
                         <tr class="infoTableSeperator">
                             <td>
-                                <form action="rss/download" method="post">
+                                <form data-form="download-rss-job" action="$url('config/rss/download')" method="post">
                                     <input type="hidden" value="$active_feed" name="feed" />
                                     <input type="hidden" name="url" value="$job['url']" />
                                     <input type="hidden" name="nzbname" value="$job['nzbname']" />
@@ -435,7 +435,7 @@
                     <!--#for $job in $unmatched#-->
                         <tr class="infoTableSeperator">
                             <td>
-                                <form action="rss/download" method="post">
+                                <form data-form="download-rss-job" action="$url('config/rss/download')" method="post">
                                     <input type="hidden" value="$active_feed" name="feed" />
                                     <input type="hidden" name="url" value="$job['url']" />
                                     <input type="hidden" name="nzbname" value="$job['nzbname']" />
@@ -463,7 +463,7 @@
             </div>
             <div class="tab-pane padTable" id="rss-tab-done">
                 <!--#if $downloaded#-->
-                <form action="rss/clean_rss_jobs" method="post">
+                <form action="$url('config/rss/clean_rss_jobs')" method="post">
                     <input type="hidden" value="$active_feed" name="feed" />
                     <table class="catTable">
                         <thead>
@@ -480,7 +480,7 @@
                         <!--#for $job in $matched#-->
                             <tr class="infoTableSeperator">
                                 <td>
-                                    <form action="download" method="get">
+                                    <form action="$url('config/rss/download')" method="get">
                                         <input type="hidden" value="$active_feed" name="feed" />
                                         <input type="hidden" name="url" value="$job['url']" />
                                         <input type="hidden" name="nzbname" value="$job['nzbname']" />
@@ -513,7 +513,7 @@
 </div>
 <!-- /colmask -->
 
-<form method="post" action="rss/save_rss_feed" class="modal fade" id="rss_edit_modal">
+<form method="post" action="$url('config/rss/save_rss_feed')" class="modal fade" id="rss_edit_modal">
     <div class="modal-dialog">
         <div class="modal-content">
             <div class="modal-header">
@@ -610,7 +610,7 @@ jQuery(document).ready(function(){
     });
 
     // Only the Accept filter needs all the options
-    jQuery('form[action="rss/upd_rss_filter"]').find('select[name="filter_type"]').change(function() {
+    jQuery('form[data-form="update-rss-filter"]').find('select[name="filter_type"]').change(function() {
         jQuery(this).parent().parent().find('select:not([name="filter_type"])').attr('disabled', jQuery(this).val() !== "A" && jQuery(this).val() !== "S")
     })
     // Trigger on-load for all
@@ -652,21 +652,21 @@ jQuery(document).ready(function(){
     jQuery('.cleanFeed').click(function(){
         setActiveIcon(this)
         var theForm = jQuery(this).closest("form");
-        theForm.attr("action", "rss/clean_rss_jobs").submit();
+        theForm.attr("action", "$url('config/rss/clean_rss_jobs')").submit();
     });
 
     jQuery('.evalFeed').click(function(){
         setActiveIcon(this)
         var theForm = jQuery(this).closest("form");
-        theForm.attr("action", "rss/eval_rss_feed").submit();
+        theForm.attr("action", "$url('config/rss/eval_rss_feed')").submit();
     });
 
     jQuery('.delFilter').click(function(){
         var theForm = jQuery(this).closest("form");
-        theForm.attr("action", "rss/del_rss_filter").submit();
+        theForm.attr("action", "$url('config/rss/del_rss_filter')").submit();
     });
 
-    jQuery('form[action="rss/download"]').ajaxForm({
+    jQuery('form[data-form="download-rss-job"]').ajaxForm({
         datatype: 'json',
         beforeSubmit: function (_, form) {
             jQuery(form).find('button').attr("disabled", "disabled")

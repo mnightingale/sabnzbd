@@ -10,7 +10,7 @@
             <h5 class="darkred"><strong>$T('explain-relFolder'):</strong> <span class="path">$defdir</span></h5>
             <!--#for $cur, $slot in enumerate($slotinfo)#-->
                 <!--#set $cansort = $slot.name != '*' and $slot.name != ''#-->
-                <form action="categories/save" method="post" class="fullform <!--#if $cansort then 'sorting-row' else ''#-->">
+                <form action="$url('config/categories/save')" method="post" class="fullform <!--#if $cansort then 'sorting-row' else ''#-->">
                     <table class="catTable">
                         <!--#if $cur == 0#-->
                         <tr>
@@ -107,7 +107,7 @@
     jQuery(document).ready(function() {
         jQuery('.delCat').click(function() {
             var theForm = jQuery(this).closest("form");
-            theForm.attr("action", "categories/delete").submit();
+            theForm.attr("action", "$url('config/categories/delete')").submit();
         });
 
         // Add autocomplete and file-browser

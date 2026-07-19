@@ -17,7 +17,7 @@ else:
         <div class="col2">
             <h3>$T('addSchedule') <a href="$help_uri" target="_blank"><span class="glyphicon glyphicon-question-sign"></span></a></h3>
         </div><!-- /col2 -->
-        <form action="scheduling/add_schedule" method="post" autocomplete="off">
+        <form data-form="add-schedule" action="$url('config/scheduling/add_schedule')" method="post" autocomplete="off">
         <div class="col1">
             <fieldset>
                 <div class="field-pair">
@@ -89,7 +89,7 @@ else:
                         <!--#set $odd = True#-->
                         <!--#for $schednum, $line in enumerate($schedlines)#-->
                             <!--#set $odd = not $odd#-->
-                            <form action="scheduling/del_schedule" method="post">
+                            <form data-form="del-schedule" action="$url('config/scheduling/del_schedule')" method="post">
                                 <input type="hidden" name="line" id="line" value="$line"/>
                                 <div class="field-pair infoTableSeperator <!--#if $odd then "" else " alt"#-->">
                                     <input type="checkbox" name="schedenabled" value="$line" <!--#if int($taskinfo[$schednum][5]) > 0 then 'checked="checked"' else ""#-->>
