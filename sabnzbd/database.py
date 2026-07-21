@@ -35,7 +35,7 @@ from typing import Optional, Sequence, Any, Iterator
 
 import sabnzbd
 import sabnzbd.cfg
-from sabnzbd.constants import DB_HISTORY_NAME, STAGES, Status, PP_LOOKUP, MEBI
+from sabnzbd.constants import DB_HISTORY_NAME, DB_INCREMENTAL_VACUUM_PAGES, STAGES, Status, PP_LOOKUP, MEBI
 from sabnzbd.bpsmeter import this_week, this_month
 from sabnzbd.decorators import synchronized
 from sabnzbd.encoding import ubtou, utob
@@ -84,6 +84,7 @@ class HistoryDB:
         self.cursor = self.connection.cursor()
 
         try:
+            self.cursor.execute("PRAGMA auto_vacuum=INCREMENTAL;")
             # WAL: readers don't block the writer and vice versa, so the UI can list
             # history while the postprocessor writes. NORMAL sync is safe under WAL.
             # busy_timeout makes SQLite wait for a lock instead of failing at once,
@@ -91,8 +92,9 @@ class HistoryDB:
             self.cursor.execute("PRAGMA journal_mode=WAL;")
             self.cursor.execute("PRAGMA synchronous=NORMAL;")
             self.cursor.execute("PRAGMA busy_timeout=5000;")
-            self.cursor.execute(f"PRAGMA mmap_size={16 * MEBI};")
-            self.cursor.execute(f"PRAGMA cache_size={-1 * 16_000};")
+            self.cursor.execute(f"PRAGMA mmap_size={64 * MEBI};")
+            self.cursor.execute(f"PRAGMA cache_size={-1 * 64_000};")
+            self.cursor.execute("PRAGMA temp_store=MEMORY;")
         except Exception:
             # Can fail on a readonly database; writes will report the error later
             logging.debug("Failed to set database pragmas", exc_info=True)
@@ -305,6 +307,13 @@ class HistoryDB:
             )
         )
 
+    def incremental_vacuum(self, pages: int = DB_INCREMENTAL_VACUUM_PAGES):
+        """Return up to `pages` freed pages to the filesystem. Bounded so a large
+        freelist drains over several calls instead of one long pause; cheap (a
+        no-op) when nothing is free. Requires the INCREMENTAL auto-vacuum mode
+        set in connect(), so it is called after inserts, deletes and purges."""
+        self.execute("PRAGMA incremental_vacuum(%d);" % pages)
+
     def close(self):
         """Close database connection"""
         try:
@@ -323,6 +332,7 @@ class HistoryDB:
         """Permanently remove job from the history"""
         self.execute("""DELETE FROM history WHERE nzo_id = ?""", (job,))
         logging.info("[%s] Removing job %s from history", caller_name(), job)
+        self.incremental_vacuum()
 
     def archive_with_status(self, status: str, search: Optional[str] = None):
         """Archive all jobs with a specific status, optional with `search` pattern"""
@@ -338,6 +348,7 @@ class HistoryDB:
         search = convert_search(search)
         logging.info("Removing all jobs with status=%s", status)
         self.execute("""DELETE FROM history WHERE name LIKE ? AND status = ?""", (search, status))
+        self.incremental_vacuum()
 
     def mark_as_completed(self, job: str):
         """Mark a job as completed in the history"""
@@ -403,6 +414,9 @@ class HistoryDB:
             # Delete all non-failed ones
             self.remove_with_status(Status.COMPLETED)
 
+        # Reclaim the space freed by the purge
+        self.incremental_vacuum()
+
     def add_history_db(self, nzo, storage: str, postproc_time: int, script_output: str, script_line: str):
         """Add a new job entry to the database"""
         t = build_history_info(nzo, storage, postproc_time, script_output, script_line)
@@ -415,6 +429,7 @@ class HistoryDB:
             t,
         )
         logging.info("Added job %s to history", nzo.final_name)
+        self.incremental_vacuum()
 
     def fetch_history(
         self,

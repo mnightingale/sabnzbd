@@ -30,7 +30,7 @@ import aiosqlite
 
 import sabnzbd
 import sabnzbd.cfg
-from sabnzbd.constants import DB_SESSIONS_NAME, DB_SESSIONS_VERSION, MEBI
+from sabnzbd.constants import DB_INCREMENTAL_VACUUM_PAGES, DB_SESSIONS_NAME, DB_SESSIONS_VERSION, MEBI
 from sabnzbd.filesystem import remove_file
 
 # Expired sessions are purged on first use and at most once per interval afterwards
@@ -87,23 +87,30 @@ class AsyncSessionStore:
             connection = await aiosqlite.connect(self.db_path, isolation_level=None)
             try:
                 connection.row_factory = sqlite3.Row
-                # Same journal settings as the history database; WAL also lets a
-                # (hypothetical) second reader coexist with our writes
-                await connection.execute("PRAGMA journal_mode=WAL;")
-                await connection.execute("PRAGMA synchronous=NORMAL;")
-                await connection.execute("PRAGMA busy_timeout=5000;")
-                await connection.execute(f"PRAGMA mmap_size={2 * MEBI};")
-                await connection.execute(f"PRAGMA cache_size={-1 * 2_000};")
+                cursor = await connection.cursor()
+
+                await cursor.execute("PRAGMA auto_vacuum=INCREMENTAL;")
+                # Same journal settings as the history database; even though WAL does not provide any benefit
+                await cursor.execute("PRAGMA journal_mode=WAL;")
+                await cursor.execute("PRAGMA synchronous=NORMAL;")
+                await cursor.execute("PRAGMA busy_timeout=5000;")
+                await cursor.execute(f"PRAGMA mmap_size={2 * MEBI};")
+                await cursor.execute(f"PRAGMA cache_size={-1 * 2_000};")
+                await cursor.execute("PRAGMA temp_store=MEMORY;")
+
+                # Full VACUUM at startup
+                await cursor.execute("VACUUM;")
+
                 # Sessions are disposable, so a schema change resets them rather
                 # than migrating: on any user_version mismatch (including a fresh
                 # database, which reports 0) drop the old table and recreate it
                 # below, then stamp the current generation.
-                async with connection.execute("PRAGMA user_version") as cursor:
-                    version_row = await cursor.fetchone()
+                await cursor.execute("PRAGMA user_version")
+                version_row = await cursor.fetchone()
                 if not version_row or version_row[0] != DB_SESSIONS_VERSION:
-                    await connection.execute("DROP TABLE IF EXISTS sessions")
-                    await connection.execute("PRAGMA user_version = %d" % DB_SESSIONS_VERSION)
-                await connection.execute("""CREATE TABLE IF NOT EXISTS sessions (
+                    await cursor.execute("DROP TABLE IF EXISTS sessions")
+                    await cursor.execute("PRAGMA user_version = %d" % DB_SESSIONS_VERSION)
+                await cursor.execute("""CREATE TABLE IF NOT EXISTS sessions (
                         "token_hash" TEXT PRIMARY KEY,
                         "created" INTEGER NOT NULL,
                         "expires" INTEGER NOT NULL,
@@ -111,12 +118,17 @@ class AsyncSessionStore:
                         "last_ip" TEXT,
                         "user_agent" TEXT
                     )""")
-                await connection.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires)")
+                await cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires)")
+                await cursor.close()
             except Exception:
                 await connection.close()
                 raise
             self._connection = connection
         return self._connection
+
+    async def _incremental_vacuum(self, connection: aiosqlite.Connection):
+        """Return up to DB_INCREMENTAL_VACUUM_PAGES freed pages to the filesystem"""
+        await connection.execute("PRAGMA incremental_vacuum(%d);" % DB_INCREMENTAL_VACUUM_PAGES)
 
     async def _maybe_purge(self, connection: aiosqlite.Connection):
         """Opportunistically delete expired sessions, throttled to once per PURGE_INTERVAL.
@@ -125,6 +137,7 @@ class AsyncSessionStore:
         if now - self._last_purge >= PURGE_INTERVAL:
             self._last_purge = now
             await connection.execute("DELETE FROM sessions WHERE expires < ?", (int(now),))
+            await self._incremental_vacuum(connection)
 
     async def _handle_error(self, error: BaseException):
         """Log a failed operation. Corruption-class errors discard the database
@@ -174,6 +187,7 @@ class AsyncSessionStore:
                     "VALUES (?, ?, ?, ?, ?, ?)",
                     (token_hash, created, expires, cred_fingerprint, last_ip, user_agent),
                 )
+                await self._incremental_vacuum(connection)
         except Exception as error:
             await self._handle_error(error)
 
@@ -190,6 +204,7 @@ class AsyncSessionStore:
         try:
             if connection := await self._connect():
                 await connection.execute("DELETE FROM sessions WHERE token_hash = ?", (token_hash,))
+                await self._incremental_vacuum(connection)
         except Exception as error:
             await self._handle_error(error)
 

@@ -67,6 +67,11 @@ DB_HISTORY_NAME = "history%s.db" % DB_HISTORY_VERSION
 DB_SESSIONS_VERSION = 1
 DB_SESSIONS_NAME = "sessions.db"
 
+# Both databases use INCREMENTAL auto-vacuum. incremental_vacuum reclaims at most
+# this many freed pages per call, bounding the latency of any single reclaim while
+# the freelist drains over subsequent calls (see database.py and sessionstore.py).
+DB_INCREMENTAL_VACUUM_PAGES = 100
+
 DEF_DOWNLOAD_DIR = os.path.normpath("Downloads/incomplete")
 DEF_COMPLETE_DIR = os.path.normpath("Downloads/complete")
 DEF_ADMIN_DIR = "admin"
