@@ -28,6 +28,8 @@ from typing import Any, Optional
 
 import aiosqlite
 
+logging.getLogger("aiosqlite").setLevel(logging.INFO)
+
 import sabnzbd
 import sabnzbd.cfg
 from sabnzbd.constants import DB_SESSIONS_NAME, DB_SESSIONS_VERSION
