@@ -121,13 +121,14 @@ _MSG_APIKEY_REQUIRED = "API Key Required"
 _MSG_APIKEY_INCORRECT = "API Key Incorrect"
 _MSG_MISSING_SESSION = "Access denied - Missing session cookie, reload the page and try again"
 _MSG_SESSION_EXPIRED = "Session expired, reload the page"
+_MSG_NOT_FOUND = "Not found"
 
 INTERFACE_ROUTES: list[Route | Mount] = []
 
 
 def forbidden_response(msg: str) -> PlainTextResponse:
     """403 response, with the reason in the body only when api_warnings is enabled"""
-    return PlainTextResponse(msg if cfg.api_warnings() else "", status_code=403)
+    return PlainTextResponse(msg, status_code=403)
 
 
 def secured_expose(
@@ -2542,7 +2543,13 @@ async def app_lifespan(app: Starlette):
 
 
 async def not_found_redirect(request: Request, exc):
-    """Catch-all for unknown URLs: redirect to the UI root"""
+    """Unknown URL: 404 for API paths, redirect to the UI root otherwise."""
+    path = request.url.path
+    api_paths = ("/api",)
+    if url_base := cfg.url_base():
+        api_paths += (url_base + "/api",)
+    if any(path == p or path.startswith(p + "/") for p in api_paths):
+        return PlainTextResponse(_MSG_NOT_FOUND, status_code=404)
     return BaseRedirectResponse("/")
 
 
