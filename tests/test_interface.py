@@ -325,12 +325,12 @@ def request_with_cookie(token: str | None = None, params: dict | None = None, re
 
 class TestSessionAuth:
     """The auth path is async: session lookups run through the AsyncSessionStore
-    (sessions1.db) so the event loop never blocks on database access"""
+    (sessions.db) so the event loop never blocks on database access"""
 
     @pytest.fixture
     def session_store(self, tmp_path, monkeypatch):
         """Wire sabnzbd.session_store to a fresh sessions database"""
-        store = sessionstore.AsyncSessionStore(db_path=str(tmp_path / "sessions1.db"))
+        store = sessionstore.AsyncSessionStore(db_path=str(tmp_path / "sessions.db"))
         monkeypatch.setattr(sabnzbd, "session_store", store)
         yield store
         asyncio.run(store.close())

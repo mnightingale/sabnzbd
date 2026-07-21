@@ -30,7 +30,7 @@ import aiosqlite
 
 import sabnzbd
 import sabnzbd.cfg
-from sabnzbd.constants import DB_SESSIONS_NAME
+from sabnzbd.constants import DB_SESSIONS_NAME, DB_SESSIONS_VERSION, MEBI
 from sabnzbd.filesystem import remove_file
 
 # Expired sessions are purged on first use and at most once per interval afterwards
@@ -39,7 +39,7 @@ PURGE_INTERVAL = 3600 * 24
 
 class AsyncSessionStore:
     """Async store for web-UI login sessions, in its own database file
-    (sessions1.db), available as sabnzbd.session_store.
+    (sessions.db), available as sabnzbd.session_store.
 
     Sessions deliberately live outside the history database:
      - This store is the only reader and writer of its file, so it needs no
@@ -92,6 +92,15 @@ class AsyncSessionStore:
                 await connection.execute("PRAGMA journal_mode=WAL;")
                 await connection.execute("PRAGMA synchronous=NORMAL;")
                 await connection.execute("PRAGMA busy_timeout=5000;")
+                # Sessions are disposable, so a schema change resets them rather
+                # than migrating: on any user_version mismatch (including a fresh
+                # database, which reports 0) drop the old table and recreate it
+                # below, then stamp the current generation.
+                async with connection.execute("PRAGMA user_version") as cursor:
+                    version_row = await cursor.fetchone()
+                if not version_row or version_row[0] != DB_SESSIONS_VERSION:
+                    await connection.execute("DROP TABLE IF EXISTS sessions")
+                    await connection.execute("PRAGMA user_version = %d" % DB_SESSIONS_VERSION)
                 await connection.execute("""CREATE TABLE IF NOT EXISTS sessions (
                         "token_hash" TEXT PRIMARY KEY,
                         "created" INTEGER NOT NULL,

@@ -128,11 +128,11 @@ class TestHistoryDBPool:
 
 
 class TestAsyncSessionStore:
-    """Sessions live in their own database (sessions1.db, not part of config
+    """Sessions live in their own database (sessions.db, not part of config
     backups), owned exclusively by the async store on the web server's loop"""
 
     def test_creates_own_database_file(self, tmp_path):
-        session_db = str(tmp_path / "sessions1.db")
+        session_db = str(tmp_path / "sessions.db")
 
         async def scenario():
             store = sessionstore.AsyncSessionStore(db_path=session_db)
@@ -150,7 +150,7 @@ class TestAsyncSessionStore:
         now = int(time.time())
 
         async def scenario():
-            store = sessionstore.AsyncSessionStore(db_path=str(tmp_path / "sessions1.db"))
+            store = sessionstore.AsyncSessionStore(db_path=str(tmp_path / "sessions.db"))
             try:
                 await store.add_session(
                     token_hash="hash1",
@@ -178,7 +178,7 @@ class TestAsyncSessionStore:
         asyncio.run(scenario())
 
     def test_expired_sessions_purged_on_first_use(self, tmp_path):
-        session_db = str(tmp_path / "sessions1.db")
+        session_db = str(tmp_path / "sessions.db")
         now = int(time.time())
 
         async def fill():
@@ -201,7 +201,7 @@ class TestAsyncSessionStore:
 
     def test_closed_store_fails_closed(self, tmp_path):
         async def scenario():
-            store = sessionstore.AsyncSessionStore(db_path=str(tmp_path / "sessions1.db"))
+            store = sessionstore.AsyncSessionStore(db_path=str(tmp_path / "sessions.db"))
             await store.add_session("hash1", 0, int(time.time()) + 10000, "fp")
             await store.close()
             # After close (shutdown), lookups fail closed and writes are no-ops
@@ -212,7 +212,7 @@ class TestAsyncSessionStore:
         asyncio.run(scenario())
 
     def test_corrupt_database_discarded_and_recreated(self, tmp_path):
-        session_db = str(tmp_path / "sessions1.db")
+        session_db = str(tmp_path / "sessions.db")
         with open(session_db, "wb") as garbage_ref:
             garbage_ref.write(b"this is not a database" * 42)
 

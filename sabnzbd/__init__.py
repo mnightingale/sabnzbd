@@ -220,7 +220,7 @@ INIT_LOCK = Lock()
 # Borrow with: with sabnzbd.db_pool.connection() as history_db
 db_pool = sabnzbd.database.HistoryDBPool()
 
-# Async store for web-UI login sessions (sessions1.db), used exclusively by the
+# Async store for web-UI login sessions (sessions.db), used exclusively by the
 # web interface on its event loop. Opened lazily on the first session lookup,
 # closed by the Starlette lifespan in interface.create_app().
 session_store = sabnzbd.sessionstore.AsyncSessionStore()
