@@ -92,6 +92,8 @@ class AsyncSessionStore:
                 await connection.execute("PRAGMA journal_mode=WAL;")
                 await connection.execute("PRAGMA synchronous=NORMAL;")
                 await connection.execute("PRAGMA busy_timeout=5000;")
+                await connection.execute(f"PRAGMA mmap_size={2 * MEBI};")
+                await connection.execute(f"PRAGMA cache_size={-1 * 2_000};")
                 # Sessions are disposable, so a schema change resets them rather
                 # than migrating: on any user_version mismatch (including a fresh
                 # database, which reports 0) drop the old table and recreate it

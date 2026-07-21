@@ -35,7 +35,7 @@ from typing import Optional, Sequence, Any, Iterator
 
 import sabnzbd
 import sabnzbd.cfg
-from sabnzbd.constants import DB_HISTORY_NAME, STAGES, Status, PP_LOOKUP
+from sabnzbd.constants import DB_HISTORY_NAME, STAGES, Status, PP_LOOKUP, MEBI
 from sabnzbd.bpsmeter import this_week, this_month
 from sabnzbd.decorators import synchronized
 from sabnzbd.encoding import ubtou, utob
@@ -91,6 +91,8 @@ class HistoryDB:
             self.cursor.execute("PRAGMA journal_mode=WAL;")
             self.cursor.execute("PRAGMA synchronous=NORMAL;")
             self.cursor.execute("PRAGMA busy_timeout=5000;")
+            self.cursor.execute(f"PRAGMA mmap_size={16 * MEBI};")
+            self.cursor.execute(f"PRAGMA cache_size={-1 * 16_000};")
         except Exception:
             # Can fail on a readonly database; writes will report the error later
             logging.debug("Failed to set database pragmas", exc_info=True)
