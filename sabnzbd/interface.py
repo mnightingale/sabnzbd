@@ -900,6 +900,7 @@ SPECIAL_BOOL_LIST = (
     "enable_season_sorting",
     "verify_xff_header",
     "direct_write",
+    "tracemalloc_snapshots",
 )
 SPECIAL_VALUE_LIST = (
     "downloader_sleep_time",
@@ -918,6 +919,7 @@ SPECIAL_VALUE_LIST = (
     "ssdp_broadcast_interval",
     "unrar_parameters",
     "outgoing_nntp_ip",
+    "tracemalloc_frames",
 )
 SPECIAL_LIST_LIST = (
     "rss_odd_titles",

@@ -1148,6 +1148,10 @@ def handle_empty_queue():
         if sabnzbd.LIBC:
             sabnzbd.LIBC.malloc_trim(0)
 
+        # Store a memory snapshot of the idle state, so consecutive
+        # empty queues can be compared to track down memory leaks
+        sabnzbd.memoryprofile.take_snapshot("queue-empty")
+
 
 def cleanup_list(filelist: list[str], base_dir: str, skip_nzb: bool) -> list[str]:
     """Remove all files of the job that match the cleanup list,

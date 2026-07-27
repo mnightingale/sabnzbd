@@ -558,6 +558,10 @@ ext_rename_ignore = OptionList("misc", "ext_rename_ignore", validation=lower_cas
 unrar_parameters = OptionStr("misc", "unrar_parameters", validation=supported_unrar_parameters)
 outgoing_nntp_ip = OptionStr("misc", "outgoing_nntp_ip")
 
+# Memory-leak diagnostics, only useful for developers
+tracemalloc_snapshots = OptionBool("misc", "tracemalloc_snapshots", False)
+tracemalloc_frames = OptionNumber("misc", "tracemalloc_frames", 10, minval=1, maxval=50)
+
 
 ##############################################################################
 # Config - Notifications

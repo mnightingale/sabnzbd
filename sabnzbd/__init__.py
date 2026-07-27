@@ -88,6 +88,7 @@ import sabnzbd.encoding as encoding
 import sabnzbd.config as config
 import sabnzbd.cfg as cfg
 import sabnzbd.database
+import sabnzbd.memoryprofile
 import sabnzbd.lang as lang
 import sabnzbd.nzb
 import sabnzbd.nzbparser as nzbparser
@@ -229,6 +230,9 @@ def initialize(pause_downloader=False, clean_up=False, repair=0):
     sabnzbd.__SHUTTING_DOWN__ = False
 
     sys.setswitchinterval(cfg.switchinterval())
+
+    # Start memory tracing before anything else is set up, if the user enabled it
+    sabnzbd.memoryprofile.start()
 
     # Set global database connection for Web-UI threads
     cherrypy.engine.subscribe("start_thread", get_db_connection)
