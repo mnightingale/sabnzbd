@@ -25,9 +25,11 @@ be inspected afterwards using tracemalloc.Snapshot.load().
 
 import os
 import gc
+import sys
 import time
 import logging
 import tracemalloc
+import threading
 from collections import deque
 from threading import RLock
 from types import FrameType, ModuleType
@@ -59,6 +61,11 @@ TRACEBACK_ENTRIES = 3
 REFERRER_SAMPLE_SIZE = 3
 REFERRER_MAX_DEPTH = 12
 REFERRER_MAX_OBJECTS = 25000
+REFERRER_MAX_CHAINS = 3
+
+# Debuggers and profilers keep references to all threads and frames, so running
+# under one will always show a retaining path that does not exist in production
+IGNORED_MODULE_PREFIXES = ("pydevd", "_pydevd", "_pydev_", "pydev_", "pdb", "bdb", "pympler", "guppy", "objgraph")
 
 # Attributes used to give the objects in a referrer-chain a recognizable name
 IDENTIFYING_ATTRIBUTES = ("final_name", "filename", "article", "nzo_id", "nzf_id", "name")
@@ -124,6 +131,7 @@ def take_snapshot(label: str):
 
             # Snapshot is dropped first, it references a lot of data itself
             del snapshot
+            log_thread_census()
             log_referrer_chains(cfg.tracemalloc_referrer_type())
         except Exception:
             # Never let diagnostics break post-processing
@@ -159,15 +167,20 @@ def log_referrer_chains(type_name: str, samples: int = REFERRER_SAMPLE_SIZE):
             logging.info("Tracemalloc no live %s objects found to trace referrers for", type_name)
             return
 
+        # Debuggers and profilers hold on to everything, they would mask the real holder
+        ignore_ids = _ignored_module_ids()
+        ignore_ids.add(id(targets))
+
         logging.info("Tracemalloc tracing referrers of %d sampled %s objects", len(targets), type_name)
         for number, target in enumerate(targets, start=1):
-            # The list of samples refers to the target itself, so it has to be ignored
-            chain = _find_referrer_chain(target, roots, {id(targets)})
-            logging.info("Tracemalloc referrer chain %d: %s", number, _describe(target))
-            for depth, description in enumerate(chain, start=1):
-                logging.info("Tracemalloc   %s<- %s", "  " * depth, description)
-            if not chain:
-                logging.info("Tracemalloc   <- nothing (only held by the sampling itself)")
+            logging.info("Tracemalloc referrer chains for sample %d: %s", number, _describe(target))
+            chains = _find_referrer_chains(target, roots, ignore_ids)
+            if not chains:
+                logging.info("Tracemalloc   <- no retaining path found within the limits")
+            for chain in chains:
+                for depth, description in enumerate(chain, start=1):
+                    logging.info("Tracemalloc   %s<- %s", "  " * depth, description)
+                logging.info("Tracemalloc   ---")
     except Exception:
         logging.info("Failed to trace referrers", exc_info=True)
     finally:
@@ -187,9 +200,38 @@ def _global_roots() -> dict[int, str]:
     return roots
 
 
-def _find_referrer_chain(target, roots: dict[int, str], ignore_ids: set[int]) -> list[str]:
+def log_thread_census():
+    """Log the live threads per class. A thread that never exits is held by the
+    threading module, and with it everything the thread object refers to."""
+    counts = {}
+    for thread in threading.enumerate():
+        class_name = type(thread).__name__
+        counts[class_name] = counts.get(class_name, 0) + 1
+    logging.info(
+        "Tracemalloc %d live threads: %s",
+        len(counts) and sum(counts.values()),
+        ", ".join("%s=%d" % (name, count) for name, count in sorted(counts.items())),
+    )
+
+
+def _ignored_module_ids() -> set[int]:
+    """Ids of the debugger and profiler modules and their globals. They keep
+    references to everything, so a walk would always end up there first."""
+    ignored = set()
+    for module_name, module in list(sys.modules.items()):
+        if module and module_name.startswith(IGNORED_MODULE_PREFIXES):
+            ignored.add(id(module))
+            try:
+                ignored.add(id(vars(module)))
+            except Exception:
+                continue
+    return ignored
+
+
+def _find_referrer_chains(target, roots: dict[int, str], ignore_ids: set[int]) -> list[list[str]]:
     """Breadth-first walk over the referrers of the target, so the shortest
-    path to a root is found. Returns the descriptions of that path."""
+    paths to a root are found. Returns the descriptions of those paths.
+    Keeps going after the first root, a leak often has more than one holder."""
     # Anything we allocate here also refers to the target, so it has to be excluded
     own_ids = set(ignore_ids)
     visited = {id(target)}
@@ -202,6 +244,7 @@ def _find_referrer_chain(target, roots: dict[int, str], ignore_ids: set[int]) ->
     own_ids.add(id(entry))
     walk_queue.append(entry)
 
+    chains: list[list[str]] = []
     longest_chain: list[str] = []
     while walk_queue and len(visited) < REFERRER_MAX_OBJECTS:
         obj, path = walk_queue.popleft()
@@ -221,9 +264,12 @@ def _find_referrer_chain(target, roots: dict[int, str], ignore_ids: set[int]) ->
                 if len(new_path) > len(longest_chain):
                     longest_chain = new_path
 
-                # A module or one of the SABnzbd singletons means we are done
+                # A module or one of the SABnzbd singletons means this path is complete
                 if isinstance(referrer, ModuleType) or id(referrer) in roots:
-                    return new_path
+                    chains.append(new_path)
+                    if len(chains) >= REFERRER_MAX_CHAINS:
+                        return chains
+                    continue
 
                 new_entry = (referrer, new_path)
                 own_ids.add(id(new_entry))
@@ -232,7 +278,7 @@ def _find_referrer_chain(target, roots: dict[int, str], ignore_ids: set[int]) ->
             del referrers
 
     # No root was reached within the limits, the deepest path is still informative
-    return longest_chain
+    return chains or ([longest_chain] if longest_chain else [])
 
 
 def _describe(obj, roots: Optional[dict[int, str]] = None) -> str:
