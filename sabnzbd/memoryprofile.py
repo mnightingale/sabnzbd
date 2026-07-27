@@ -63,6 +63,10 @@ REFERRER_MAX_DEPTH = 12
 REFERRER_MAX_OBJECTS = 25000
 REFERRER_MAX_CHAINS = 3
 
+# Some difference between the refcount and the referrers the collector can see is
+# normal, only a larger gap suggests references that are held outside of Python
+UNACCOUNTED_REFERENCE_THRESHOLD = 3
+
 # Debuggers and profilers keep references to all threads and frames, so running
 # under one will always show a retaining path that does not exist in production
 IGNORED_MODULE_PREFIXES = ("pydevd", "_pydevd", "_pydev_", "pydev_", "pdb", "bdb", "pympler", "guppy", "objgraph")
@@ -172,8 +176,12 @@ def log_referrer_chains(type_name: str, samples: int = REFERRER_SAMPLE_SIZE):
         ignore_ids.add(id(targets))
 
         logging.info("Tracemalloc tracing referrers of %d sampled %s objects", len(targets), type_name)
-        for number, target in enumerate(targets, start=1):
-            logging.info("Tracemalloc referrer chains for sample %d: %s", number, _describe(target))
+        # Deliberately not enumerate() or a for-in loop, both create an iterator
+        # and a tuple that refer to the target and would show up in the walk
+        for number in range(len(targets)):
+            target = targets[number]
+            logging.info("Tracemalloc referrer chains for sample %d: %s", number + 1, _describe(target))
+            _log_reference_accounting(target)
             chains = _find_referrer_chains(target, roots, ignore_ids)
             if not chains:
                 logging.info("Tracemalloc   <- no retaining path found within the limits")
@@ -228,12 +236,91 @@ def _ignored_module_ids() -> set[int]:
     return ignored
 
 
+def _log_reference_accounting(target):
+    """Compare the refcount with the referrers the garbage collector can see.
+    Only gc-tracked containers show up in get_referrers(), so a reference held
+    by a C extension is invisible here and keeps the object alive regardless."""
+    referrers = gc.get_referrers(target)
+    try:
+        visible = len(referrers)
+    finally:
+        del referrers
+
+    # Subtract the temporary reference that getrefcount() itself creates
+    refcount = sys.getrefcount(target) - 1
+    logging.info(
+        "Tracemalloc   refcount %d, %d visible to gc, tracked=%s",
+        refcount,
+        visible,
+        gc.is_tracked(target),
+    )
+    if refcount - visible > UNACCOUNTED_REFERENCE_THRESHOLD:
+        logging.info(
+            "Tracemalloc   %d references are not visible to gc, these could be held by a C extension",
+            refcount - visible,
+        )
+
+
+def _own_frame_ids() -> set[int]:
+    """Ids of the frames we are running in, they refer to the target themselves"""
+    own_frames = set()
+    frame = sys._getframe()
+    while frame:
+        own_frames.add(id(frame))
+        frame = frame.f_back
+    return own_frames
+
+
+def _iter_thread_frames():
+    """Yield every frame on every thread stack, with the name of that thread"""
+    threads_by_id = {thread.ident: thread.name for thread in threading.enumerate()}
+    for thread_id, frame in sys._current_frames().items():
+        thread_name = threads_by_id.get(thread_id, "thread-%s" % thread_id)
+        while frame:
+            yield frame, thread_name
+            frame = frame.f_back
+
+
+def _thread_frame_names() -> dict[int, str]:
+    """Map the id of every frame on a thread stack to the name of that thread,
+    so a frame holding an object can be reported with the thread it belongs to"""
+    return {id(frame): thread_name for frame, thread_name in _iter_thread_frames()}
+
+
+def _find_frame_holder(obj, own_frames: set[int]) -> Optional[str]:
+    """Since Python 3.11 the locals of a running frame live in the interpreter
+    frame, so gc.get_referrers() does not report them. Scan the thread stacks
+    directly, otherwise a job held by a busy thread looks like it has no holder."""
+    target_id = id(obj)
+    for frame, thread_name in _iter_thread_frames():
+        if id(frame) in own_frames:
+            continue
+        try:
+            for name, value in frame.f_locals.items():
+                if id(value) == target_id:
+                    return "local '%s' in %s() at %s:%d on thread %s" % (
+                        name,
+                        frame.f_code.co_name,
+                        os.path.basename(frame.f_code.co_filename),
+                        frame.f_lineno,
+                        thread_name,
+                    )
+        except Exception:
+            # f_locals can throw while the frame is being modified
+            continue
+    return None
+
+
 def _find_referrer_chains(target, roots: dict[int, str], ignore_ids: set[int]) -> list[list[str]]:
     """Breadth-first walk over the referrers of the target, so the shortest
     paths to a root are found. Returns the descriptions of those paths.
     Keeps going after the first root, a leak often has more than one holder."""
-    # Anything we allocate here also refers to the target, so it has to be excluded
+    # Anything we allocate here also refers to the target, so it has to be excluded.
+    # Only our own frames are skipped, the frames of other threads are real holders.
     own_ids = set(ignore_ids)
+    own_frames = _own_frame_ids()
+    own_ids.update(own_frames)
+    thread_frames = _thread_frame_names()
     visited = {id(target)}
     walk_queue = deque()
     own_ids.add(id(walk_queue))
@@ -246,6 +333,7 @@ def _find_referrer_chains(target, roots: dict[int, str], ignore_ids: set[int]) -
 
     chains: list[list[str]] = []
     longest_chain: list[str] = []
+    longest_object = None
     while walk_queue and len(visited) < REFERRER_MAX_OBJECTS:
         obj, path = walk_queue.popleft()
         if len(path) >= REFERRER_MAX_DEPTH:
@@ -255,17 +343,19 @@ def _find_referrer_chains(target, roots: dict[int, str], ignore_ids: set[int]) -
         own_ids.add(id(referrers))
         try:
             for referrer in referrers:
-                # Skip our own bookkeeping and the stack frames we are running in
-                if id(referrer) in visited or id(referrer) in own_ids or isinstance(referrer, FrameType):
+                # Skip our own bookkeeping and the stack we are running on
+                if id(referrer) in visited or id(referrer) in own_ids:
                     continue
                 visited.add(id(referrer))
 
-                new_path = path + [_describe(referrer, roots)]
+                new_path = path + [_describe(referrer, roots, thread_frames)]
                 if len(new_path) > len(longest_chain):
                     longest_chain = new_path
+                    longest_object = referrer
 
-                # A module or one of the SABnzbd singletons means this path is complete
-                if isinstance(referrer, ModuleType) or id(referrer) in roots:
+                # A module, a SABnzbd singleton or the stack of another
+                # thread means this path is complete
+                if isinstance(referrer, (ModuleType, FrameType)) or id(referrer) in roots:
                     chains.append(new_path)
                     if len(chains) >= REFERRER_MAX_CHAINS:
                         return chains
@@ -277,17 +367,33 @@ def _find_referrer_chains(target, roots: dict[int, str], ignore_ids: set[int]) -
         finally:
             del referrers
 
-    # No root was reached within the limits, the deepest path is still informative
-    return chains or ([longest_chain] if longest_chain else [])
+    if chains:
+        return chains
+
+    # No root was reached, the object at the end of the deepest path may well
+    # be sitting in the locals of a thread, where gc cannot see it
+    if longest_object is not None and (holder := _find_frame_holder(longest_object, own_frames)):
+        longest_chain = longest_chain + [holder]
+
+    # Even without a root the deepest path is still informative
+    return [longest_chain] if longest_chain else []
 
 
-def _describe(obj, roots: Optional[dict[int, str]] = None) -> str:
+def _describe(obj, roots: Optional[dict[int, str]] = None, thread_frames: Optional[dict[int, str]] = None) -> str:
     """Readable one-line description of an object in a referrer chain"""
     try:
         if roots and (root_name := roots.get(id(obj))):
             return "%s (%s)" % (root_name, type(obj).__name__)
         if isinstance(obj, ModuleType):
             return "module %s" % obj.__name__
+        if isinstance(obj, FrameType):
+            # A frame means a thread is parked with the object in its locals
+            return "frame %s() at %s:%d on thread %s" % (
+                obj.f_code.co_name,
+                os.path.basename(obj.f_code.co_filename),
+                obj.f_lineno,
+                (thread_frames or {}).get(id(obj), "unknown"),
+            )
         type_name = type(obj).__name__
         if isinstance(obj, (list, tuple, set, frozenset, dict)):
             return "%s[%d]" % (type_name, len(obj))
