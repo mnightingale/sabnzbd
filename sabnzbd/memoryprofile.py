@@ -24,12 +24,16 @@ be inspected afterwards using tracemalloc.Snapshot.load().
 """
 
 import os
+import gc
 import time
 import logging
 import tracemalloc
+from collections import deque
 from threading import RLock
+from types import FrameType, ModuleType
 from typing import Optional
 
+import sabnzbd
 import sabnzbd.cfg as cfg
 from sabnzbd.filesystem import create_all_dirs, globber_full, remove_file
 from sabnzbd.misc import to_units
@@ -49,6 +53,15 @@ SNAPSHOT_EXTENSION = ".trace"
 MAX_SNAPSHOTS_ON_DISK = 25
 TOP_ENTRIES = 15
 TRACEBACK_ENTRIES = 3
+
+# Settings for the referrer-walk, which is bounded so it can never
+# run away on a large heap with many interconnected objects
+REFERRER_SAMPLE_SIZE = 3
+REFERRER_MAX_DEPTH = 12
+REFERRER_MAX_OBJECTS = 25000
+
+# Attributes used to give the objects in a referrer-chain a recognizable name
+IDENTIFYING_ATTRIBUTES = ("final_name", "filename", "article", "nzo_id", "nzf_id", "name")
 
 MEMORY_PROFILE_LOCK = RLock()
 
@@ -108,9 +121,141 @@ def take_snapshot(label: str):
             if not __FIRST_SNAPSHOT:
                 __FIRST_SNAPSHOT = snapshot
             __PREVIOUS_SNAPSHOT = snapshot
+
+            # Snapshot is dropped first, it references a lot of data itself
+            del snapshot
+            log_referrer_chains(cfg.tracemalloc_referrer_type())
         except Exception:
             # Never let diagnostics break post-processing
             logging.info("Failed to take tracemalloc snapshot", exc_info=True)
+
+
+def log_referrer_chains(type_name: str, samples: int = REFERRER_SAMPLE_SIZE):
+    """Log what is keeping objects of the given type alive. Tracemalloc only knows
+    where an object was allocated, this shows who is still holding on to it."""
+    if not type_name:
+        return
+
+    targets = []
+    try:
+        # The roots we hope to end up at, so the chain can be reported as complete
+        roots = _global_roots()
+
+        all_objects = gc.get_objects()
+        try:
+            matches = [obj for obj in all_objects if type(obj).__name__ == type_name]
+        finally:
+            # This list references every tracked object, it must not survive the walk
+            del all_objects
+
+        # Spread the samples over all matches, so we do not just get the
+        # oldest job and can see whether they all share the same holder
+        logging.info("Tracemalloc %d live %s objects", len(matches), type_name)
+        stride = max(1, len(matches) // samples)
+        targets = matches[::stride][:samples]
+        del matches
+
+        if not targets:
+            logging.info("Tracemalloc no live %s objects found to trace referrers for", type_name)
+            return
+
+        logging.info("Tracemalloc tracing referrers of %d sampled %s objects", len(targets), type_name)
+        for number, target in enumerate(targets, start=1):
+            # The list of samples refers to the target itself, so it has to be ignored
+            chain = _find_referrer_chain(target, roots, {id(targets)})
+            logging.info("Tracemalloc referrer chain %d: %s", number, _describe(target))
+            for depth, description in enumerate(chain, start=1):
+                logging.info("Tracemalloc   %s<- %s", "  " * depth, description)
+            if not chain:
+                logging.info("Tracemalloc   <- nothing (only held by the sampling itself)")
+    except Exception:
+        logging.info("Failed to trace referrers", exc_info=True)
+    finally:
+        # Make sure the samples cannot keep the objects alive until the next collection
+        targets = None
+
+
+def _global_roots() -> dict[int, str]:
+    """Map the id of every singleton on the sabnzbd module to its name, these
+    are the interesting end-points of a referrer chain"""
+    roots = {}
+    for name in dir(sabnzbd):
+        try:
+            roots[id(getattr(sabnzbd, name))] = "sabnzbd.%s" % name
+        except Exception:
+            continue
+    return roots
+
+
+def _find_referrer_chain(target, roots: dict[int, str], ignore_ids: set[int]) -> list[str]:
+    """Breadth-first walk over the referrers of the target, so the shortest
+    path to a root is found. Returns the descriptions of that path."""
+    # Anything we allocate here also refers to the target, so it has to be excluded
+    own_ids = set(ignore_ids)
+    visited = {id(target)}
+    walk_queue = deque()
+    own_ids.add(id(walk_queue))
+    own_ids.add(id(visited))
+    own_ids.add(id(own_ids))
+
+    entry = (target, [])
+    own_ids.add(id(entry))
+    walk_queue.append(entry)
+
+    longest_chain: list[str] = []
+    while walk_queue and len(visited) < REFERRER_MAX_OBJECTS:
+        obj, path = walk_queue.popleft()
+        if len(path) >= REFERRER_MAX_DEPTH:
+            continue
+
+        referrers = gc.get_referrers(obj)
+        own_ids.add(id(referrers))
+        try:
+            for referrer in referrers:
+                # Skip our own bookkeeping and the stack frames we are running in
+                if id(referrer) in visited or id(referrer) in own_ids or isinstance(referrer, FrameType):
+                    continue
+                visited.add(id(referrer))
+
+                new_path = path + [_describe(referrer, roots)]
+                if len(new_path) > len(longest_chain):
+                    longest_chain = new_path
+
+                # A module or one of the SABnzbd singletons means we are done
+                if isinstance(referrer, ModuleType) or id(referrer) in roots:
+                    return new_path
+
+                new_entry = (referrer, new_path)
+                own_ids.add(id(new_entry))
+                walk_queue.append(new_entry)
+        finally:
+            del referrers
+
+    # No root was reached within the limits, the deepest path is still informative
+    return longest_chain
+
+
+def _describe(obj, roots: Optional[dict[int, str]] = None) -> str:
+    """Readable one-line description of an object in a referrer chain"""
+    try:
+        if roots and (root_name := roots.get(id(obj))):
+            return "%s (%s)" % (root_name, type(obj).__name__)
+        if isinstance(obj, ModuleType):
+            return "module %s" % obj.__name__
+        type_name = type(obj).__name__
+        if isinstance(obj, (list, tuple, set, frozenset, dict)):
+            return "%s[%d]" % (type_name, len(obj))
+        # Try to give the SABnzbd objects a recognizable name
+        for attribute in IDENTIFYING_ATTRIBUTES:
+            try:
+                if isinstance(value := getattr(obj, attribute, None), str) and value:
+                    return "%s(%s=%s)" % (type_name, attribute, value[:60])
+            except Exception:
+                # Could be a property that throws in the current state
+                continue
+        return type_name
+    except Exception:
+        return "<undescribable object>"
 
 
 def _save_snapshot(snapshot: tracemalloc.Snapshot, label: str):

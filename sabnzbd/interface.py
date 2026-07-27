@@ -920,6 +920,7 @@ SPECIAL_VALUE_LIST = (
     "unrar_parameters",
     "outgoing_nntp_ip",
     "tracemalloc_frames",
+    "tracemalloc_referrer_type",
 )
 SPECIAL_LIST_LIST = (
     "rss_odd_titles",
