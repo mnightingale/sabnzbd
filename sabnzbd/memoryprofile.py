@@ -175,6 +175,9 @@ def log_referrer_chains(type_name: str, samples: int = REFERRER_SAMPLE_SIZE):
         ignore_ids = _ignored_module_ids()
         ignore_ids.add(id(targets))
 
+        # Built once, the thread stacks do not change meaningfully during the walk
+        frame_holders = _frame_local_holders()
+
         logging.info("Tracemalloc tracing referrers of %d sampled %s objects", len(targets), type_name)
         # Deliberately not enumerate() or a for-in loop, both create an iterator
         # and a tuple that refer to the target and would show up in the walk
@@ -182,7 +185,7 @@ def log_referrer_chains(type_name: str, samples: int = REFERRER_SAMPLE_SIZE):
             target = targets[number]
             logging.info("Tracemalloc referrer chains for sample %d: %s", number + 1, _describe(target))
             _log_reference_accounting(target)
-            chains = _find_referrer_chains(target, roots, ignore_ids)
+            chains = _find_referrer_chains(target, roots, ignore_ids, frame_holders)
             if not chains:
                 logging.info("Tracemalloc   <- no retaining path found within the limits")
             for chain in chains:
@@ -287,39 +290,44 @@ def _thread_frame_names() -> dict[int, str]:
     return {id(frame): thread_name for frame, thread_name in _iter_thread_frames()}
 
 
-def _find_frame_holder(obj, own_frames: set[int]) -> Optional[str]:
-    """Since Python 3.11 the locals of a running frame live in the interpreter
-    frame, so gc.get_referrers() does not report them. Scan the thread stacks
-    directly, otherwise a job held by a busy thread looks like it has no holder."""
-    target_id = id(obj)
+def _frame_local_holders() -> dict[int, str]:
+    """Map the id of every object held in the locals of a running thread to a
+    description of where it is held. Since Python 3.11 those locals live in the
+    interpreter frame, so gc.get_referrers() never reports them and a job held
+    by a busy thread would look like it has no holder at all.
+
+    Frames of this module are skipped by filename rather than by id, the walk
+    creates new frames of its own while it runs and those must never match."""
+    holders = {}
     for frame, thread_name in _iter_thread_frames():
-        if id(frame) in own_frames:
+        if frame.f_code.co_filename == __file__:
             continue
         try:
+            description = "local '%%s' in %s() at %s:%d on thread %s" % (
+                frame.f_code.co_name,
+                os.path.basename(frame.f_code.co_filename),
+                frame.f_lineno,
+                thread_name,
+            )
             for name, value in frame.f_locals.items():
-                if id(value) == target_id:
-                    return "local '%s' in %s() at %s:%d on thread %s" % (
-                        name,
-                        frame.f_code.co_name,
-                        os.path.basename(frame.f_code.co_filename),
-                        frame.f_lineno,
-                        thread_name,
-                    )
+                # Keep the first holder found, that is the deepest frame
+                holders.setdefault(id(value), description % name)
         except Exception:
             # f_locals can throw while the frame is being modified
             continue
-    return None
+    return holders
 
 
-def _find_referrer_chains(target, roots: dict[int, str], ignore_ids: set[int]) -> list[list[str]]:
+def _find_referrer_chains(
+    target, roots: dict[int, str], ignore_ids: set[int], frame_holders: dict[int, str]
+) -> list[list[str]]:
     """Breadth-first walk over the referrers of the target, so the shortest
     paths to a root are found. Returns the descriptions of those paths.
     Keeps going after the first root, a leak often has more than one holder."""
     # Anything we allocate here also refers to the target, so it has to be excluded.
     # Only our own frames are skipped, the frames of other threads are real holders.
     own_ids = set(ignore_ids)
-    own_frames = _own_frame_ids()
-    own_ids.update(own_frames)
+    own_ids.update(_own_frame_ids())
     thread_frames = _thread_frame_names()
     visited = {id(target)}
     walk_queue = deque()
@@ -333,7 +341,11 @@ def _find_referrer_chains(target, roots: dict[int, str], ignore_ids: set[int]) -
 
     chains: list[list[str]] = []
     longest_chain: list[str] = []
-    longest_object = None
+
+    # The target itself can be sitting in the locals of a thread
+    if holder := frame_holders.get(id(target)):
+        chains.append([holder])
+
     while walk_queue and len(visited) < REFERRER_MAX_OBJECTS:
         obj, path = walk_queue.popleft()
         if len(path) >= REFERRER_MAX_DEPTH:
@@ -351,7 +363,13 @@ def _find_referrer_chains(target, roots: dict[int, str], ignore_ids: set[int]) -
                 new_path = path + [_describe(referrer, roots, thread_frames)]
                 if len(new_path) > len(longest_chain):
                     longest_chain = new_path
-                    longest_object = referrer
+
+                # Held in the locals of a running thread, which gc cannot see
+                if holder := frame_holders.get(id(referrer)):
+                    chains.append(new_path + [holder])
+                    if len(chains) >= REFERRER_MAX_CHAINS:
+                        return chains
+                    continue
 
                 # A module, a SABnzbd singleton or the stack of another
                 # thread means this path is complete
@@ -367,16 +385,8 @@ def _find_referrer_chains(target, roots: dict[int, str], ignore_ids: set[int]) -
         finally:
             del referrers
 
-    if chains:
-        return chains
-
-    # No root was reached, the object at the end of the deepest path may well
-    # be sitting in the locals of a thread, where gc cannot see it
-    if longest_object is not None and (holder := _find_frame_holder(longest_object, own_frames)):
-        longest_chain = longest_chain + [holder]
-
     # Even without a root the deepest path is still informative
-    return [longest_chain] if longest_chain else []
+    return chains or ([longest_chain] if longest_chain else [])
 
 
 def _describe(obj, roots: Optional[dict[int, str]] = None, thread_frames: Optional[dict[int, str]] = None) -> str:
