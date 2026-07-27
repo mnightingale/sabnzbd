@@ -81,6 +81,7 @@ MEMORY_PROFILE_LOCK = RLock()
 __FIRST_SNAPSHOT: Optional[tracemalloc.Snapshot] = None
 __PREVIOUS_SNAPSHOT: Optional[tracemalloc.Snapshot] = None
 __SNAPSHOT_COUNT = 0
+__PREVIOUS_THREAD_COUNTS: dict[str, int] = {}
 
 
 def start():
@@ -212,17 +213,39 @@ def _global_roots() -> dict[int, str]:
 
 
 def log_thread_census():
-    """Log the live threads per class. A thread that never exits is held by the
-    threading module, and with it everything the thread object refers to."""
-    counts = {}
+    """Log the live threads per class. A thread that never exits keeps its stack
+    (1MB on Windows by default) and is held by the threading module, and with it
+    everything the thread object refers to."""
+    global __PREVIOUS_THREAD_COUNTS
+
+    counts: dict[str, list[str]] = {}
     for thread in threading.enumerate():
-        class_name = type(thread).__name__
-        counts[class_name] = counts.get(class_name, 0) + 1
+        counts.setdefault(type(thread).__name__, []).append(thread.name)
+
+    total = sum(len(names) for names in counts.values())
     logging.info(
         "Tracemalloc %d live threads: %s",
-        len(counts) and sum(counts.values()),
-        ", ".join("%s=%d" % (name, count) for name, count in sorted(counts.items())),
+        total,
+        ", ".join("%s=%d" % (class_name, len(names)) for class_name, names in sorted(counts.items())),
     )
+
+    # Growth between snapshots is what matters, a thread that should have
+    # finished but is still running holds on to everything it refers to
+    for class_name, names in sorted(counts.items()):
+        previous = __PREVIOUS_THREAD_COUNTS.get(class_name, 0)
+        if len(names) > previous:
+            logging.info(
+                "Tracemalloc   %s went from %d to %d: %s",
+                class_name,
+                previous,
+                len(names),
+                ", ".join(sorted(names)),
+            )
+    for class_name, previous in sorted(__PREVIOUS_THREAD_COUNTS.items()):
+        if class_name not in counts:
+            logging.info("Tracemalloc   %s went from %d to 0", class_name, previous)
+
+    __PREVIOUS_THREAD_COUNTS = {class_name: len(names) for class_name, names in counts.items()}
 
 
 def _ignored_module_ids() -> set[int]:
