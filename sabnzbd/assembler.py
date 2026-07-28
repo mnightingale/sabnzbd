@@ -56,6 +56,46 @@ from sabnzbd.nzb import NzbFile, NzbObject, Article
 import sabnzbd.par2file as par2file
 from sabnzbd.postproc import get_complete_directory
 
+if os.name == "nt":
+    import msvcrt
+    from ctypes import wintypes
+
+    class OVERLAPPED(ctypes.Structure):
+        _fields_ = [
+            ("Internal", ctypes.c_void_p),
+            ("InternalHigh", ctypes.c_void_p),
+            ("Offset", wintypes.DWORD),
+            ("OffsetHigh", wintypes.DWORD),
+            ("hEvent", wintypes.HANDLE),
+        ]
+
+    _WriteFile = ctypes.windll.kernel32.WriteFile
+    _WriteFile.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(OVERLAPPED),
+    )
+    _WriteFile.restype = wintypes.BOOL
+
+    def win_pwrite(fd: int, data: bytearray | memoryview, offset: int) -> int:
+        """Positional write for Windows, where os.pwrite is not available.
+        WriteFile with the offset supplied in an OVERLAPPED structure is a single syscall that does not
+        depend on the shared file pointer, so concurrent writers do not need to be serialized by a lock."""
+        overlapped = OVERLAPPED()
+        overlapped.Offset = offset & 0xFFFFFFFF
+        overlapped.OffsetHigh = offset >> 32
+        written = wintypes.DWORD(0)
+        length = len(data)
+        buffer = (ctypes.c_char * length).from_buffer(data)
+        if not _WriteFile(
+            msvcrt.get_osfhandle(fd), ctypes.byref(buffer), length, ctypes.byref(written), ctypes.byref(overlapped)
+        ):
+            # WinError maps the Windows error onto errno, so callers can keep checking for ENOSPC
+            raise ctypes.WinError()
+        return written.value
+
 
 class AssemblerTask(NamedTuple):
     nzo: Optional[NzbObject] = None
@@ -503,12 +543,12 @@ class Assembler(Thread):
     ) -> int:
         """Write data at position in a file"""
         pos = article.data_begin if offset is None else offset
-        written = Assembler._write(fd, nzf, data, pos)
+        written = Assembler._write(fd, data, pos)
         # In raw/non-buffered mode os.write may not write everything requested:
         # https://docs.python.org/3/library/io.html?highlight=write#io.RawIOBase.write
         if written < len(data) and (mv := memoryview(data)):
             while written < len(data):
-                written += Assembler._write(fd, nzf, mv[written:], pos + written)
+                written += Assembler._write(fd, mv[written:], pos + written)
 
         article.on_disk = True
         sabnzbd.Assembler.update_ready_bytes(nzf, -len(data))
@@ -526,13 +566,9 @@ class Assembler(Thread):
         return written
 
     @staticmethod
-    def _write(fd: int, nzf: NzbFile, data: bytearray | memoryview, offset: int) -> int:
+    def _write(fd: int, data: bytearray | memoryview, offset: int) -> int:
         if sabnzbd.WINDOWS:
-            # pwrite is not implemented on Windows so fallback to os.lseek and os.write
-            # Must lock since it is possible to write from multiple threads (assembler + downloader)
-            with nzf.file_lock:
-                os.lseek(fd, offset, os.SEEK_SET)
-                return os.write(fd, data)
+            return win_pwrite(fd, data, offset)
         else:
             return os.pwrite(fd, data, offset)
 
