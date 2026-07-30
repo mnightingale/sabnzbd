@@ -928,6 +928,7 @@ class TestPendingCap:
                 int(512 * MEBI * 0.5 / ASSEMBLER_MIN_CONCURRENT_FILES) // ASSEMBLER_EVICTION_FACTOR,
             ),
             (int(4 * GIGI), ASSEMBLER_MAX_PENDING_BYTES),
+            (int(8 * GIGI), ASSEMBLER_MAX_PENDING_BYTES),
         ],
     )
     def test_cap_is_ceilinged_not_proportional(self, assembler, cache_limit, expected):
@@ -941,21 +942,22 @@ class TestPendingCap:
     def test_cap_scales_with_installed_memory(self, assembler, total_memory, expected):
         """Bigger machines run more connections, so the batch has to cover a wider
         out-of-order arrival window before the write position unblocks"""
-        assembler.cache_limit = int(4 * GIGI)
+        assembler.cache_limit = int(8 * GIGI)
         with self._with_memory(int(total_memory)):
             assembler.calculate_pending_cap()
         assert assembler.pending_cap() == expected
 
     def test_unknown_memory_uses_the_top_tier(self, assembler):
         """get_memory returns 0 when it cannot tell; the cache share still bounds it"""
-        assembler.cache_limit = int(4 * GIGI)
+        assembler.cache_limit = int(8 * GIGI)
         with self._with_memory(0):
             assembler.calculate_pending_cap()
         assert assembler.pending_cap() == ASSEMBLER_MAX_PENDING_BYTES
 
-    def test_cap_never_exceeds_its_share_of_a_small_cache(self, assembler):
-        """Pending writes must not crowd out articles still being downloaded"""
-        for megabytes in (16, 32, 64, 128, 256, 512):
+    def test_peak_occupancy_stays_within_half_the_cache(self, assembler):
+        """Every file may hold up to the watermark, not the cap. Sizing on the cap alone lets
+        the cache fill, and a full cache writes every arriving article on its own"""
+        for megabytes in (64, 128, 256, 512, 1024, 2048, 4096):
             assembler.cache_limit = int(megabytes * MEBI)
             with self._with_memory(int(128 * GIGI)):
                 assembler.calculate_pending_cap()

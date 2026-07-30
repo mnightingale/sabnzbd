@@ -190,6 +190,10 @@ class Assembler(Thread):
         self.queued_next_time: dict[str, float] = {}
         self.ready_bytes_lock = threading.Lock()
         self.ready_bytes: dict[str, int] = {}
+        # Single-article writes forced by a full cache, reported as a rate rather than per write
+        self.spill_lock = threading.Lock()
+        self.spill_count: int = 0
+        self.spill_reported: float = 0
 
     def stop(self):
         self.queue.put(AssemblerTask())
@@ -299,6 +303,26 @@ class Assembler(Thread):
                     else min(append_trigger, int(self.cache_limit * 0.5))
                 ),
             )
+        )
+
+    def count_spill(self) -> None:
+        """Record a cache-full single-article write, logging the rate at most once a second"""
+        with self.spill_lock:
+            self.spill_count += 1
+            now = time.monotonic()
+            if not self.spill_reported:
+                self.spill_reported = now
+                return
+            if (elapsed := now - self.spill_reported) < 1:
+                return
+            count, self.spill_count, self.spill_reported = self.spill_count, 0, now
+        logging.debug(
+            "Cache full: %s article(s) written individually in %.1fs (%.0f/s), pending %s of %s cache",
+            count,
+            elapsed,
+            count / elapsed,
+            to_units(self.total_ready_bytes()),
+            to_units(self.cache_limit),
         )
 
     def is_busy(self) -> bool:
@@ -757,9 +781,15 @@ class Assembler(Thread):
 
     @staticmethod
     def assemble_article(article: Article, data: bytearray) -> bool:
-        """Write a single article to disk"""
+        """Write a single article to disk, bypassing the assembler queue.
+
+        Reached when the article cache is full, so the data cannot be held until a batch is
+        worth writing. Every such write is one article at its own offset, which fragments the
+        file regardless of how the batching is tuned, so the rate is worth watching.
+        """
         if not article.can_direct_write:
             return False
+        sabnzbd.Assembler.count_spill()
         nzf = article.nzf
         with nzf.file_lock:
             fd, _, direct_write = Assembler.open(nzf, True, article.file_size)
