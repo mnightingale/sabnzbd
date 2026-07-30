@@ -140,6 +140,10 @@ ASSEMBLER_MIN_CONCURRENT_FILES = 2
 # clear of one window, or ordinary lag trips it and the file is written out of order for no
 # reason - just as the articles needed to make a long contiguous run were about to arrive.
 ASSEMBLER_EVICTION_FACTOR = 4
+# Cache occupancy at which a blocked file is written out of order rather than left to
+# accumulate. Below ARTICLE_CACHE_NON_CONTIGUOUS_FLUSH_PERCENTAGE, so the file that is actually
+# blocking is written on its own before the cache falls back to flushing every file.
+ASSEMBLER_EVICTION_CACHE_PRESSURE = 0.75
 # Buffers per vectored write. Kept well under IOV_MAX on every platform, and small enough
 # that a single syscall never pins more than a few articles worth of memory.
 ASSEMBLER_VECTOR_CHUNK_SIZE = 16

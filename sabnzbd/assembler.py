@@ -59,6 +59,7 @@ from sabnzbd.constants import (
     ASSEMBLER_PENDING_CACHE_SHARE,
     ASSEMBLER_MIN_CONCURRENT_FILES,
     ASSEMBLER_EVICTION_FACTOR,
+    ASSEMBLER_EVICTION_CACHE_PRESSURE,
     ASSEMBLER_ARTICLE_SIZE,
 )
 import sabnzbd.cfg as cfg
@@ -486,14 +487,30 @@ class Assembler(Thread):
         """
         return ready_bytes >= self.eviction_watermark()
 
+    def cache_under_pressure(self) -> bool:
+        """Is the cache full enough that a blocked file can no longer just be left to accumulate?
+
+        Sits below ARTICLE_CACHE_NON_CONTIGUOUS_FLUSH_PERCENTAGE so the file that is actually
+        blocking gets written on its own before the cache resorts to flushing every file.
+        """
+        return bool(
+            self.cache_limit
+            and sabnzbd.ArticleCache.cache_info().cache_size >= self.cache_limit * ASSEMBLER_EVICTION_CACHE_PRESSURE
+        )
+
     def should_evict_non_contiguous(self, nzf: NzbFile, next_ready: bool) -> bool:
         """Should a forced write be allowed to leave gaps?
 
-        Only when nothing else is possible: the article at the write position has not arrived, so
-        an ordinary write would write nothing at all. While it has arrived, a short sequential
-        write is preferred over a scattered one, even though it means writing less per call.
+        Writing out of order is not a smaller version of writing in order: it scatters the file,
+        and every later write has to split around the articles already on disk, so one eviction
+        degrades the rest of that file. Measured against develop, evicting on a per-file
+        threshold alone cost 8x on run length while develop simply waited and wrote the whole
+        region contiguously.
+
+        So it takes both: nothing else is possible for this file, and the cache genuinely needs
+        the space. While there is cache to spare, a blocked file is left to accumulate.
         """
-        if next_ready:
+        if next_ready or not self.cache_under_pressure():
             return False
         # Only direct write can leave gaps; append has to write in order, so it must wait
         if not self.direct_write or nzf.type != "yenc":

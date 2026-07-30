@@ -43,7 +43,10 @@ from sabnzbd.assembler import (
     write_vector,
 )
 from sabnzbd.constants import (
+    ANFO,
+    ARTICLE_CACHE_NON_CONTIGUOUS_FLUSH_PERCENTAGE,
     ASSEMBLER_ARTICLE_SIZE,
+    ASSEMBLER_EVICTION_CACHE_PRESSURE,
     ASSEMBLER_EVICTION_FACTOR,
     ASSEMBLER_PENDING_BY_MEMORY,
     ASSEMBLER_MAX_PENDING_BYTES,
@@ -1076,9 +1079,18 @@ class TestNonContiguousEviction:
             sabnzbd.Assembler.cache_limit = int(GIGI)
             sabnzbd.Assembler.calculate_pending_cap()
             sabnzbd.Assembler.direct_write = True
+            # Default to a full cache, so tests about the other conditions are not masked by it
+            self._set_cache_used(sabnzbd.Assembler.cache_limit)
             yield sabnzbd.Assembler
         finally:
             del sabnzbd.Assembler
+            del sabnzbd.ArticleCache
+
+    @staticmethod
+    def _set_cache_used(used: int):
+        sabnzbd.ArticleCache = SimpleNamespace(
+            cache_info=lambda: ANFO(0, used, sabnzbd.Assembler.cache_limit),
+        )
 
     @staticmethod
     def _nzf(nzf_id: str = "nzf_1", contiguous: bool = True):
@@ -1156,6 +1168,25 @@ class TestNonContiguousEviction:
     def test_prefers_a_short_sequential_write_over_a_scattered_one(self, assembler):
         """The forced write still happens, it just stays contiguous"""
         assert assembler.should_evict_non_contiguous(self._nzf(), next_ready=True) is False
+
+    def test_does_not_evict_while_the_cache_has_room(self, assembler):
+        """Measured against develop: fragmenting a blocked file while cache is free cost 8x on
+        run length, because every later write to that file has to split around it"""
+        self._set_cache_used(int(assembler.cache_limit * 0.5))
+        assert assembler.should_evict_non_contiguous(self._nzf(), next_ready=False) is False
+
+    def test_evicts_once_the_cache_is_under_pressure(self, assembler):
+        self._set_cache_used(int(assembler.cache_limit * ASSEMBLER_EVICTION_CACHE_PRESSURE))
+        assert assembler.should_evict_non_contiguous(self._nzf(), next_ready=False) is True
+
+    def test_pressure_threshold_is_below_the_whole_cache_flush(self, assembler):
+        """So the blocking file is written on its own before every file is flushed"""
+        assert ASSEMBLER_EVICTION_CACHE_PRESSURE < ARTICLE_CACHE_NON_CONTIGUOUS_FLUSH_PERCENTAGE
+
+    def test_no_cache_limit_means_no_pressure(self, assembler):
+        """Caching disabled: articles go straight to disk, nothing accumulates to evict"""
+        assembler.cache_limit = 0
+        assert assembler.cache_under_pressure() is False
 
     def test_does_not_evict_in_append_mode(self, assembler):
         """Append has to write in order, so there is no out-of-order write to fall back on"""
