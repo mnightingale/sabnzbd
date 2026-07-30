@@ -1030,8 +1030,6 @@ class TestBatchSizeUnderLoad:
         nzf.import_finished = True
         nzf.assembler_next_article = mock.Mock(decoded=True, on_disk=False, failed=False)
         nzf.has_contiguous_ready_bytes.return_value = True
-        # Push the interval trigger out of the way so only the cap can queue a write
-        assembler.queued_next_time[nzf.nzf_id] = time.monotonic() + 3600
 
         # Fast storage: a write completes in the time it takes two more articles to arrive.
         # Those two are the ones that used to re-arm the trigger and shrink the next batch.
@@ -1116,14 +1114,12 @@ class TestNonContiguousEviction:
 
     def test_queues_on_a_full_contiguous_run(self, assembler):
         nzf = self._nzf(contiguous=True)
-        assembler.queued_next_time[nzf.nzf_id] = time.monotonic() + 3600
         assert self._trigger(assembler, nzf, assembler.pending_cap()) == "cap"
 
     def test_does_not_queue_when_the_pending_bytes_are_fragmented(self, assembler):
         """A capful of pending data whose contiguous prefix is one article would write one
         article, which is how a file ends up written in fragments"""
         nzf = self._nzf(contiguous=False)
-        assembler.queued_next_time[nzf.nzf_id] = time.monotonic() + 3600
         assert self._trigger(assembler, nzf, assembler.pending_cap() * 4) == ""
 
     @property
@@ -1210,7 +1206,6 @@ class TestNonContiguousEviction:
         whole cache hit 90%, so one stalled article becomes a whole-cache problem"""
         nzf = self._nzf(contiguous=False)
         nzf.assembler_next_article = mock.Mock(decoded=False, on_disk=False, failed=False)
-        assembler.queued_next_time[nzf.nzf_id] = time.monotonic() + 3600
 
         article = mock.Mock(decoded_size=self._watermark, lowest_partnum=False)
         assembler.process(mock.Mock(), nzf, article=article)
@@ -1223,7 +1218,6 @@ class TestNonContiguousEviction:
         """Past the watermark with a short run: write it, but sequentially rather than scattered"""
         nzf = self._nzf(contiguous=False)
         nzf.assembler_next_article = mock.Mock(decoded=True, on_disk=False, failed=False)
-        assembler.queued_next_time[nzf.nzf_id] = time.monotonic() + 3600
 
         article = mock.Mock(decoded_size=self._watermark, lowest_partnum=False)
         assembler.process(mock.Mock(), nzf, article=article)
@@ -1236,7 +1230,6 @@ class TestNonContiguousEviction:
         assembler.direct_write = False
         nzf = self._nzf(contiguous=False)
         nzf.assembler_next_article = mock.Mock(decoded=False, on_disk=False, failed=False)
-        assembler.queued_next_time[nzf.nzf_id] = time.monotonic() + 3600
 
         article = mock.Mock(decoded_size=self._watermark, lowest_partnum=False)
         assembler.process(mock.Mock(), nzf, article=article)

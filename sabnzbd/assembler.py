@@ -50,7 +50,6 @@ from sabnzbd.constants import (
     SOFT_ASSEMBLER_QUEUE_LIMIT,
     ASSEMBLER_DELAY_FACTOR_DIRECT_WRITE,
     ARTICLE_CACHE_NON_CONTIGUOUS_FLUSH_PERCENTAGE,
-    ASSEMBLER_WRITE_INTERVAL,
     ASSEMBLER_TRIGGER_PERCENTAGE,
     ASSEMBLER_VECTOR_CHUNK_SIZE,
     ASSEMBLER_MAX_PENDING_BYTES,
@@ -188,7 +187,6 @@ class Assembler(Thread):
         self.queue: queue.Queue[AssemblerTask] = queue.Queue()
         self.queued_lock = threading.Lock()
         self.write_states: dict[str, NzfWriteState] = {}
-        self.queued_next_time: dict[str, float] = {}
         self.ready_bytes_lock = threading.Lock()
         self.ready_bytes: dict[str, int] = {}
         # Single-article writes forced by a full cache, reported as a rate rather than per write
@@ -347,7 +345,6 @@ class Assembler(Thread):
         with self.ready_bytes_lock:
             for nzf in nzfs:
                 self.ready_bytes.pop(nzf.nzf_id, None)
-                self.queued_next_time.pop(nzf.nzf_id, None)
         # Drop any write claim so a job that is deleted or finished mid-write cannot leave
         # a state behind that blocks the file being queued again if it is retried
         with self.queued_lock:
@@ -374,8 +371,6 @@ class Assembler(Thread):
             ready_bytes = 0
 
         article_has_first_part = bool(article and article.lowest_partnum)
-        if article_has_first_part:
-            self.queued_next_time[nzf.nzf_id] = time.monotonic() + ASSEMBLER_WRITE_INTERVAL
 
         # Is the article the file needs next available, so a contiguous write can be made?
         next_ready = bool(
@@ -416,7 +411,6 @@ class Assembler(Thread):
                 state.mark_pending(file_done, allow_non_contiguous)
                 return
             self.write_states[nzf.nzf_id] = NzfWriteState()
-            self.queued_next_time[nzf.nzf_id] = time.monotonic() + ASSEMBLER_WRITE_INTERVAL
         self.queue.put(self.build_task(nzo, nzf, file_done, allow_non_contiguous, reason))
 
     def build_task(
@@ -435,7 +429,6 @@ class Assembler(Thread):
             if (next_request := state.take_pending()) is None:
                 return
             self.write_states[nzf.nzf_id] = state
-            self.queued_next_time[nzf.nzf_id] = time.monotonic() + ASSEMBLER_WRITE_INTERVAL
         self.queue.put(self.build_task(nzo, nzf, *next_request))
 
     def should_queue_nzf(
@@ -464,9 +457,6 @@ class Assembler(Thread):
         # Always write
         if article_has_first_part and filename_checked and not import_finished:
             return "first-part"
-        # Trigger every 5 seconds if next article is decoded or on_disk
-        if next_ready and time.monotonic() > self.queued_next_time.get(nzf.nzf_id, 0):
-            return "interval"
         # A forced flush can only be honoured by direct write; append has to write in order
         if allow_non_contiguous and self.direct_write and nzf.type == "yenc":
             return "cache-flush"
