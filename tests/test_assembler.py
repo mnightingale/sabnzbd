@@ -20,6 +20,9 @@ tests.test_assembler - Testing functions in assembler.py
 """
 
 import os
+import queue
+import threading
+import time
 from types import SimpleNamespace
 from unittest import mock
 from zlib import crc32
@@ -358,6 +361,213 @@ class TestAssembler:
         self.nzf.decodetable[1].crc32 = None
         self.nzf.finalize_crc32()
         assert self.nzf.crc32 is None
+
+
+class TestWriteSerialisation:
+    """Tests for the per-NzbFile write claim that keeps one task in flight per file"""
+
+    @pytest.fixture(autouse=True)
+    def assembler(self):
+        try:
+            sabnzbd.Assembler = Assembler()
+            # Bypass the trigger checks; these tests are about what happens once a file
+            # is worth queueing, not about when it becomes worth queueing
+            with mock.patch.object(Assembler, "should_queue_nzf", return_value=True):
+                yield sabnzbd.Assembler
+        finally:
+            del sabnzbd.Assembler
+
+    @staticmethod
+    def _nzf(nzf_id: str = "nzf_1"):
+        nzf = mock.Mock()
+        nzf.nzf_id = nzf_id
+        nzf.type = "yenc"
+        return nzf
+
+    @staticmethod
+    def _drain(assembler) -> list:
+        tasks = []
+        while not assembler.queue.empty():
+            tasks.append(assembler.queue.get())
+        return tasks
+
+    def test_first_request_is_queued(self, assembler):
+        nzf = self._nzf()
+        assembler.process(mock.Mock(), nzf)
+        assert assembler.is_busy() is True
+        assert len(self._drain(assembler)) == 1
+
+    def test_second_request_does_not_queue_a_second_task(self, assembler):
+        nzf = self._nzf()
+        assembler.process(mock.Mock(), nzf)
+        assembler.process(mock.Mock(), nzf)
+        assembler.process(mock.Mock(), nzf)
+        assert len(self._drain(assembler)) == 1
+
+    def test_ordinary_arrivals_during_a_write_do_not_chain_another_write(self, assembler):
+        """The running pass walks to the end of the decodetable, so it already covers them.
+
+        Re-queueing instead makes each write carry only what landed during the previous one,
+        which degenerates into back-to-back writes of a few hundred KiB at high download rates.
+        """
+        nzo, nzf = mock.Mock(), self._nzf()
+        assembler.process(nzo, nzf)
+        self._drain(assembler)
+        for _ in range(20):
+            assembler.process(nzo, nzf)
+
+        assembler.finish_write(nzo, nzf, file_done=False)
+        assert self._drain(assembler) == []
+        assert assembler.is_busy() is False
+
+    def test_claim_released_when_nothing_pending(self, assembler):
+        nzo, nzf = mock.Mock(), self._nzf()
+        assembler.process(nzo, nzf)
+        self._drain(assembler)
+
+        assembler.finish_write(nzo, nzf, file_done=False)
+        assert self._drain(assembler) == []
+        assert assembler.is_busy() is False
+
+    def test_file_done_arriving_during_a_write_is_not_lost(self, assembler):
+        nzo, nzf = mock.Mock(), self._nzf()
+        assembler.process(nzo, nzf)
+        self._drain(assembler)
+
+        # file_done used to bypass the dedupe and enqueue a second, concurrent task
+        assembler.process(nzo, nzf, file_done=True)
+        assert self._drain(assembler) == []
+
+        assembler.finish_write(nzo, nzf, file_done=False)
+        tasks = self._drain(assembler)
+        assert len(tasks) == 1
+        assert tasks[0].file_done is True
+
+    def test_file_done_takes_priority_over_other_pending_work(self, assembler):
+        nzo, nzf = mock.Mock(), self._nzf()
+        assembler.process(nzo, nzf)
+        self._drain(assembler)
+
+        assembler.process(nzo, nzf, allow_non_contiguous=True)
+        assembler.process(nzo, nzf)
+        assembler.process(nzo, nzf, file_done=True)
+
+        assembler.finish_write(nzo, nzf, file_done=False)
+        tasks = self._drain(assembler)
+        assert len(tasks) == 1
+        assert tasks[0].file_done is True
+
+    def test_non_contiguous_is_requeued_but_ordinary_work_is_not(self, assembler):
+        """Eviction must survive: the running pass stops at the gap, so it cannot cover it"""
+        nzo, nzf = mock.Mock(), self._nzf()
+        assembler.process(nzo, nzf)
+        self._drain(assembler)
+
+        assembler.process(nzo, nzf)
+        assembler.process(nzo, nzf, allow_non_contiguous=True)
+
+        assembler.finish_write(nzo, nzf, file_done=False)
+        tasks = self._drain(assembler)
+        assert len(tasks) == 1
+        assert tasks[0].allow_non_contiguous is True
+
+        # Nothing else is owed, so the chain stops here
+        assembler.finish_write(nzo, nzf, file_done=False)
+        assert self._drain(assembler) == []
+        assert assembler.is_busy() is False
+
+    def test_completing_file_done_discards_pending_work(self, assembler):
+        nzo, nzf = mock.Mock(), self._nzf()
+        assembler.process(nzo, nzf, file_done=True)
+        self._drain(assembler)
+        assembler.process(nzo, nzf)
+
+        assembler.finish_write(nzo, nzf, file_done=True)
+        assert self._drain(assembler) == []
+        assert assembler.is_busy() is False
+
+    def test_different_files_are_queued_independently(self, assembler):
+        nzo = mock.Mock()
+        assembler.process(nzo, self._nzf("nzf_1"))
+        assembler.process(nzo, self._nzf("nzf_2"))
+        assert len(self._drain(assembler)) == 2
+
+    def test_clear_ready_bytes_releases_the_claim(self, assembler):
+        nzo, nzf = mock.Mock(), self._nzf()
+        assembler.process(nzo, nzf)
+        self._drain(assembler)
+
+        assembler.clear_ready_bytes(nzf)
+        assert assembler.is_busy() is False
+        # A deleted or finished job must not leave a claim that blocks a retry
+        assembler.process(nzo, nzf)
+        assert len(self._drain(assembler)) == 1
+
+    def test_finish_write_after_claim_cleared_is_a_no_op(self, assembler):
+        nzo, nzf = mock.Mock(), self._nzf()
+        assembler.process(nzo, nzf)
+        self._drain(assembler)
+
+        assembler.clear_ready_bytes(nzf)
+        assembler.finish_write(nzo, nzf, file_done=False)
+        assert self._drain(assembler) == []
+        assert assembler.is_busy() is False
+
+    def test_only_one_task_in_flight_per_file_under_concurrency(self, assembler):
+        """Many producers and several workers must never put two tasks for one file in flight"""
+        nzo = mock.Mock()
+        nzf_ids = ["nzf_1", "nzf_2", "nzf_3"]
+        nzfs = {nzf_id: self._nzf(nzf_id) for nzf_id in nzf_ids}
+
+        in_flight = dict.fromkeys(nzf_ids, 0)
+        in_flight_lock = threading.Lock()
+        violations = []
+        seen_file_done = set()
+        stop = threading.Event()
+
+        def worker():
+            while not stop.is_set():
+                try:
+                    task = assembler.queue.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                with in_flight_lock:
+                    in_flight[task.nzf.nzf_id] += 1
+                    if in_flight[task.nzf.nzf_id] > 1:
+                        violations.append(task.nzf.nzf_id)
+                if task.file_done:
+                    seen_file_done.add(task.nzf.nzf_id)
+                time.sleep(0.0005)
+                with in_flight_lock:
+                    in_flight[task.nzf.nzf_id] -= 1
+                assembler.finish_write(nzo, task.nzf, task.file_done)
+
+        def producer():
+            for _ in range(200):
+                for nzf in nzfs.values():
+                    assembler.process(nzo, nzf)
+
+        workers = [threading.Thread(target=worker) for _ in range(4)]
+        producers = [threading.Thread(target=producer) for _ in range(4)]
+        for thread in workers + producers:
+            thread.start()
+        for thread in producers:
+            thread.join()
+
+        # file_done arrives last, while writes for these files are still churning
+        for nzf in nzfs.values():
+            assembler.process(nzo, nzf, file_done=True)
+
+        deadline = time.monotonic() + 10
+        while assembler.is_busy() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        stop.set()
+        for thread in workers:
+            thread.join()
+
+        assert violations == []
+        assert seen_file_done == set(nzf_ids)
+        assert assembler.is_busy() is False
 
 
 class TestDiskspaceCheck:

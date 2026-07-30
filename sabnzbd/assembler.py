@@ -26,6 +26,7 @@ import re
 import threading
 from threading import Thread
 import ctypes
+from dataclasses import dataclass
 from typing import Optional, NamedTuple
 import rarfile
 import time
@@ -65,6 +66,44 @@ class AssemblerTask(NamedTuple):
     direct_write: bool = False
 
 
+@dataclass(slots=True, eq=False)
+class NzfWriteState:
+    """Write state for a single NzbFile that has a task queued or in flight.
+
+    Presence in Assembler.write_states is the claim itself: exactly one task exists per
+    NzbFile at any time. Requests arriving while that task runs set a pending flag instead
+    of enqueuing a second task, and are re-queued once it completes.
+
+    Only requests that the running task cannot satisfy are recorded. An ordinary write is not
+    one of them: assemble() walks to the end of the decodetable, so it already picks up
+    articles that arrive while it runs, and queueing a second task for them chains small
+    writes back to back instead of letting a batch accumulate.
+    """
+
+    pending_non_contiguous: bool = False
+    pending_file_done: bool = False
+
+    def mark_pending(self, file_done: bool, allow_non_contiguous: bool) -> None:
+        if file_done:
+            self.pending_file_done = True
+        elif allow_non_contiguous:
+            self.pending_non_contiguous = True
+
+    def take_pending(self) -> Optional[tuple[bool, bool]]:
+        """Claim the highest-priority pending request, as (file_done, allow_non_contiguous).
+
+        file_done writes everything a normal pass would and finalizes, so it goes first.
+        Returns None when nothing is pending.
+        """
+        if self.pending_file_done:
+            self.pending_file_done = False
+            return True, False
+        if self.pending_non_contiguous:
+            self.pending_non_contiguous = False
+            return False, True
+        return None
+
+
 class Assembler(Thread):
     def __init__(self):
         super().__init__()
@@ -76,8 +115,7 @@ class Assembler(Thread):
         self.delay_trigger: int = 1
         self.queue: queue.Queue[AssemblerTask] = queue.Queue()
         self.queued_lock = threading.Lock()
-        self.queued_nzf: set[str] = set()
-        self.queued_nzf_non_contiguous: set[str] = set()
+        self.write_states: dict[str, NzfWriteState] = {}
         self.queued_next_time: dict[str, float] = {}
         self.ready_bytes_lock = threading.Lock()
         self.ready_bytes: dict[str, int] = {}
@@ -119,7 +157,7 @@ class Assembler(Thread):
 
     def is_busy(self) -> bool:
         """Returns True if the assembler thread has at least one NzbFile it is assembling"""
-        return bool(self.queued_nzf or self.queued_nzf_non_contiguous)
+        return bool(self.write_states)
 
     def total_ready_bytes(self) -> int:
         with self.ready_bytes_lock:
@@ -139,6 +177,11 @@ class Assembler(Thread):
             for nzf in nzfs:
                 self.ready_bytes.pop(nzf.nzf_id, None)
                 self.queued_next_time.pop(nzf.nzf_id, None)
+        # Drop any write claim so a job that is deleted or finished mid-write cannot leave
+        # a state behind that blocks the file being queued again if it is retried
+        with self.queued_lock:
+            for nzf in nzfs:
+                self.write_states.pop(nzf.nzf_id, None)
 
     def process(
         self,
@@ -163,6 +206,12 @@ class Assembler(Thread):
         if article_has_first_part:
             self.queued_next_time[nzf.nzf_id] = time.monotonic() + ASSEMBLER_WRITE_INTERVAL
 
+        # Is the article the file needs next available, so a contiguous write can be made?
+        next_ready = bool(
+            (next_article := nzf.assembler_next_article)
+            and (next_article.decoded or next_article.on_disk or next_article.failed)
+        )
+
         if not self.should_queue_nzf(
             nzf,
             article_has_first_part=article_has_first_part,
@@ -171,22 +220,36 @@ class Assembler(Thread):
             file_done=file_done,
             allow_non_contiguous=allow_non_contiguous,
             ready_bytes=ready_bytes,
+            next_ready=next_ready,
         ):
             return
 
         with self.queued_lock:
-            # Recheck not already in the normal queue under lock, but always enqueue when file_done
-            if not file_done and nzf.nzf_id in self.queued_nzf:
+            if (state := self.write_states.get(nzf.nzf_id)) is not None:
+                # A task for this file is already queued or running. Record what arrived and let
+                # the worker re-queue on completion, so only one task per file is ever in flight.
+                state.mark_pending(file_done, allow_non_contiguous)
                 return
-            if allow_non_contiguous:
-                if not file_done and nzf.nzf_id in self.queued_nzf_non_contiguous:
-                    return
-                self.queued_nzf_non_contiguous.add(nzf.nzf_id)
-            else:
-                self.queued_nzf.add(nzf.nzf_id)
+            self.write_states[nzf.nzf_id] = NzfWriteState()
             self.queued_next_time[nzf.nzf_id] = time.monotonic() + ASSEMBLER_WRITE_INTERVAL
+        self.queue.put(self.build_task(nzo, nzf, file_done, allow_non_contiguous))
+
+    def build_task(self, nzo: NzbObject, nzf: NzbFile, file_done: bool, allow_non_contiguous: bool) -> AssemblerTask:
         can_direct_write = self.direct_write and nzf.type == "yenc"
-        self.queue.put(AssemblerTask(nzo, nzf, file_done, allow_non_contiguous, can_direct_write))
+        return AssemblerTask(nzo, nzf, file_done, allow_non_contiguous, can_direct_write)
+
+    def finish_write(self, nzo: NzbObject, nzf: NzbFile, file_done: bool) -> None:
+        """Release the write claim on nzf, re-queueing a single task if more work arrived while it ran"""
+        with self.queued_lock:
+            state = self.write_states.pop(nzf.nzf_id, None)
+            if state is None or file_done:
+                # file_done is the final pass, so anything recorded during it is redundant
+                return
+            if (next_request := state.take_pending()) is None:
+                return
+            self.write_states[nzf.nzf_id] = state
+            self.queued_next_time[nzf.nzf_id] = time.monotonic() + ASSEMBLER_WRITE_INTERVAL
+        self.queue.put(self.build_task(nzo, nzf, *next_request))
 
     def should_queue_nzf(
         self,
@@ -198,18 +261,21 @@ class Assembler(Thread):
         file_done: bool,
         allow_non_contiguous: bool,
         ready_bytes: int,
+        next_ready: bool,
     ) -> bool:
         # Always queue if done
         if file_done:
             return True
-        if nzf.nzf_id in self.queued_nzf:
-            return False
+        # A task for this file is already queued or running. An ordinary write does not need a
+        # second one: assemble() walks to the end of the decodetable, so it picks up whatever
+        # arrives while it runs. Queueing anyway makes each write carry only what landed during
+        # the previous one, which collapses into a chain of small writes at high download rates.
+        if state := self.write_states.get(nzf.nzf_id):
+            if not allow_non_contiguous or state.pending_non_contiguous:
+                return False
         # Always write
         if article_has_first_part and filename_checked and not import_finished:
             return True
-        next_ready = (next_article := nzf.assembler_next_article) and (
-            next_article.decoded or next_article.on_disk or next_article.failed
-        )
         # Trigger every 5 seconds if next article is decoded or on_disk
         if next_ready and time.monotonic() > self.queued_next_time.get(nzf.nzf_id, 0):
             return True
@@ -311,11 +377,7 @@ class Assembler(Thread):
                     logging.error(T("Fatal error in Assembler"), exc_info=True)
                     break
                 finally:
-                    with self.queued_lock:
-                        if allow_non_contiguous:
-                            self.queued_nzf_non_contiguous.discard(nzf.nzf_id)
-                        else:
-                            self.queued_nzf.discard(nzf.nzf_id)
+                    self.finish_write(nzo, nzf, file_done)
             else:
                 sabnzbd.NzbQueue.remove(nzo.nzo_id, cleanup=False)
                 sabnzbd.PostProcessor.process(nzo)
