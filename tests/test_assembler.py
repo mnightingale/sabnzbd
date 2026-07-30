@@ -24,6 +24,7 @@ import os
 import queue
 import threading
 import time
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest import mock
 from zlib import crc32
@@ -32,8 +33,26 @@ import pytest
 
 import sabnzbd
 import sabnzbd.assembler
-from sabnzbd.assembler import IOV_CHUNK_SIZE, VECTORED_WRITE, Assembler, advance_buffers, write_vector
-from sabnzbd.constants import GIGI
+import sabnzbd.cfg as cfg
+from sabnzbd.assembler import (
+    IOV_CHUNK_SIZE,
+    VECTORED_WRITE,
+    Assembler,
+    NzfWriteState,
+    advance_buffers,
+    write_vector,
+)
+from sabnzbd.constants import (
+    ASSEMBLER_ARTICLE_SIZE,
+    ASSEMBLER_EVICTION_FACTOR,
+    ASSEMBLER_PENDING_BY_MEMORY,
+    ASSEMBLER_MAX_PENDING_BYTES,
+    ASSEMBLER_MIN_PENDING_BYTES,
+    ASSEMBLER_MIN_CONCURRENT_FILES,
+    DEF_MAX_ASSEMBLER_QUEUE,
+    GIGI,
+    MEBI,
+)
 from sabnzbd.filesystem import Diskspace
 from sabnzbd.nzb import Article, NzbFile, NzbObject
 
@@ -594,7 +613,7 @@ class TestWriteSerialisation:
             sabnzbd.Assembler = Assembler()
             # Bypass the trigger checks; these tests are about what happens once a file
             # is worth queueing, not about when it becomes worth queueing
-            with mock.patch.object(Assembler, "should_queue_nzf", return_value=True):
+            with mock.patch.object(Assembler, "should_queue_nzf", return_value="test"):
                 yield sabnzbd.Assembler
         finally:
             del sabnzbd.Assembler
@@ -790,6 +809,354 @@ class TestWriteSerialisation:
         assert violations == []
         assert seen_file_done == set(nzf_ids)
         assert assembler.is_busy() is False
+
+
+class TestPendingCap:
+    """Tests for the per-file pending cap that replaced the share-of-cache trigger"""
+
+    @pytest.fixture(autouse=True)
+    def assembler(self):
+        try:
+            sabnzbd.Assembler = Assembler()
+            sabnzbd.Assembler.max_queue_size = DEF_MAX_ASSEMBLER_QUEUE
+            yield sabnzbd.Assembler
+        finally:
+            del sabnzbd.Assembler
+
+    @staticmethod
+    def _with_memory(total_bytes):
+        return mock.patch("sabnzbd.misc.get_memory", return_value=total_bytes)
+
+    @staticmethod
+    def _server(threads: int, pipelining: int = 2, active: bool = True):
+        return SimpleNamespace(threads=threads, pipelining_requests=lambda: pipelining, active=active)
+
+    @contextmanager
+    def _with_servers(self, *servers):
+        sabnzbd.Downloader = SimpleNamespace(servers=list(servers))
+        try:
+            yield
+        finally:
+            del sabnzbd.Downloader
+
+    def test_in_flight_articles_counts_active_connections(self, assembler):
+        with self._with_servers(self._server(20), self._server(30, pipelining=1)):
+            assert assembler.in_flight_articles() == 20 * 2 + 30
+
+    def test_in_flight_articles_ignores_inactive_servers(self, assembler):
+        with self._with_servers(self._server(20), self._server(500, active=False)):
+            assert assembler.in_flight_articles() == 40
+
+    def test_in_flight_articles_without_a_downloader(self, assembler):
+        """Called during startup before the Downloader exists"""
+        assert assembler.in_flight_articles() == 0
+
+    def test_cap_covers_the_in_flight_window(self, assembler):
+        """The window the write position can fall behind is connections x pipelining"""
+        assembler.cache_limit = int(8 * GIGI)
+        with self._with_servers(self._server(20)), self._with_memory(int(128 * GIGI)):
+            assembler.calculate_pending_cap()
+        assert assembler.pending_cap() == 40 * ASSEMBLER_ARTICLE_SIZE
+
+    def test_memory_tier_caps_a_large_connection_count(self, assembler):
+        """A machine can be configured with more connections than it has memory to batch for"""
+        assembler.cache_limit = int(8 * GIGI)
+        with self._with_servers(self._server(500)), self._with_memory(int(8 * GIGI)):
+            assembler.calculate_pending_cap()
+        assert assembler.pending_cap() == int(32 * MEBI)
+
+    def test_bandwidth_is_not_an_input(self, assembler):
+        """A slow link reorders over the same number of articles as a fast one"""
+        assembler.cache_limit = int(8 * GIGI)
+        caps = []
+        for bandwidth in ("", "10M", "10G"):
+            with (
+                mock.patch.object(cfg.bandwidth_max, "get", return_value=bandwidth),
+                self._with_servers(self._server(20)),
+                self._with_memory(int(128 * GIGI)),
+            ):
+                assembler.calculate_pending_cap()
+            caps.append(assembler.pending_cap())
+        assert len(set(caps)) == 1
+
+    @pytest.mark.parametrize(
+        "cache_limit, expected",
+        [
+            (0, ASSEMBLER_MIN_PENDING_BYTES),
+            (int(8 * MEBI), ASSEMBLER_MIN_PENDING_BYTES),
+            (int(128 * MEBI), ASSEMBLER_MIN_PENDING_BYTES),
+            (
+                int(512 * MEBI),
+                int(512 * MEBI * 0.5 / ASSEMBLER_MIN_CONCURRENT_FILES) // ASSEMBLER_EVICTION_FACTOR,
+            ),
+            (int(4 * GIGI), ASSEMBLER_MAX_PENDING_BYTES),
+        ],
+    )
+    def test_cap_is_ceilinged_not_proportional(self, assembler, cache_limit, expected):
+        """Large caches all land on the same cap, which is the point: memory stops tracking cache size"""
+        assembler.cache_limit = cache_limit
+        with self._with_memory(int(128 * GIGI)):
+            assembler.calculate_pending_cap()
+        assert assembler.pending_cap() == expected
+
+    @pytest.mark.parametrize("total_memory, expected", ASSEMBLER_PENDING_BY_MEMORY)
+    def test_cap_scales_with_installed_memory(self, assembler, total_memory, expected):
+        """Bigger machines run more connections, so the batch has to cover a wider
+        out-of-order arrival window before the write position unblocks"""
+        assembler.cache_limit = int(4 * GIGI)
+        with self._with_memory(int(total_memory)):
+            assembler.calculate_pending_cap()
+        assert assembler.pending_cap() == expected
+
+    def test_unknown_memory_uses_the_top_tier(self, assembler):
+        """get_memory returns 0 when it cannot tell; the cache share still bounds it"""
+        assembler.cache_limit = int(4 * GIGI)
+        with self._with_memory(0):
+            assembler.calculate_pending_cap()
+        assert assembler.pending_cap() == ASSEMBLER_MAX_PENDING_BYTES
+
+    def test_cap_never_exceeds_its_share_of_a_small_cache(self, assembler):
+        """Pending writes must not crowd out articles still being downloaded"""
+        for megabytes in (16, 32, 64, 128, 256, 512):
+            assembler.cache_limit = int(megabytes * MEBI)
+            with self._with_memory(int(128 * GIGI)):
+                assembler.calculate_pending_cap()
+            peak = assembler.eviction_watermark() * ASSEMBLER_MIN_CONCURRENT_FILES
+            floor_peak = ASSEMBLER_MIN_PENDING_BYTES * ASSEMBLER_EVICTION_FACTOR * ASSEMBLER_MIN_CONCURRENT_FILES
+            assert peak <= max(int(assembler.cache_limit * 0.5), floor_peak)
+
+    @pytest.mark.parametrize(
+        "cache_limit, direct_write, expected",
+        [
+            # Values taken from the formula as it stood before the pending cap was introduced.
+            # Backpressure must not move with the cap, or M2 would change throughput as well as
+            # memory and a regression could not be attributed to either.
+            (134217728, True, 120795955),
+            (134217728, False, 67108864),
+            (524288000, True, 471859200),
+            (524288000, False, 262144000),
+            (1073741824, True, 966367641),
+            (1073741824, False, 536870912),
+            (4294967296, True, 3865470566),
+            (4294967296, False, 2147483648),
+        ],
+    )
+    def test_delay_trigger_is_unchanged_by_the_new_cap(self, assembler, cache_limit, direct_write, expected):
+        assembler.cache_limit = cache_limit
+        assembler.direct_write = direct_write
+        assembler.calculate_delay_trigger()
+        assert assembler.delay_trigger == expected
+
+
+class TestBatchSizeUnderLoad:
+    """Writes must carry roughly a capful, not whatever landed during the previous write"""
+
+    @pytest.fixture(autouse=True)
+    def assembler(self):
+        try:
+            sabnzbd.Assembler = Assembler()
+            sabnzbd.Assembler.cache_limit = int(GIGI)
+            sabnzbd.Assembler.calculate_pending_cap()
+            sabnzbd.Assembler.direct_write = True
+            yield sabnzbd.Assembler
+        finally:
+            del sabnzbd.Assembler
+
+    def test_arrivals_during_a_slow_write_do_not_shrink_the_next_batch(self, assembler):
+        """Reproduces the regression seen on fast storage: a write completes, the arrivals it
+        already covered trigger another, and batch size collapses towards a single article"""
+        article_size = 760 * 1024
+        nzf = mock.Mock()
+        nzf.nzf_id = "nzf_1"
+        nzf.type = "yenc"
+        nzf.filename_checked = True
+        nzf.import_finished = True
+        nzf.assembler_next_article = mock.Mock(decoded=True, on_disk=False, failed=False)
+        nzf.has_contiguous_ready_bytes.return_value = True
+        # Push the interval trigger out of the way so only the cap can queue a write
+        assembler.queued_next_time[nzf.nzf_id] = time.monotonic() + 3600
+
+        # Fast storage: a write completes in the time it takes two more articles to arrive.
+        # Those two are the ones that used to re-arm the trigger and shrink the next batch.
+        articles_per_write = 2
+        nzo = mock.Mock()
+        batches = []
+        in_flight, remaining = False, 0
+
+        def start_write():
+            nonlocal in_flight, remaining
+            assembler.queue.get()
+            in_flight, remaining = True, articles_per_write
+
+        def complete_write():
+            nonlocal in_flight
+            written = assembler.ready_bytes.get(nzf.nzf_id, 0)
+            batches.append(written)
+            assembler.update_ready_bytes(nzf, -written)
+            assembler.finish_write(nzo, nzf, file_done=False)
+            in_flight = False
+
+        for _ in range(400):
+            assembler.process(nzo, nzf, article=mock.Mock(decoded_size=article_size, lowest_partnum=False))
+            if in_flight:
+                remaining -= 1
+                if remaining <= 0:
+                    complete_write()
+            if not in_flight and not assembler.queue.empty():
+                start_write()
+
+        assert len(batches) > 1, "no writes completed, the simulation is not exercising anything"
+        # Every write carries at least a capful, and never more than a capful plus the articles
+        # that arrived while it ran
+        assert min(batches) >= assembler.pending_cap()
+        assert max(batches) <= assembler.pending_cap() + article_size * (articles_per_write + 1)
+
+
+class TestNonContiguousEviction:
+    """Tests for per-file eviction when the next article has not arrived"""
+
+    @pytest.fixture(autouse=True)
+    def assembler(self):
+        try:
+            sabnzbd.Assembler = Assembler()
+            sabnzbd.Assembler.cache_limit = int(GIGI)
+            sabnzbd.Assembler.calculate_pending_cap()
+            sabnzbd.Assembler.direct_write = True
+            yield sabnzbd.Assembler
+        finally:
+            del sabnzbd.Assembler
+
+    @staticmethod
+    def _nzf(nzf_id: str = "nzf_1", contiguous: bool = True):
+        nzf = mock.Mock()
+        nzf.nzf_id = nzf_id
+        nzf.type = "yenc"
+        nzf.filename_checked = True
+        nzf.import_finished = True
+        nzf.has_contiguous_ready_bytes.return_value = contiguous
+        return nzf
+
+    def _trigger(self, assembler, nzf, ready_bytes, next_ready=True):
+        return assembler.should_queue_nzf(
+            nzf,
+            article_has_first_part=False,
+            filename_checked=True,
+            import_finished=True,
+            file_done=False,
+            allow_non_contiguous=False,
+            ready_bytes=ready_bytes,
+            next_ready=next_ready,
+        )
+
+    def test_queues_on_a_full_contiguous_run(self, assembler):
+        nzf = self._nzf(contiguous=True)
+        assembler.queued_next_time[nzf.nzf_id] = time.monotonic() + 3600
+        assert self._trigger(assembler, nzf, assembler.pending_cap()) == "cap"
+
+    def test_does_not_queue_when_the_pending_bytes_are_fragmented(self, assembler):
+        """A capful of pending data whose contiguous prefix is one article would write one
+        article, which is how a file ends up written in fragments"""
+        nzf = self._nzf(contiguous=False)
+        assembler.queued_next_time[nzf.nzf_id] = time.monotonic() + 3600
+        assert self._trigger(assembler, nzf, assembler.pending_cap() * 4) == ""
+
+    @property
+    def _watermark(self) -> int:
+        return sabnzbd.Assembler.eviction_watermark()
+
+    @pytest.mark.parametrize(
+        "cache_gb, file_mb",
+        [(1, 100), (1, 250), (2, 500), (4, 500), (4, 1000)],
+    )
+    def test_a_large_cache_buys_patience_not_larger_batches(self, assembler, cache_gb, file_mb):
+        """Typical files are 100-500 MB. A file smaller than the watermark is never written out
+        of order, so spare cache has to raise the watermark without inflating the batch size"""
+        assembler.cache_limit = int(cache_gb * GIGI)
+        with mock.patch("sabnzbd.misc.get_memory", return_value=int(64 * GIGI)):
+            assembler.calculate_pending_cap()
+        assert assembler.eviction_watermark() >= file_mb * MEBI
+        # The batch still only covers the in-flight window; patience and batch size are separate
+        assert assembler.pending_cap() == min(assembler.pending_window, assembler.pending_tier)
+
+    def test_watermark_never_exceeds_the_file_budget(self, assembler):
+        """Or several files together would overrun the cache and trigger the spill path"""
+        for megabytes in (64, 128, 256, 512, 1024, 4096):
+            assembler.cache_limit = int(megabytes * MEBI)
+            with mock.patch("sabnzbd.misc.get_memory", return_value=int(64 * GIGI)):
+                assembler.calculate_pending_cap()
+            floor = ASSEMBLER_MIN_PENDING_BYTES * ASSEMBLER_EVICTION_FACTOR
+            assert assembler.eviction_watermark() <= max(assembler.file_budget(), floor)
+
+    def test_forces_a_write_past_the_watermark(self, assembler):
+        assert assembler.should_force_write(self._watermark) is True
+
+    def test_does_not_force_a_write_on_the_first_gap(self, assembler):
+        """Articles arrive out of order across many connections, so a short contiguous prefix is
+        routine and usually transient. Waiting lets the run grow instead of writing it in pieces"""
+        assert assembler.should_force_write(assembler.pending_cap()) is False
+        assert assembler.should_force_write(self._watermark - 1) is False
+
+    def test_evicts_only_when_the_write_position_is_blocked(self, assembler):
+        assert assembler.should_evict_non_contiguous(self._nzf(), next_ready=False) is True
+
+    def test_prefers_a_short_sequential_write_over_a_scattered_one(self, assembler):
+        """The forced write still happens, it just stays contiguous"""
+        assert assembler.should_evict_non_contiguous(self._nzf(), next_ready=True) is False
+
+    def test_does_not_evict_in_append_mode(self, assembler):
+        """Append has to write in order, so there is no out-of-order write to fall back on"""
+        assembler.direct_write = False
+        assert assembler.should_evict_non_contiguous(self._nzf(), next_ready=False) is False
+
+    def test_does_not_evict_a_non_yenc_file(self, assembler):
+        nzf = self._nzf()
+        nzf.type = "uu"
+        assert assembler.should_evict_non_contiguous(nzf, next_ready=False) is False
+
+    def test_does_not_evict_twice_while_one_is_pending(self, assembler):
+        nzf = self._nzf()
+        state = NzfWriteState()
+        state.pending_non_contiguous = True
+        assembler.write_states[nzf.nzf_id] = state
+        assert assembler.should_evict_non_contiguous(nzf, next_ready=False) is False
+
+    def test_stalled_file_is_queued_out_of_order_rather_than_waiting_for_the_cache(self, assembler):
+        """A file whose next article is missing would otherwise hold its backlog until the
+        whole cache hit 90%, so one stalled article becomes a whole-cache problem"""
+        nzf = self._nzf(contiguous=False)
+        nzf.assembler_next_article = mock.Mock(decoded=False, on_disk=False, failed=False)
+        assembler.queued_next_time[nzf.nzf_id] = time.monotonic() + 3600
+
+        article = mock.Mock(decoded_size=self._watermark, lowest_partnum=False)
+        assembler.process(mock.Mock(), nzf, article=article)
+
+        task = assembler.queue.get_nowait()
+        assert task.allow_non_contiguous is True
+        assert task.nzf is nzf
+
+    def test_forced_write_stays_contiguous_when_the_write_position_is_available(self, assembler):
+        """Past the watermark with a short run: write it, but sequentially rather than scattered"""
+        nzf = self._nzf(contiguous=False)
+        nzf.assembler_next_article = mock.Mock(decoded=True, on_disk=False, failed=False)
+        assembler.queued_next_time[nzf.nzf_id] = time.monotonic() + 3600
+
+        article = mock.Mock(decoded_size=self._watermark, lowest_partnum=False)
+        assembler.process(mock.Mock(), nzf, article=article)
+
+        task = assembler.queue.get_nowait()
+        assert task.allow_non_contiguous is False
+
+    def test_append_mode_with_a_blocked_write_position_waits(self, assembler):
+        """Nothing can be written in order, and append cannot skip the gap"""
+        assembler.direct_write = False
+        nzf = self._nzf(contiguous=False)
+        nzf.assembler_next_article = mock.Mock(decoded=False, on_disk=False, failed=False)
+        assembler.queued_next_time[nzf.nzf_id] = time.monotonic() + 3600
+
+        article = mock.Mock(decoded_size=self._watermark, lowest_partnum=False)
+        assembler.process(mock.Mock(), nzf, article=article)
+
+        assert assembler.queue.empty()
 
 
 class TestDiskspaceCheck:

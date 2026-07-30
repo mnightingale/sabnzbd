@@ -379,6 +379,11 @@ class Downloader(Thread):
             # Sort the servers for performance
             self.servers.sort(key=lambda svr: "%02d%s" % (svr.priority, svr.displayname.lower()))
 
+        # The connection count sets how far the assembler's write position can fall behind,
+        # which is what its batch size is sized against
+        if assembler := getattr(sabnzbd, "Assembler", None):
+            assembler.calculate_pending_cap()
+
     @synchronized(DOWNLOADER_LOCK)
     def add_socket(self, nw: NewsWrapper):
         """Add a socket to be watched for read or write availability"""

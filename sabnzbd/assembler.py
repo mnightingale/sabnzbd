@@ -53,6 +53,13 @@ from sabnzbd.constants import (
     ASSEMBLER_WRITE_INTERVAL,
     ASSEMBLER_TRIGGER_PERCENTAGE,
     ASSEMBLER_VECTOR_CHUNK_SIZE,
+    ASSEMBLER_MAX_PENDING_BYTES,
+    ASSEMBLER_MIN_PENDING_BYTES,
+    ASSEMBLER_PENDING_BY_MEMORY,
+    ASSEMBLER_PENDING_CACHE_SHARE,
+    ASSEMBLER_MIN_CONCURRENT_FILES,
+    ASSEMBLER_EVICTION_FACTOR,
+    ASSEMBLER_ARTICLE_SIZE,
 )
 import sabnzbd.cfg as cfg
 from sabnzbd.nzb import NzbFile, NzbObject, Article
@@ -66,6 +73,8 @@ class AssemblerTask(NamedTuple):
     file_done: bool = False
     allow_non_contiguous: bool = False
     direct_write: bool = False
+    # Why the write was triggered, for the batch log only
+    reason: str = ""
 
 
 @dataclass(slots=True, eq=False)
@@ -171,8 +180,9 @@ class Assembler(Thread):
         self.max_queue_size: int = cfg.assembler_max_queue_size()
         self.direct_write: bool = cfg.direct_write()
         self.cache_limit: int = 0
-        # Total bytes required per file to trigger the assembler
-        self.assembler_trigger: int = 0
+        # Ceilings on the pending bytes per file, refreshed when servers or the cache change
+        self.pending_window: int = ASSEMBLER_MAX_PENDING_BYTES
+        self.pending_tier: int = ASSEMBLER_MAX_PENDING_BYTES
         self.delay_trigger: int = 1
         self.queue: queue.Queue[AssemblerTask] = queue.Queue()
         self.queued_lock = threading.Lock()
@@ -187,31 +197,106 @@ class Assembler(Thread):
     def new_limit(self, limit: int):
         """Called when cache limit changes"""
         self.cache_limit = limit
-        self.assembler_trigger = max(1, int(self.cache_limit * ASSEMBLER_TRIGGER_PERCENTAGE))
+        self.calculate_pending_cap()
         self.change_direct_write(cfg.direct_write())
+
+    @staticmethod
+    def in_flight_articles() -> int:
+        """Articles that can be outstanding at once, across every active server.
+
+        This is the width of the window over which articles arrive out of order, and so the
+        distance the write position can fall behind. Bandwidth is not part of it: a slow link
+        with many connections reorders over just as many articles as a fast one.
+        """
+        if not (downloader := getattr(sabnzbd, "Downloader", None)):
+            return 0
+        return sum(server.threads * server.pipelining_requests() for server in downloader.servers if server.active)
+
+    def calculate_pending_cap(self):
+        """Ceiling on how much one file may hold, from the in-flight window and installed memory.
+
+        The window is what a file accumulates while the write position waits for the article it
+        needs, so a batch that size is what a contiguous write can normally be made from. Memory
+        is a ceiling on that, not the source of it. The cache is applied per call in
+        pending_cap(), since it has to be shared between however many files are assembling.
+        """
+        self.pending_window = self.in_flight_articles() * ASSEMBLER_ARTICLE_SIZE or ASSEMBLER_MAX_PENDING_BYTES
+
+        memory = sabnzbd.misc.get_memory()
+        self.pending_tier = ASSEMBLER_MAX_PENDING_BYTES
+        for tier_memory, tier_cap in ASSEMBLER_PENDING_BY_MEMORY:
+            if memory and memory <= tier_memory:
+                self.pending_tier = tier_cap
+                break
+
         logging.debug(
-            "Assembler trigger=%s, delay=%s",
-            to_units(self.assembler_trigger),
-            to_units(self.delay_trigger),
+            "Assembler pending cap=%s, evicts at %s (window=%s, memory=%s, budget=%s at %s file(s))",
+            to_units(self.pending_cap()),
+            to_units(self.eviction_watermark()),
+            to_units(self.pending_window),
+            to_units(self.pending_tier),
+            to_units(self.file_budget()),
+            max(ASSEMBLER_MIN_CONCURRENT_FILES, len(self.ready_bytes)),
         )
+
+    def file_budget(self) -> int:
+        """Cache one assembling file may occupy before it has to be written out of order.
+
+        Divided by the files actually holding data rather than by a configured maximum: only a
+        couple are usually assembled at once, and dividing by a worst case would hand back cache
+        for a concurrency that is not happening. Every file staying inside its budget keeps peak
+        occupancy at ASSEMBLER_PENDING_CACHE_SHARE of the cache, which matters because a full
+        cache sends every arriving article through the single-article spill path.
+        """
+        files = max(ASSEMBLER_MIN_CONCURRENT_FILES, len(self.ready_bytes))
+        return int(self.cache_limit * ASSEMBLER_PENDING_CACHE_SHARE / files)
+
+    def pending_cap(self) -> int:
+        """Bytes one file may hold before it is queued for writing.
+
+        The batch only has to cover the in-flight window, since that is the length of the
+        contiguous run that forms once the write position unblocks. Making it larger would delay
+        writes without making them any more sequential.
+        """
+        cap = min(self.pending_window, self.pending_tier, self.file_budget() // ASSEMBLER_EVICTION_FACTOR)
+        return max(ASSEMBLER_MIN_PENDING_BYTES, cap)
+
+    def eviction_watermark(self) -> int:
+        """Bytes one file may hold before it gives up on writing in order.
+
+        The whole budget, not a multiple of the cap: how long a file can wait for a blocked
+        write position is a question about spare cache, while the cap is a question about the
+        in-flight window. Tying them together meant a large cache could not buy more patience,
+        only larger batches - so a file bigger than a few multiples of the window was written
+        out of order no matter how much cache was free. The factor survives as the floor, so a
+        small cache still leaves room for several batches before fragmenting.
+        """
+        return max(self.file_budget(), self.pending_cap() * ASSEMBLER_EVICTION_FACTOR)
 
     def change_direct_write(self, direct_write: bool) -> None:
         self.direct_write = direct_write
         self.calculate_delay_trigger()
 
     def calculate_delay_trigger(self):
-        """Point at which downloader should start being delayed, recalculated when cache limit or direct write changes"""
+        """Point at which downloader should start being delayed, recalculated when cache limit or direct write changes
+
+        Deliberately still derived from ASSEMBLER_TRIGGER_PERCENTAGE rather than from pending_cap.
+        Backpressure is about how far behind the assembler is allowed to fall, which is a separate
+        question from how much one file may hold, and tying the two together would start delaying
+        the downloader at roughly the new steady state rather than above it.
+        """
+        append_trigger = max(1, int(self.cache_limit * ASSEMBLER_TRIGGER_PERCENTAGE)) * self.max_queue_size
         self.delay_trigger = int(
             max(
                 (
-                    750_000 * self.max_queue_size * ASSEMBLER_DELAY_FACTOR_DIRECT_WRITE
+                    ASSEMBLER_ARTICLE_SIZE * self.max_queue_size * ASSEMBLER_DELAY_FACTOR_DIRECT_WRITE
                     if self.direct_write
-                    else 750_000 * self.max_queue_size
+                    else ASSEMBLER_ARTICLE_SIZE * self.max_queue_size
                 ),
                 (
                     self.cache_limit * ARTICLE_CACHE_NON_CONTIGUOUS_FLUSH_PERCENTAGE
                     if self.direct_write
-                    else min(self.assembler_trigger * self.max_queue_size, int(self.cache_limit * 0.5))
+                    else min(append_trigger, int(self.cache_limit * 0.5))
                 ),
             )
         )
@@ -273,7 +358,7 @@ class Assembler(Thread):
             and (next_article.decoded or next_article.on_disk or next_article.failed)
         )
 
-        if not self.should_queue_nzf(
+        reason = self.should_queue_nzf(
             nzf,
             article_has_first_part=article_has_first_part,
             filename_checked=nzf.filename_checked,
@@ -282,8 +367,22 @@ class Assembler(Thread):
             allow_non_contiguous=allow_non_contiguous,
             ready_bytes=ready_bytes,
             next_ready=next_ready,
-        ):
-            return
+        )
+        if not reason:
+            if not self.should_force_write(ready_bytes):
+                return
+            if self.should_evict_non_contiguous(nzf, next_ready):
+                # Genuinely stuck, so accept a fragmented write rather than hold the backlog
+                # until the whole cache reaches its flush threshold
+                allow_non_contiguous = True
+                reason = "evicted"
+            elif not next_ready:
+                # Append mode with a gap at the write position: nothing can be written yet
+                return
+            else:
+                # An ordinary write whose contiguous run is shorter than the cap. A short
+                # sequential write is still better than a scattered one
+                reason = "forced"
 
         with self.queued_lock:
             if (state := self.write_states.get(nzf.nzf_id)) is not None:
@@ -293,11 +392,13 @@ class Assembler(Thread):
                 return
             self.write_states[nzf.nzf_id] = NzfWriteState()
             self.queued_next_time[nzf.nzf_id] = time.monotonic() + ASSEMBLER_WRITE_INTERVAL
-        self.queue.put(self.build_task(nzo, nzf, file_done, allow_non_contiguous))
+        self.queue.put(self.build_task(nzo, nzf, file_done, allow_non_contiguous, reason))
 
-    def build_task(self, nzo: NzbObject, nzf: NzbFile, file_done: bool, allow_non_contiguous: bool) -> AssemblerTask:
+    def build_task(
+        self, nzo: NzbObject, nzf: NzbFile, file_done: bool, allow_non_contiguous: bool, reason: str = "requeued"
+    ) -> AssemblerTask:
         can_direct_write = self.direct_write and nzf.type == "yenc"
-        return AssemblerTask(nzo, nzf, file_done, allow_non_contiguous, can_direct_write)
+        return AssemblerTask(nzo, nzf, file_done, allow_non_contiguous, can_direct_write, reason)
 
     def finish_write(self, nzo: NzbObject, nzf: NzbFile, file_done: bool) -> None:
         """Release the write claim on nzf, re-queueing a single task if more work arrived while it ran"""
@@ -323,37 +424,58 @@ class Assembler(Thread):
         allow_non_contiguous: bool,
         ready_bytes: int,
         next_ready: bool,
-    ) -> bool:
+    ) -> str:
+        """Why this file should be written now, or "" to leave it accumulating"""
         # Always queue if done
         if file_done:
-            return True
+            return "file-done"
         # A task for this file is already queued or running. An ordinary write does not need a
         # second one: assemble() walks to the end of the decodetable, so it picks up whatever
         # arrives while it runs. Queueing anyway makes each write carry only what landed during
         # the previous one, which collapses into a chain of small writes at high download rates.
         if state := self.write_states.get(nzf.nzf_id):
             if not allow_non_contiguous or state.pending_non_contiguous:
-                return False
+                return ""
         # Always write
         if article_has_first_part and filename_checked and not import_finished:
-            return True
+            return "first-part"
         # Trigger every 5 seconds if next article is decoded or on_disk
         if next_ready and time.monotonic() > self.queued_next_time.get(nzf.nzf_id, 0):
-            return True
-        # Append
+            return "interval"
+        # A forced flush can only be honoured by direct write; append has to write in order
+        if allow_non_contiguous and self.direct_write and nzf.type == "yenc":
+            return "cache-flush"
+        # Both modes require a full contiguous run, so an ordinary write is always sequential.
+        # Triggering on total pending instead would queue a write whose contiguous prefix is a
+        # single article, which is how a file ends up written in fragments.
+        if next_ready and ready_bytes >= (cap := self.pending_cap()) and nzf.has_contiguous_ready_bytes(cap):
+            return "cap"
+        return ""
+
+    def should_force_write(self, ready_bytes: int) -> bool:
+        """Has a file held so much that it must be written even without a full contiguous run?
+
+        Articles arrive out of order across many connections, so a short contiguous prefix is
+        routine and usually transient. Waiting some way past the cap gives the missing articles
+        time to land and keeps writes long and sequential; waiting indefinitely would let one
+        file's backlog grow without bound.
+        """
+        return ready_bytes >= self.eviction_watermark()
+
+    def should_evict_non_contiguous(self, nzf: NzbFile, next_ready: bool) -> bool:
+        """Should a forced write be allowed to leave gaps?
+
+        Only when nothing else is possible: the article at the write position has not arrived, so
+        an ordinary write would write nothing at all. While it has arrived, a short sequential
+        write is preferred over a scattered one, even though it means writing less per call.
+        """
+        if next_ready:
+            return False
+        # Only direct write can leave gaps; append has to write in order, so it must wait
         if not self.direct_write or nzf.type != "yenc":
-            return (
-                next_ready
-                and ready_bytes >= self.assembler_trigger
-                and nzf.has_contiguous_ready_bytes(self.assembler_trigger)
-            )
-        # Direct Write
-        if allow_non_contiguous:
-            return True
-        # Direct Write ready bytes trigger if next is also ready
-        if next_ready and ready_bytes >= self.assembler_trigger:
-            return True
-        return False
+            return False
+        state = self.write_states.get(nzf.nzf_id)
+        return not (state and state.pending_non_contiguous)
 
     @staticmethod
     def should_track_ready_bytes(article: Optional[Article], allow_non_contiguous: bool) -> bool:
@@ -378,7 +500,7 @@ class Assembler(Thread):
             # Set NzbObject and NzbFile objects to None so references
             # from this thread do not keep the objects alive (see #1628)
             nzo = nzf = None
-            nzo, nzf, file_done, allow_non_contiguous, direct_write = self.queue.get()
+            nzo, nzf, file_done, allow_non_contiguous, direct_write, reason = self.queue.get()
             if not nzo:
                 logging.debug("Shutting down assembler")
                 break
@@ -396,7 +518,7 @@ class Assembler(Thread):
 
                     try:
                         logging.debug("Decoding part of %s", filepath)
-                        self.assemble(nzo, nzf, file_done, allow_non_contiguous, direct_write)
+                        self.assemble(nzo, nzf, file_done, allow_non_contiguous, direct_write, reason)
                     except IOError as err:
                         # If job was deleted/finished or in active post-processing, ignore error
                         if not nzo.pp_or_finished:
@@ -480,7 +602,14 @@ class Assembler(Thread):
             sabnzbd.emailer.diskfull_mail()
 
     @staticmethod
-    def assemble(nzo: NzbObject, nzf: NzbFile, file_done: bool, allow_non_contiguous: bool, direct_write: bool) -> None:
+    def assemble(
+        nzo: NzbObject,
+        nzf: NzbFile,
+        file_done: bool,
+        allow_non_contiguous: bool,
+        direct_write: bool,
+        reason: str = "",
+    ) -> None:
         """Assemble a NZF from its table of articles
         1) Partial write: write what we have
         2) Nothing written before: write all

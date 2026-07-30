@@ -23,6 +23,7 @@ import datetime
 import logging
 import os
 import threading
+from itertools import islice
 from typing import Optional, Any
 
 import sabctools
@@ -294,7 +295,7 @@ class NzbFile(TryList):
     @synchronized()
     def has_contiguous_ready_bytes(self, bytes_ready: int) -> bool:
         """Are there at least bytes_ready bytes from assembler_next_index onward ready to write to file contiguously?"""
-        for article in self.decodetable[self.assembler_next_index :]:
+        for article in islice(self.decodetable, self.assembler_next_index, None):
             if not article.decoded:
                 break
             if article.on_disk or article.failed:

@@ -105,8 +105,41 @@ CONFIG_BACKUP_HTTPS = {  # "basename": "associated setting"
 # Constants affecting download performance
 DEF_MAX_ASSEMBLER_QUEUE = 12
 SOFT_ASSEMBLER_QUEUE_LIMIT = 0.5
-# Percentage of cache to use before adding file to assembler
+# Percentage of cache used to derive the point at which the downloader starts being delayed
 ASSEMBLER_TRIGGER_PERCENTAGE = 0.05
+# Nominal decoded article size, used to convert article counts into bytes
+ASSEMBLER_ARTICLE_SIZE = 750_000
+
+# Ceilings on the pending bytes per file, by installed memory.
+#
+# The size itself comes from the in-flight article window (connections x pipelining): articles
+# are fetched in parallel, so the one at the write position routinely lands after articles
+# behind it, and while the batch is narrower than that window the write position stays blocked,
+# the file is written out of order, and every later write is fragmented by the articles already
+# on disk around it.
+#
+# These tiers only stop that estimate asking for more memory than the machine has. Bandwidth is
+# deliberately not an input: it sets how quickly the batch fills, not how many articles are in
+# flight, so a slow link with many connections has the same window as a fast one.
+ASSEMBLER_PENDING_BY_MEMORY = (
+    (2 * GIGI, int(16 * MEBI)),
+    (4 * GIGI, int(24 * MEBI)),
+    (16 * GIGI, int(32 * MEBI)),
+    (64 * GIGI, int(48 * MEBI)),
+)
+ASSEMBLER_MAX_PENDING_BYTES = int(64 * MEBI)
+ASSEMBLER_MIN_PENDING_BYTES = int(8 * MEBI)
+ASSEMBLER_PENDING_CACHE_SHARE = 0.5
+# Fewest files assumed to be assembling at once when dividing up the cache. Guards against one
+# file claiming the whole cache during the burst at the start of a job.
+ASSEMBLER_MIN_CONCURRENT_FILES = 2
+# How far past the cap a blocked file goes before it is written out of order.
+#
+# A file normally has about one in-flight window of data pending: the write position trails the
+# newest arrival by however many articles are outstanding. So the eviction point has to sit well
+# clear of one window, or ordinary lag trips it and the file is written out of order for no
+# reason - just as the articles needed to make a long contiguous run were about to arrive.
+ASSEMBLER_EVICTION_FACTOR = 4
 # Buffers per vectored write. Kept well under IOV_MAX on every platform, and small enough
 # that a single syscall never pins more than a few articles worth of memory.
 ASSEMBLER_VECTOR_CHUNK_SIZE = 16
