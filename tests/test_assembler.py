@@ -56,6 +56,11 @@ from sabnzbd.constants import (
 from sabnzbd.filesystem import Diskspace
 from sabnzbd.nzb import Article, NzbFile, NzbObject
 
+requires_vectored_write = pytest.mark.skipif(
+    not VECTORED_WRITE, reason="platform has no vectored write, so runs are issued per article"
+)
+requires_pwritev = pytest.mark.skipif(not hasattr(os, "pwritev"), reason="pwritev not available on this platform")
+
 
 class ArticlesWritten:
     """Counts articles written, whichever way they reached the disk.
@@ -425,6 +430,7 @@ class TestAssembler:
             Assembler.assemble(self.nzo, self.nzf, file_done=True, allow_non_contiguous=False, direct_write=True)
         self._assert_expected_content(self.nzf, expected)
 
+    @requires_vectored_write
     def test_contiguous_run_is_written_as_one_vector(self, assembler):
         """The whole point of coalescing: fewer syscalls than articles"""
         _data, expected = self._make_request(
@@ -441,6 +447,7 @@ class TestAssembler:
         assert assembler.call_count == 6
         self._assert_expected_content(self.nzf, expected)
 
+    @requires_vectored_write
     def test_run_is_split_at_the_chunk_boundary(self, assembler):
         """A vector is never longer than IOV_CHUNK_SIZE, whatever the run length"""
         article_count = IOV_CHUNK_SIZE * 2 + 3
@@ -472,12 +479,14 @@ class TestAssembler:
         )
         with mock.patch("sabnzbd.assembler.write_vector", wraps=sabnzbd.assembler.write_vector) as mocked_vector:
             Assembler.assemble(self.nzo, self.nzf, file_done=False, allow_non_contiguous=True, direct_write=True)
-        assert [len(call.args[2]) for call in mocked_vector.call_args_list] == [2, 2]
+        if VECTORED_WRITE:
+            assert [len(call.args[2]) for call in mocked_vector.call_args_list] == [2, 2]
 
         self.nzf.decodetable[2].decoded = True
         Assembler.assemble(self.nzo, self.nzf, file_done=True, allow_non_contiguous=False, direct_write=True)
         self._assert_expected_content(self.nzf, expected)
 
+    @requires_pwritev
     def test_short_write_in_the_middle_of_a_vector(self, assembler):
         """A vectored write may consume only part of one buffer, and must resume from there"""
         _data, expected = self._make_request(
@@ -498,6 +507,7 @@ class TestAssembler:
             Assembler.assemble(self.nzo, self.nzf, file_done=True, allow_non_contiguous=False, direct_write=True)
         self._assert_expected_content(self.nzf, expected)
 
+    @requires_vectored_write
     def test_a_long_run_is_one_run_across_several_vectors(self, assembler, caplog):
         """Run length must measure contiguity on disk, not how the vector was chunked, or a
         perfectly sequential file reports a run length capped at IOV_CHUNK_SIZE"""
@@ -582,6 +592,7 @@ class TestAdvanceBuffers:
         assert self._flatten(advance_buffers(buffers, consumed)) == b"abcdefghi"[consumed:]
 
 
+@requires_vectored_write
 class TestWriteVector:
     """Tests for the vectored write helper itself"""
 
@@ -614,12 +625,14 @@ class TestWriteVector:
         assert written == 6
         assert self._content(nzf) == b"\x00\x00\x00\x00aaabbb"
 
+    @requires_pwritev
     def test_a_stalled_write_raises_rather_than_spinning(self, target):
         fd, nzf = target
         with mock.patch("os.pwritev", return_value=0), mock.patch("sabnzbd.assembler._use_pwritev", True):
             with pytest.raises(OSError):
                 write_vector(fd, nzf, [bytearray(b"aaa")], 0)
 
+    @requires_pwritev
     def test_missing_pwritev_demotes_to_writev(self, target):
         fd, nzf = target
         with (
@@ -630,6 +643,7 @@ class TestWriteVector:
         assert written == 6
         assert self._content(nzf) == b"aaabbb"
 
+    @requires_pwritev
     def test_real_errors_are_not_mistaken_for_a_missing_syscall(self, target):
         """ENOSPC must propagate, or a full disk would look like an unsupported platform"""
         fd, nzf = target
