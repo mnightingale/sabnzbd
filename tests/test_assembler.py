@@ -498,6 +498,44 @@ class TestAssembler:
             Assembler.assemble(self.nzo, self.nzf, file_done=True, allow_non_contiguous=False, direct_write=True)
         self._assert_expected_content(self.nzf, expected)
 
+    def test_a_long_run_is_one_run_across_several_vectors(self, assembler, caplog):
+        """Run length must measure contiguity on disk, not how the vector was chunked, or a
+        perfectly sequential file reports a run length capped at IOV_CHUNK_SIZE"""
+        count = IOV_CHUNK_SIZE * 3
+        _data, expected = self._make_request(
+            self.nzf,
+            [
+                self._make_article(self.nzf, offset=index * 5, data=bytearray(f"{index:05d}", "utf-8"))
+                for index in range(count)
+            ],
+        )
+        with caplog.at_level("DEBUG", logger="root"):
+            Assembler.assemble(self.nzo, self.nzf, file_done=True, allow_non_contiguous=False, direct_write=True)
+        self._assert_expected_content(self.nzf, expected)
+
+        written = next(r.getMessage() for r in caplog.records if "Wrote" in r.getMessage())
+        assert f"{count} article(s) over 1 run(s) / 3 write(s)" in written
+        assert f"{float(count):.1f} articles/run" in written
+
+    def test_batch_size_is_logged(self, assembler, caplog):
+        """The articles/run figure is the fragmentation signal when diagnosing write behaviour"""
+        _data, expected = self._make_request(
+            self.nzf,
+            [
+                self._make_article(self.nzf, offset=index * 5, data=bytearray(f"body{index:01d}", "utf-8"))
+                for index in range(6)
+            ],
+        )
+        with caplog.at_level("DEBUG", logger="root"):
+            Assembler.assemble(self.nzo, self.nzf, file_done=True, allow_non_contiguous=False, direct_write=True)
+        self._assert_expected_content(self.nzf, expected)
+
+        written = [record.getMessage() for record in caplog.records if "Wrote" in record.getMessage()]
+        assert len(written) == 1
+        assert "6 article(s)" in written[0]
+        assert "6 article(s) over 1 run(s)" in written[0]
+        assert "6.0 articles/run" in written[0]
+
     def test_finalize_crc32_none_when_article_missing(self, assembler):
         """A file with a missing article crc cannot be verified, so crc32 is None."""
         _data, expected = self._make_request(

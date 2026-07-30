@@ -517,7 +517,6 @@ class Assembler(Thread):
                         continue
 
                     try:
-                        logging.debug("Decoding part of %s", filepath)
                         self.assemble(nzo, nzf, file_done, allow_non_contiguous, direct_write, reason)
                     except IOError as err:
                         # If job was deleted/finished or in active post-processing, ignore error
@@ -627,10 +626,24 @@ class Assembler(Thread):
         run_offset: int = 0
         run_end: int = 0
 
+        # Batch totals, logged once per assemble so write sizes and fragmentation are visible.
+        # A run is a stretch of articles adjacent on disk, which is not the same as a vector: a
+        # long run is split into IOV_CHUNK_SIZE-sized vectors and is still one run. Counting
+        # vectors instead would cap the reported run length at the chunk size and make a
+        # perfectly sequential file look fragmented.
+        batch_runs: int = 0
+        batch_vectors: int = 0
+        batch_articles: int = 0
+        batch_bytes: int = 0
+        written_end: int = -1  # end of the last article written, across vector boundaries
+
         def flush_run():
-            nonlocal run, run_end
+            nonlocal run, run_end, batch_vectors, batch_articles, batch_bytes
             if run:
                 Assembler.write_run(fd, nzf, run, run_offset)
+                batch_vectors += 1
+                batch_articles += len(run)
+                batch_bytes += run_end - run_offset
                 run = []
                 run_end = 0
 
@@ -699,6 +712,11 @@ class Assembler(Thread):
                         break
                     position = offset
 
+                # Tracked before the vector is split, so a run that spans several vectors still
+                # counts once
+                if position != written_end:
+                    batch_runs += 1
+
                 # Only articles landing exactly where the pending run ends can join it
                 if run and (position != run_end or len(run) >= IOV_CHUNK_SIZE):
                     flush_run()
@@ -707,6 +725,7 @@ class Assembler(Thread):
                     run_end = position
                 run.append((idx, article, data))
                 run_end += len(data)
+                written_end = position + len(data)
                 offset += len(data)
 
             # Reached by break as well as by exhausting the decodetable, so a run pending at any
@@ -716,6 +735,21 @@ class Assembler(Thread):
         finally:
             if fd is not None:
                 os.close(fd)
+
+            if batch_articles:
+                # articles/run is the fragmentation signal: close to 1 means writes are scattered
+                # and the vectored path has nothing to coalesce
+                logging.debug(
+                    "Wrote %s of %s in %s article(s) over %s run(s) / %s write(s), " "%.1f articles/run, trigger=%s%s",
+                    to_units(batch_bytes),
+                    nzf.filename,
+                    batch_articles,
+                    batch_runs,
+                    batch_vectors,
+                    batch_articles / batch_runs,
+                    reason or "unknown",
+                    " non-contiguous" if allow_non_contiguous else "",
+                )
 
             # Final steps
             if file_done:
