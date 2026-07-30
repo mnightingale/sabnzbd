@@ -19,6 +19,7 @@
 sabnzbd.assembler - threaded assembly of files
 """
 
+import errno
 import os
 import queue
 import logging
@@ -51,6 +52,7 @@ from sabnzbd.constants import (
     ARTICLE_CACHE_NON_CONTIGUOUS_FLUSH_PERCENTAGE,
     ASSEMBLER_WRITE_INTERVAL,
     ASSEMBLER_TRIGGER_PERCENTAGE,
+    ASSEMBLER_VECTOR_CHUNK_SIZE,
 )
 import sabnzbd.cfg as cfg
 from sabnzbd.nzb import NzbFile, NzbObject, Article
@@ -102,6 +104,65 @@ class NzfWriteState:
             self.pending_non_contiguous = False
             return False, True
         return None
+
+
+# A contiguous run of articles is contiguous on disk, so it can be written with one syscall
+# instead of one per article. Not available on Windows, where WriteFileGather requires
+# page-aligned single-page buffers that decoded articles cannot satisfy.
+VECTORED_WRITE = hasattr(os, "writev")
+
+# pwritev is positional; writev is not and needs the descriptor's file position.
+# hasattr() reflects how CPython was built, which on macOS can differ from the OS it runs on:
+# release builds target 10.15 but pwritev only arrived in 11.0. Demote permanently if the
+# call turns out to be unavailable, rather than trusting the build-time answer.
+_use_pwritev: bool = hasattr(os, "pwritev")
+
+IOV_CHUNK_SIZE = ASSEMBLER_VECTOR_CHUNK_SIZE
+if VECTORED_WRITE and "SC_IOV_MAX" in os.sysconf_names:
+    # AIX and OpenBSD report lower values than Linux; exceeding IOV_MAX fails the call
+    # outright rather than short-writing
+    if (_iov_max := os.sysconf("SC_IOV_MAX")) > 0:
+        IOV_CHUNK_SIZE = min(IOV_CHUNK_SIZE, _iov_max)
+
+
+def advance_buffers(buffers: list, consumed: int) -> list:
+    """Drop the buffers a short write fully consumed and slice the one it stopped inside"""
+    for index, buffer in enumerate(buffers):
+        if consumed < len(buffer):
+            if consumed:
+                return [memoryview(buffer)[consumed:], *buffers[index + 1 :]]
+            return buffers[index:]
+        consumed -= len(buffer)
+    return []
+
+
+def write_vector(fd: int, nzf: NzbFile, buffers: list, offset: int) -> int:
+    """Write buffers back-to-back starting at offset, resuming on short writes"""
+    global _use_pwritev
+
+    written = 0
+    while buffers:
+        if _use_pwritev:
+            try:
+                chunk = os.pwritev(fd, buffers, offset)
+            except (AttributeError, NotImplementedError, OSError) as err:
+                # Anything other than "no such syscall" is a real error, most importantly ENOSPC
+                if isinstance(err, OSError) and err.errno != errno.ENOSYS:
+                    raise
+                logging.info("os.pwritev is not available on this system, falling back to os.writev")
+                _use_pwritev = False
+                continue
+        else:
+            # Must lock since writev uses the file position, so the seek cannot be separated from it
+            with nzf.file_lock:
+                os.lseek(fd, offset, os.SEEK_SET)
+                chunk = os.writev(fd, buffers)
+        if not chunk:
+            raise OSError(errno.EIO, "Vectored write made no progress", nzf.filepath)
+        written += chunk
+        offset += chunk
+        buffers = advance_buffers(buffers, chunk)
+    return written
 
 
 class Assembler(Thread):
@@ -432,6 +493,18 @@ class Assembler(Thread):
         skipped: bool = False  # have any articles been skipped
         offset: int = 0  # sequential offset for append writes
 
+        # Articles waiting to be written as one vectored call, and the file offset they start at
+        run: list[tuple[int, Article, bytearray]] = []
+        run_offset: int = 0
+        run_end: int = 0
+
+        def flush_run():
+            nonlocal run, run_end
+            if run:
+                Assembler.write_run(fd, nzf, run, run_offset)
+                run = []
+                run_end = 0
+
         try:
             # Resume assembly from where we got to previously
             for idx in range(nzf.assembler_next_index, len(decodetable)):
@@ -449,6 +522,9 @@ class Assembler(Thread):
 
                 # Skip already written articles
                 if article.on_disk or article.failed:
+                    # The pending run holds lower indexes, so it has to commit before
+                    # assembler_next_index can be advanced past this one
+                    flush_run()
                     if fd is not None and article.decoded_size is not None:
                         # Move the file descriptor forward past this article
                         offset += article.decoded_size
@@ -487,13 +563,27 @@ class Assembler(Thread):
                         break
 
                 if direct_write and article.can_direct_write:
-                    offset += Assembler.write(fd, idx, nzf, article, data)
+                    position = article.data_begin
                 else:
                     if direct_write and skipped and not file_done:
                         # If we have already skipped an article then need to abort, unless this is the final assemble
                         break
-                    offset += Assembler.write(fd, idx, nzf, article, data, offset)
+                    position = offset
 
+                # Only articles landing exactly where the pending run ends can join it
+                if run and (position != run_end or len(run) >= IOV_CHUNK_SIZE):
+                    flush_run()
+                if not run:
+                    run_offset = position
+                    run_end = position
+                run.append((idx, article, data))
+                run_end += len(data)
+                offset += len(data)
+
+            # Reached by break as well as by exhausting the decodetable, so a run pending at any
+            # stop point still gets written. Deliberately not in the finally: if a write raised,
+            # retrying it here would mark articles on_disk that never made it
+            flush_run()
         finally:
             if fd is not None:
                 os.close(fd)
@@ -558,6 +648,34 @@ class Assembler(Thread):
                 logging.debug("Unwanted extension ... aborting")
                 nzo.fail_msg = T("Aborted, unwanted extension detected")
                 sabnzbd.NzbQueue.end_job(nzo)
+
+    @staticmethod
+    def write_run(fd: int, nzf: NzbFile, run: list[tuple[int, Article, bytearray]], offset: int) -> None:
+        """Write a run of articles that are contiguous on disk, starting at offset.
+
+        A run of two or more is issued as a single vectored write, which releases the GIL once
+        instead of once per article and lets the bookkeeping be done under one lock acquisition.
+        """
+        if len(run) < 2 or not VECTORED_WRITE:
+            for nzf_index, article, data in run:
+                offset += Assembler.write(fd, nzf_index, nzf, article, data, offset)
+            return
+
+        write_vector(fd, nzf, [data for _, _, data in run], offset)
+
+        written = 0
+        for _, article, data in run:
+            article.on_disk = True
+            written += len(data)
+        sabnzbd.Assembler.update_ready_bytes(nzf, -written)
+
+        with nzf.lock:
+            # Advance past every article of the run that keeps the file sequential from the start,
+            # stopping at the first index that is not the one still awaited
+            for nzf_index, _, _ in run:
+                if nzf.assembler_next_index != nzf_index:
+                    break
+                nzf.assembler_next_index = nzf_index + 1
 
     @staticmethod
     def write(

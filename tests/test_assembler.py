@@ -19,6 +19,7 @@
 tests.test_assembler - Testing functions in assembler.py
 """
 
+import errno
 import os
 import queue
 import threading
@@ -30,10 +31,33 @@ from zlib import crc32
 import pytest
 
 import sabnzbd
-from sabnzbd.assembler import Assembler
+import sabnzbd.assembler
+from sabnzbd.assembler import IOV_CHUNK_SIZE, VECTORED_WRITE, Assembler, advance_buffers, write_vector
 from sabnzbd.constants import GIGI
 from sabnzbd.filesystem import Diskspace
 from sabnzbd.nzb import Article, NzbFile, NzbObject
+
+
+class ArticlesWritten:
+    """Counts articles written, whichever way they reached the disk.
+
+    A contiguous run is issued as one vectored write, so counting calls to Assembler.write
+    would report how many syscalls happened rather than how many articles were assembled.
+    """
+
+    def __init__(self, write_mock: mock.Mock, write_run_mock: mock.Mock):
+        self.write = write_mock
+        self.write_run = write_run_mock
+
+    @property
+    def call_count(self) -> int:
+        count = self.write.call_count
+        for call in self.write_run.call_args_list:
+            run = call.args[2]
+            if len(run) >= 2 and VECTORED_WRITE:
+                # Vectored, so it did not delegate to Assembler.write and is not counted yet
+                count += len(run)
+        return count
 
 
 class TestAssembler:
@@ -76,8 +100,11 @@ class TestAssembler:
                 self.nzf.articles.clear()
                 self.nzf.decodetable.clear()
 
-                with mock.patch.object(Assembler, "write", wraps=Assembler.write) as mocked_assembler_write:
-                    yield mocked_assembler_write
+                with (
+                    mock.patch.object(Assembler, "write", wraps=Assembler.write) as mocked_write,
+                    mock.patch.object(Assembler, "write_run", wraps=Assembler.write_run) as mocked_write_run,
+                ):
+                    yield ArticlesWritten(mocked_write, mocked_write_run)
 
                 # All articles should be marked on_disk
                 for article in self.nzf.decodetable:
@@ -346,6 +373,112 @@ class TestAssembler:
         Assembler.assemble(self.nzo, self.nzf, file_done=True, allow_non_contiguous=False, direct_write=True)
         self._assert_expected_content(self.nzf, expected)
 
+    @pytest.mark.parametrize(
+        "write_path",
+        [
+            pytest.param(
+                {"_use_pwritev": True},
+                id="pwritev",
+                marks=pytest.mark.skipif(not hasattr(os, "pwritev"), reason="pwritev not available"),
+            ),
+            pytest.param(
+                {"_use_pwritev": False},
+                id="writev_lseek",
+                marks=pytest.mark.skipif(not VECTORED_WRITE, reason="no vectored write on this platform"),
+            ),
+            pytest.param({"VECTORED_WRITE": False}, id="per_article"),
+        ],
+    )
+    def test_write_paths_produce_identical_files(self, assembler, write_path):
+        """pwritev, writev + lseek and the per-article loop must all produce the same file.
+
+        macOS 10.15 has no pwritev and Windows has no vectored write at all, but CI has both,
+        so the fallbacks only get exercised by forcing the binding.
+        """
+        _data, expected = self._make_request(
+            self.nzf,
+            [
+                self._make_article(self.nzf, offset=index * 5, data=bytearray(f"body{index:01d}", "utf-8"))
+                for index in range(9)
+            ],
+        )
+        with mock.patch.multiple("sabnzbd.assembler", **write_path):
+            Assembler.assemble(self.nzo, self.nzf, file_done=True, allow_non_contiguous=False, direct_write=True)
+        self._assert_expected_content(self.nzf, expected)
+
+    def test_contiguous_run_is_written_as_one_vector(self, assembler):
+        """The whole point of coalescing: fewer syscalls than articles"""
+        _data, expected = self._make_request(
+            self.nzf,
+            [
+                self._make_article(self.nzf, offset=index * 5, data=bytearray(f"body{index:01d}", "utf-8"))
+                for index in range(6)
+            ],
+        )
+        with mock.patch("sabnzbd.assembler.write_vector", wraps=sabnzbd.assembler.write_vector) as mocked_vector:
+            Assembler.assemble(self.nzo, self.nzf, file_done=True, allow_non_contiguous=False, direct_write=True)
+        assert mocked_vector.call_count == 1
+        assert len(mocked_vector.call_args.args[2]) == 6
+        assert assembler.call_count == 6
+        self._assert_expected_content(self.nzf, expected)
+
+    def test_run_is_split_at_the_chunk_boundary(self, assembler):
+        """A vector is never longer than IOV_CHUNK_SIZE, whatever the run length"""
+        article_count = IOV_CHUNK_SIZE * 2 + 3
+        _data, expected = self._make_request(
+            self.nzf,
+            [
+                self._make_article(self.nzf, offset=index * 5, data=bytearray(f"{index:05d}", "utf-8"))
+                for index in range(article_count)
+            ],
+        )
+        with mock.patch("sabnzbd.assembler.write_vector", wraps=sabnzbd.assembler.write_vector) as mocked_vector:
+            Assembler.assemble(self.nzo, self.nzf, file_done=True, allow_non_contiguous=False, direct_write=True)
+        assert mocked_vector.call_count == 3
+        assert [len(call.args[2]) for call in mocked_vector.call_args_list] == [IOV_CHUNK_SIZE, IOV_CHUNK_SIZE, 3]
+        assert assembler.call_count == article_count
+        self._assert_expected_content(self.nzf, expected)
+
+    def test_gap_breaks_the_run(self, assembler):
+        """Articles either side of a not-yet-decoded gap are not adjacent, so must not share a vector"""
+        _data, expected = self._make_request(
+            self.nzf,
+            [
+                self._make_article(self.nzf, offset=0, data=bytearray(b"aaaaa")),
+                self._make_article(self.nzf, offset=5, data=bytearray(b"bbbbb")),
+                self._make_article(self.nzf, offset=10, data=bytearray(b"ccccc"), decoded=False),
+                self._make_article(self.nzf, offset=15, data=bytearray(b"ddddd")),
+                self._make_article(self.nzf, offset=20, data=bytearray(b"eeeee")),
+            ],
+        )
+        with mock.patch("sabnzbd.assembler.write_vector", wraps=sabnzbd.assembler.write_vector) as mocked_vector:
+            Assembler.assemble(self.nzo, self.nzf, file_done=False, allow_non_contiguous=True, direct_write=True)
+        assert [len(call.args[2]) for call in mocked_vector.call_args_list] == [2, 2]
+
+        self.nzf.decodetable[2].decoded = True
+        Assembler.assemble(self.nzo, self.nzf, file_done=True, allow_non_contiguous=False, direct_write=True)
+        self._assert_expected_content(self.nzf, expected)
+
+    def test_short_write_in_the_middle_of_a_vector(self, assembler):
+        """A vectored write may consume only part of one buffer, and must resume from there"""
+        _data, expected = self._make_request(
+            self.nzf,
+            [
+                self._make_article(self.nzf, offset=index * 5, data=bytearray(f"body{index:01d}", "utf-8"))
+                for index in range(7)
+            ],
+        )
+        real_pwritev = os.pwritev
+
+        def short_pwritev(fd, buffers, offset):
+            # Stop partway through the second buffer, so recovery has to slice mid-buffer
+            head = [buffers[0], memoryview(buffers[1])[:2]] if len(buffers) > 1 else buffers[:1]
+            return real_pwritev(fd, head, offset)
+
+        with mock.patch("os.pwritev", side_effect=short_pwritev):
+            Assembler.assemble(self.nzo, self.nzf, file_done=True, allow_non_contiguous=False, direct_write=True)
+        self._assert_expected_content(self.nzf, expected)
+
     def test_finalize_crc32_none_when_article_missing(self, assembler):
         """A file with a missing article crc cannot be verified, so crc32 is None."""
         _data, expected = self._make_request(
@@ -361,6 +494,95 @@ class TestAssembler:
         self.nzf.decodetable[1].crc32 = None
         self.nzf.finalize_crc32()
         assert self.nzf.crc32 is None
+
+
+class TestAdvanceBuffers:
+    """Tests for short-write recovery on a partially consumed vector"""
+
+    @staticmethod
+    def _flatten(buffers: list) -> bytes:
+        return b"".join(bytes(buffer) for buffer in buffers)
+
+    def test_nothing_consumed_returns_the_same_buffers(self):
+        buffers = [bytearray(b"aaa"), bytearray(b"bbb")]
+        assert self._flatten(advance_buffers(buffers, 0)) == b"aaabbb"
+
+    def test_whole_first_buffer_consumed(self):
+        buffers = [bytearray(b"aaa"), bytearray(b"bbb")]
+        assert self._flatten(advance_buffers(buffers, 3)) == b"bbb"
+
+    def test_stopped_inside_a_buffer(self):
+        buffers = [bytearray(b"aaa"), bytearray(b"bbb"), bytearray(b"ccc")]
+        assert self._flatten(advance_buffers(buffers, 4)) == b"bbccc"
+
+    def test_everything_consumed(self):
+        buffers = [bytearray(b"aaa"), bytearray(b"bbb")]
+        assert advance_buffers(buffers, 6) == []
+
+    @pytest.mark.parametrize("consumed", range(10))
+    def test_remainder_is_always_the_untouched_tail(self, consumed):
+        buffers = [bytearray(b"abc"), bytearray(b"de"), bytearray(b"fghi")]
+        assert self._flatten(advance_buffers(buffers, consumed)) == b"abcdefghi"[consumed:]
+
+
+class TestWriteVector:
+    """Tests for the vectored write helper itself"""
+
+    @pytest.fixture
+    def target(self, tmp_path):
+        nzf = mock.Mock()
+        nzf.file_lock = threading.RLock()
+        nzf.filepath = str(tmp_path / "out.bin")
+        fd = os.open(nzf.filepath, os.O_CREAT | os.O_WRONLY, 0o666)
+        try:
+            yield fd, nzf
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _content(nzf) -> bytes:
+        with open(nzf.filepath, "rb") as handle:
+            return handle.read()
+
+    def test_writes_buffers_back_to_back_at_offset(self, target):
+        fd, nzf = target
+        written = write_vector(fd, nzf, [bytearray(b"aaa"), bytearray(b"bbb")], 4)
+        assert written == 6
+        assert self._content(nzf) == b"\x00\x00\x00\x00aaabbb"
+
+    def test_writev_fallback_matches_pwritev(self, target):
+        fd, nzf = target
+        with mock.patch("sabnzbd.assembler._use_pwritev", False):
+            written = write_vector(fd, nzf, [bytearray(b"aaa"), bytearray(b"bbb")], 4)
+        assert written == 6
+        assert self._content(nzf) == b"\x00\x00\x00\x00aaabbb"
+
+    def test_a_stalled_write_raises_rather_than_spinning(self, target):
+        fd, nzf = target
+        with mock.patch("os.pwritev", return_value=0), mock.patch("sabnzbd.assembler._use_pwritev", True):
+            with pytest.raises(OSError):
+                write_vector(fd, nzf, [bytearray(b"aaa")], 0)
+
+    def test_missing_pwritev_demotes_to_writev(self, target):
+        fd, nzf = target
+        with (
+            mock.patch("sabnzbd.assembler._use_pwritev", True),
+            mock.patch("os.pwritev", side_effect=OSError(errno.ENOSYS, "nope")),
+        ):
+            written = write_vector(fd, nzf, [bytearray(b"aaa"), bytearray(b"bbb")], 0)
+        assert written == 6
+        assert self._content(nzf) == b"aaabbb"
+
+    def test_real_errors_are_not_mistaken_for_a_missing_syscall(self, target):
+        """ENOSPC must propagate, or a full disk would look like an unsupported platform"""
+        fd, nzf = target
+        with (
+            mock.patch("sabnzbd.assembler._use_pwritev", True),
+            mock.patch("os.pwritev", side_effect=OSError(errno.ENOSPC, "full")),
+        ):
+            with pytest.raises(OSError) as err:
+                write_vector(fd, nzf, [bytearray(b"aaa")], 0)
+        assert err.value.errno == errno.ENOSPC
 
 
 class TestWriteSerialisation:

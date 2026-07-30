@@ -107,6 +107,9 @@ DEF_MAX_ASSEMBLER_QUEUE = 12
 SOFT_ASSEMBLER_QUEUE_LIMIT = 0.5
 # Percentage of cache to use before adding file to assembler
 ASSEMBLER_TRIGGER_PERCENTAGE = 0.05
+# Buffers per vectored write. Kept well under IOV_MAX on every platform, and small enough
+# that a single syscall never pins more than a few articles worth of memory.
+ASSEMBLER_VECTOR_CHUNK_SIZE = 16
 ASSEMBLER_DELAY_FACTOR_DIRECT_WRITE = 1.5
 ASSEMBLER_WRITE_INTERVAL = 5.0
 NNTP_BUFFER_SIZE = int(256 * KIBI)
