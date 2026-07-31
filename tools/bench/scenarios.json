@@ -1,0 +1,65 @@
+{
+  "defaults": {
+    "server": {
+      "host": "nntp",
+      "port": 6791,
+      "connections": 20,
+      "ssl": 1,
+      "username": "",
+      "password": ""
+    },
+    "config": {
+      "cache_limit": "1G",
+      "direct_unpack": 0,
+      "enable_par_cleanup": 1,
+      "pause_on_post_processing": 0,
+      "no_dupes": 0,
+      "auto_disconnect": 0
+    },
+    "timeout": 1800
+  },
+
+  "prewarm": {
+    "nzb": "https://sabnzbd.org/tests/test_download_100MB.nzb",
+    "pp": 0
+  },
+
+  "scenarios": [
+    {
+      "name": "1000MB-dl",
+      "nzb": "https://sabnzbd.org/tests/test_download_1000MB.nzb",
+      "pp": 0
+    },
+    {
+      "name": "1000MB-full",
+      "nzb": "https://sabnzbd.org/tests/test_download_1000MB.nzb",
+      "pp": 3
+    },
+    {
+      "name": "1000MB-dl-lowcache",
+      "nzb": "https://sabnzbd.org/tests/test_download_1000MB.nzb",
+      "pp": 0,
+      "config": {
+        "cache_limit": "256M"
+      }
+    },
+    {
+      "name": "10GB-dl",
+      "nzb": "https://sabnzbd.org/tests/test_download_10GB.nzb",
+      "pp": 0
+    },
+    {
+      "name": "10GB-full",
+      "nzb": "https://sabnzbd.org/tests/test_download_10GB.nzb",
+      "pp": 3
+    },
+    {
+      "name": "10GB-dl-lowcache",
+      "nzb": "https://sabnzbd.org/tests/test_download_10GB.nzb",
+      "pp": 0,
+      "config": {
+        "cache_limit": "256M"
+      }
+    }
+  ]
+}
