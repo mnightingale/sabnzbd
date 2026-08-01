@@ -131,7 +131,8 @@ class Server:
         self.ssl: bool = use_ssl
         self.ssl_verify: int = ssl_verify
         self.ssl_ciphers: str = ssl_ciphers
-        self.ssl_context: Optional[ssl.SSLContext] = None
+        # Either a sabctools.TLSContext or, when aws-lc is unavailable, an ssl.SSLContext
+        self.ssl_context: Optional[ssl.SSLContext | sabctools.TLSContext] = None
         self.required: bool = required
         self.optional: bool = optional
         self.retention: int = retention

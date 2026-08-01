@@ -418,6 +418,7 @@ def print_modules():
         logging.info("SABCTools module (v%s)... found!", sabnzbd.decoder.SABCTOOLS_VERSION)
         logging.info("SABCTools module is using SIMD set: %s", sabnzbd.decoder.SABCTOOLS_SIMD)
         logging.info("SABCTools module is linked to OpenSSL: %s", sabnzbd.decoder.SABCTOOLS_OPENSSL_LINKED)
+        logging.info("SABCTools module is linked to AWS-LC: %s", sabnzbd.decoder.SABCTOOLS_AWS_LC_LINKED)
 
         # Check if we managed to link, warning for now
         # It won't work on OpenSSL < 1.1.1 anyway, so we skip the check there

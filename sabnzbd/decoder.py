@@ -39,6 +39,7 @@ try:
     SABCTOOLS_VERSION = sabctools.__version__
     SABCTOOLS_SIMD = sabctools.simd
     SABCTOOLS_OPENSSL_LINKED = sabctools.openssl_linked
+    SABCTOOLS_AWS_LC_LINKED = sabctools.aws_lc_linked
     # Verify version to at least match minor version by splitting on "."
     if SABCTOOLS_VERSION.split(".")[:2] != SABCTOOLS_VERSION_REQUIRED.split(".")[:2]:
         raise ImportError

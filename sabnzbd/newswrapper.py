@@ -43,6 +43,90 @@ from sabnzbd.decorators import synchronized, DOWNLOADER_LOCK
 socket.setdefaulttimeout(DEF_NETWORKING_TIMEOUT)
 
 
+def create_tls_context(server) -> "sabctools.TLSContext":
+    """Build the aws-lc backed TLS context for a server.
+
+    Certificate validation: 0=Disabled, 1=Minimal, 2=Medium, 3=Strict.
+    aws-lc has no equivalent of VERIFY_X509_STRICT/VERIFY_X509_PARTIAL_CHAIN, so
+    Medium and Strict end up with the same verification behaviour.
+    """
+    verify = server.ssl_verify > 0
+    return sabctools.TLSContext(
+        # Uses the same sources as the ssl module, so locally injected certificates
+        # (firewalls, virus scanners) keep working
+        ca_certs=sabctools.collect_ca_certs() if verify else b"",
+        verify_mode=int(verify),
+        # Only verify hostname when Medium or Strict
+        check_hostname=server.ssl_verify > 1,
+        # Support at least TLSv1.2+ ciphers, as some essential ones are removed by default in Python 3.10
+        ciphers=server.ssl_ciphers or "HIGH",
+        # Allow anything the library has, or demand a modern TLS (1.2 or higher)
+        minimum_version=(
+            ssl.TLSVersion.MINIMUM_SUPPORTED if sabnzbd.cfg.allow_old_ssl_tls() else ssl.TLSVersion.TLSv1_2
+        ),
+        # Ciphers cannot be selected for TLSv1.3, so a custom cipher-string forces TLSv1.2 as the maximum
+        maximum_version=ssl.TLSVersion.TLSv1_2 if server.ssl_ciphers else ssl.TLSVersion.MAXIMUM_SUPPORTED,
+    )
+
+
+def create_ssl_context(server) -> ssl.SSLContext:
+    """Build the stdlib ssl context for a server, used when aws-lc is unavailable"""
+    # Set Certificate validation: 0=Disabled, 1=Minimal, 2=Medium, 3=Strict
+    ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+
+    # Allow those pesky virus-scanners to inject their scanning certificates
+    if server.ssl_verify <= 2:
+        ssl_context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+        # This flag is only available for Python 3.10 and above
+        if hasattr(ssl, "VERIFY_X509_PARTIAL_CHAIN"):
+            ssl_context.verify_flags &= ~ssl.VERIFY_X509_PARTIAL_CHAIN
+    else:
+        # Make sure it's enabled for Strict mode, also pre-3.13
+        ssl_context.verify_flags |= ssl.VERIFY_X509_STRICT
+        # This flag is only available for Python 3.10 and above
+        if hasattr(ssl, "VERIFY_X509_PARTIAL_CHAIN"):
+            ssl_context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+
+    # Only verify hostname when Medium or Strict
+    if server.ssl_verify <= 1:
+        ssl_context.check_hostname = False
+
+    # Certificates optional
+    if server.ssl_verify <= 0:
+        ssl_context.verify_mode = ssl.CERT_NONE
+
+    # Did the user set a custom cipher-string?
+    if server.ssl_ciphers:
+        # At their own risk, socket will error out in case it was invalid
+        ssl_context.set_ciphers(server.ssl_ciphers)
+        # Python does not allow setting ciphers on TLSv1.3, so have to force TLSv1.2 as the maximum
+        ssl_context.maximum_version = ssl.TLSVersion.TLSv1_2
+    else:
+        # Support at least TLSv1.2+ ciphers, as some essential ones are removed by default in Python 3.10
+        ssl_context.set_ciphers("HIGH")
+
+    if sabnzbd.cfg.allow_old_ssl_tls():
+        # Allow anything that the system has
+        ssl_context.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+    else:
+        # We want a modern TLS (1.2 or higher), so we disallow older protocol versions (<= TLS 1.1)
+        ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+
+    return ssl_context
+
+
+def create_context(server):
+    """Prefer the aws-lc context, which reads and writes without holding the GIL"""
+    if sabctools.aws_lc_linked:
+        try:
+            return create_tls_context(server)
+        except ssl.SSLError as e:
+            # aws-lc understands only a subset of the OpenSSL cipher-string language,
+            # so a custom cipher-string can leave the stdlib as the only option
+            logging.warning("Could not use the optimized TLS implementation for %s, falling back (%s)", server.host, e)
+    return create_ssl_context(server)
+
+
 class NNTPPermanentError(Exception):
     def __init__(self, msg: str, code: int):
         super().__init__()
@@ -300,9 +384,15 @@ class NewsWrapper:
         if self.decoder is None:
             return 0, None
 
-        # Receive data into the decoder pre-allocated buffer
-        if not nbytes and self.nntp.nw.server.ssl and not self.nntp.nw.blocking and sabctools.openssl_linked:
-            # Use patched version when downloading
+        # Receive data into the decoder pre-allocated buffer.
+        # sabctools.TLSSocket already drains every available TLS record per call, only the
+        # stdlib SSLSocket needs the patched version to get past its 16K per-call limit.
+        if (
+            not nbytes
+            and not self.nntp.nw.blocking
+            and sabctools.openssl_linked
+            and isinstance(self.nntp.sock, ssl.SSLSocket)
+        ):
             bytes_recv = sabctools.unlocked_ssl_recv_into(self.nntp.sock, self.decoder)
         else:
             bytes_recv = self.nntp.sock.recv_into(self.decoder, nbytes=nbytes)
@@ -549,50 +639,13 @@ class NNTP:
 
         # Create SSL-context if it is needed and not created yet
         if self.nw.server.ssl and not self.nw.server.ssl_context:
-            # Setup the SSL socket
-            # Set Certificate validation: 0=Disabled, 1=Minimal, 2=Medium, 3=Strict
-            self.nw.server.ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-
-            # Allow those pesky virus-scanners to inject their scanning certificates
-            if self.nw.server.ssl_verify <= 2:
-                self.nw.server.ssl_context.verify_flags &= ~ssl.VERIFY_X509_STRICT
-                # This flag is only available for Python 3.10 and above
-                if hasattr(ssl, "VERIFY_X509_PARTIAL_CHAIN"):
-                    self.nw.server.ssl_context.verify_flags &= ~ssl.VERIFY_X509_PARTIAL_CHAIN
-            else:
-                # Make sure it's enabled for Strict mode, also pre-3.13
-                self.nw.server.ssl_context.verify_flags |= ssl.VERIFY_X509_STRICT
-                # This flag is only available for Python 3.10 and above
-                if hasattr(ssl, "VERIFY_X509_PARTIAL_CHAIN"):
-                    self.nw.server.ssl_context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
-
-            # Only verify hostname when Medium or Strict
-            if self.nw.server.ssl_verify <= 1:
-                self.nw.server.ssl_context.check_hostname = False
-
-            # Certificates optional
-            if self.nw.server.ssl_verify <= 0:
-                self.nw.server.ssl_context.verify_mode = ssl.CERT_NONE
-
-            # Did the user set a custom cipher-string?
-            if self.nw.server.ssl_ciphers:
-                # At their own risk, socket will error out in case it was invalid
-                self.nw.server.ssl_context.set_ciphers(self.nw.server.ssl_ciphers)
-                # Python does not allow setting ciphers on TLSv1.3, so have to force TLSv1.2 as the maximum
-                self.nw.server.ssl_context.maximum_version = ssl.TLSVersion.TLSv1_2
-            else:
-                # Support at least TLSv1.2+ ciphers, as some essential ones are removed by default in Python 3.10
-                self.nw.server.ssl_context.set_ciphers("HIGH")
-
-            if sabnzbd.cfg.allow_old_ssl_tls():
-                # Allow anything that the system has
-                self.nw.server.ssl_context.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
-            else:
-                # We want a modern TLS (1.2 or higher), so we disallow older protocol versions (<= TLS 1.1)
-                self.nw.server.ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+            self.nw.server.ssl_context = create_context(self.nw.server)
 
         # Create socket and store fileno of the socket
-        self.sock: socket.socket | ssl.SSLSocket = socket.socket(self.addrinfo.family, self.addrinfo.type)
+        # Quoted, TLSSocket only exists when sabctools was built with aws-lc
+        self.sock: socket.socket | ssl.SSLSocket | sabctools.TLSSocket = socket.socket(
+            self.addrinfo.family, self.addrinfo.type
+        )
         self.fileno: int = self.sock.fileno()
 
         # Open the connection in a separate thread due to avoid blocking
@@ -653,7 +706,11 @@ class NNTP:
 
     def error(self, error: OSError):
         raw_error_str = str(error)
-        if "SSL23_GET_SERVER_HELLO" in str(error) or "SSL3_GET_RECORD" in raw_error_str:
+        # The first two are OpenSSL wording, the last two are what aws-lc reports
+        if any(
+            marker in raw_error_str
+            for marker in ("SSL23_GET_SERVER_HELLO", "SSL3_GET_RECORD", "WRONG_VERSION_NUMBER", "HTTP_REQUEST")
+        ):
             error = T("This server does not allow SSL on this port")
 
         # Catch certificate errors
@@ -662,7 +719,8 @@ class NNTP:
             logging.info("Certificate error for host %s: %s", self.nw.server.host, raw_error_str)
 
             # Try to see if we should catch this message and provide better text
-            if "hostname" in raw_error_str:
+            # aws-lc capitalises its reasons, so the match has to be case-insensitive
+            if "hostname" in raw_error_str.lower():
                 raw_error_str = T(
                     "Certificate hostname mismatch: the server hostname is not listed in the certificate. This is a server issue."
                 )

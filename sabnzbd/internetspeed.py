@@ -43,7 +43,7 @@ NR_CONNECTIONS = 5
 TIME_LIMIT = 3
 
 
-def internetspeed_worker(secure_sock: ssl.SSLSocket, socket_speed: dict[ssl.SSLSocket, float]):
+def internetspeed_worker(secure_sock, socket_speed: dict):
     """Worker to perform the requests in parallel"""
     secure_sock.sendall(TEST_REQUEST.encode())
     empty_buffer = memoryview(sabctools.bytearray_malloc(BUFFER_SIZE))
@@ -55,7 +55,10 @@ def internetspeed_worker(secure_sock: ssl.SSLSocket, socket_speed: dict[ssl.SSLS
     while diff_time < TIME_LIMIT:
         if data_received < TEST_FILE_SIZE:
             try:
-                new_bytes = sabctools.unlocked_ssl_recv_into(secure_sock, empty_buffer)
+                if isinstance(secure_sock, ssl.SSLSocket):
+                    new_bytes = sabctools.unlocked_ssl_recv_into(secure_sock, empty_buffer)
+                else:
+                    new_bytes = secure_sock.recv_into(empty_buffer)
                 if not new_bytes:
                     break
                 data_received += new_bytes
@@ -77,14 +80,18 @@ def internetspeed_worker(secure_sock: ssl.SSLSocket, socket_speed: dict[ssl.SSLS
 
 def internetspeed_interal(family: int = socket.AF_UNSPEC) -> float:
     """Measure internet speed from a test-download using our optimized SSL-code"""
-    context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
     socket_speed = {}
 
-    # Allow those pesky virus-scanners to inject their scanning certificates
-    # This is enabled by default because it's just a speedtest anyway
-    if hasattr(ssl, "VERIFY_X509_PARTIAL_CHAIN"):
-        context.verify_flags &= ~ssl.VERIFY_X509_PARTIAL_CHAIN
-        context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    if sabctools.aws_lc_linked:
+        context = sabctools.TLSContext(ca_certs=sabctools.collect_ca_certs())
+    else:
+        context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+
+        # Allow those pesky virus-scanners to inject their scanning certificates
+        # This is enabled by default because it's just a speedtest anyway
+        if hasattr(ssl, "VERIFY_X509_PARTIAL_CHAIN"):
+            context.verify_flags &= ~ssl.VERIFY_X509_PARTIAL_CHAIN
+            context.verify_flags &= ~ssl.VERIFY_X509_STRICT
 
     try:
         if not (addrinfo := get_fastest_addrinfo(TEST_HOSTNAME, TEST_PORT, DEF_NETWORKING_SHORT_TIMEOUT, family)):
