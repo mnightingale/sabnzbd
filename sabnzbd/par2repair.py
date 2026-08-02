@@ -47,7 +47,7 @@ import sabnzbd
 import sabnzbd.cfg as cfg
 from sabnzbd.constants import GIGI, MEBI, PAR2_MINIMUM_MEMORY, PAR2_RESERVED_MEMORY, Status
 from sabnzbd.filesystem import get_ext, globber_full
-from sabnzbd.misc import format_time_string, get_memory
+from sabnzbd.misc import format_time_string, get_cpus, get_memory
 from sabnzbd.nzb.object import NzbObject
 
 
@@ -119,7 +119,7 @@ class RepairSession:
             extrafiles=extrafiles,
             basepath=basepath,
             memory_limit=memory_limit(),
-            threads=cfg.par2_threads(),
+            threads=cfg.par2_threads() or get_cpus(),
             file_threads=cfg.par2_file_threads(),
         )
         self.repairer.progress_callback = self._on_progress
