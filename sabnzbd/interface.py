@@ -987,6 +987,9 @@ SPECIAL_VALUE_LIST = (
     "ssdp_broadcast_interval",
     "unrar_parameters",
     "outgoing_nntp_ip",
+    "par2_memory_limit",
+    "par2_threads",
+    "par2_file_threads",
 )
 SPECIAL_LIST_LIST = (
     "rss_odd_titles",

@@ -45,29 +45,44 @@ import sabctools
 
 import sabnzbd
 import sabnzbd.cfg as cfg
-from sabnzbd.constants import GIGI, MEBI, Status
+from sabnzbd.constants import GIGI, MEBI, PAR2_MINIMUM_MEMORY, PAR2_RESERVED_MEMORY, Status
 from sabnzbd.filesystem import get_ext, globber_full
 from sabnzbd.misc import format_time_string, get_memory
 from sabnzbd.nzb.object import NzbObject
 
 
-def par2_memory_limit() -> int:
+def memory_limit() -> int:
     """Bytes par2 may use for its output buffers.
 
-    Same calculation par2 makes for itself - half the memory, rounded down to whole
-    megabytes, capped at 1GB on 32-bit builds, falling back to 256MB when the total
-    cannot be determined - but taken from get_memory(), which clamps to any cgroup
+    cfg.par2_memory_limit takes KMGT notation like cache_limit does, and wins when set.
+    Left blank it follows the calculation par2 makes for itself - half the memory it
+    believes it has - except sourced from get_memory(), which clamps to any cgroup
     limit. par2 asks the OS for the host's physical memory, so left to its own devices
     it would size against memory a container is not allowed to touch.
+
+    Either way the result is held to what is actually available, minus headroom for the
+    rest of SABnzbd, in the same way ArticleCache bounds its cache.
     """
-    memory = get_memory() or int(256 * MEBI)
-    megabytes = int(memory / MEBI) // 2
+    memory = get_memory()
+
+    if configured := cfg.par2_memory_limit.get_int():
+        limit = configured
+    else:
+        # par2's own default, on the memory we are really allowed to use
+        limit = (memory or int(256 * MEBI)) // 2
+
+    # Skipped when memory could not be determined, or the clamp would be meaningless
+    if memory:
+        limit = min(limit, max(0, memory - PAR2_RESERVED_MEMORY))
 
     # par2 limits itself on 32-bit to avoid exhausting the addressable space
     if sys.maxsize <= 2**32:
-        megabytes = min(megabytes, int(GIGI / MEBI))
+        limit = min(limit, int(GIGI))
 
-    return int(max(megabytes, 1) * MEBI)
+    # Never zero: par2 reads that as "work it out yourself", which would undo the clamp
+    # above and let it size against the host. The floor also keeps it usable - par2 does
+    # fewer blocks per pass as the budget shrinks, so too little just makes it crawl.
+    return max(limit, PAR2_MINIMUM_MEMORY)
 
 
 class RepairSession:
@@ -103,7 +118,9 @@ class RepairSession:
             self.parfile,
             extrafiles=extrafiles,
             basepath=basepath,
-            memory_limit=par2_memory_limit(),
+            memory_limit=memory_limit(),
+            threads=cfg.par2_threads(),
+            file_threads=cfg.par2_file_threads(),
         )
         self.repairer.progress_callback = self._on_progress
         self.repairer.file_done_callback = self._on_file_done

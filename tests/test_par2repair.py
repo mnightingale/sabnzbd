@@ -26,8 +26,8 @@ from unittest import mock
 import pytest
 
 import sabnzbd.cfg as cfg
-from sabnzbd.constants import MEBI
-from sabnzbd.par2repair import _blocks_from_articles, article_backed_blocks, par2_memory_limit
+from sabnzbd.constants import GIGI, MEBI, PAR2_MINIMUM_MEMORY, PAR2_RESERVED_MEMORY
+from sabnzbd.par2repair import _blocks_from_articles, article_backed_blocks, memory_limit
 
 
 class FakeArticle:
@@ -212,26 +212,49 @@ class TestPar2MemoryLimit:
 
     def test_half_of_available_memory(self):
         with mock.patch("sabnzbd.par2repair.get_memory", return_value=int(8192 * MEBI)):
-            assert par2_memory_limit() == int(4096 * MEBI)
+            assert memory_limit() == int(4096 * MEBI)
+
+    def test_configured_limit_wins(self):
+        with mock.patch.object(cfg.par2_memory_limit, "get_int", return_value=int(512 * MEBI)):
+            with mock.patch("sabnzbd.par2repair.get_memory", return_value=int(8192 * MEBI)):
+                assert memory_limit() == int(512 * MEBI)
+
+    def test_blank_falls_back_to_the_calculation(self):
+        with mock.patch.object(cfg.par2_memory_limit, "get_int", return_value=0):
+            with mock.patch("sabnzbd.par2repair.get_memory", return_value=int(8192 * MEBI)):
+                assert memory_limit() == int(4096 * MEBI)
+
+    def test_configured_limit_is_still_bounded(self):
+        """A value larger than the machine has must not be handed to par2 whole."""
+        with mock.patch.object(cfg.par2_memory_limit, "get_int", return_value=int(64 * GIGI)):
+            with mock.patch("sabnzbd.par2repair.get_memory", return_value=int(8192 * MEBI)):
+                assert memory_limit() == int(8192 * MEBI) - PAR2_RESERVED_MEMORY
+
+    def test_never_zero_on_a_tiny_budget(self):
+        """Reserved headroom can exceed the whole budget; par2 reads 0 as "decide for
+        yourself", which would throw away the clamp entirely."""
+        with mock.patch.object(cfg.par2_memory_limit, "get_int", return_value=0):
+            with mock.patch("sabnzbd.par2repair.get_memory", return_value=int(128 * MEBI)):
+                assert memory_limit() == PAR2_MINIMUM_MEMORY
 
     def test_respects_a_cgroup_limit(self):
         # get_memory() already returns min(physical, cgroup), so a container with a
-        # 512MB budget must not be handed half of the host's 32GB
-        with mock.patch("sabnzbd.par2repair.get_memory", return_value=int(512 * MEBI)):
-            assert par2_memory_limit() == int(256 * MEBI)
+        # 2GB budget must not be handed half of the host's 32GB
+        with mock.patch("sabnzbd.par2repair.get_memory", return_value=int(2 * GIGI)):
+            assert memory_limit() == int(GIGI)
 
     def test_falls_back_when_memory_is_unknown(self):
-        # Same 256MB assumption par2 makes for itself
+        # Same 256MB assumption par2 makes for itself, and no clamp to apply
         with mock.patch("sabnzbd.par2repair.get_memory", return_value=0):
-            assert par2_memory_limit() == int(128 * MEBI)
+            assert memory_limit() == int(128 * MEBI)
 
     def test_never_returns_zero(self):
         with mock.patch("sabnzbd.par2repair.get_memory", return_value=1024):
-            assert par2_memory_limit() == int(MEBI)
+            assert memory_limit() == PAR2_MINIMUM_MEMORY
 
     def test_capped_on_32bit(self):
         with mock.patch("sabnzbd.par2repair.get_memory", return_value=int(16384 * MEBI)):
             with mock.patch.object(sys, "maxsize", 2**31 - 1):
-                assert par2_memory_limit() == int(1024 * MEBI)
+                assert memory_limit() == int(1024 * MEBI)
             # 64-bit gets the full half
-            assert par2_memory_limit() == int(8192 * MEBI)
+            assert memory_limit() == int(8192 * MEBI)
