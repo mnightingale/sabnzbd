@@ -1307,7 +1307,7 @@ def par2_verify_and_repair(
 
     # Read before repairing: repair() consumes the state these are derived from
     used_joinables = par2repair.joinable_matches(session, joinables)
-    used_for_repair = _duplicate_sources(session)
+    used_for_repair = _consumed_extra_files(session, joinables)
 
     result = session.repair()
 
@@ -1336,17 +1336,27 @@ def _par2_extra_files(parfile: str, nzo: NzbObject, setname: str) -> list[str]:
     return [path for path in candidates if os.path.isfile(path) and get_ext(path) != ".par2"]
 
 
-def _duplicate_sources(session) -> list[str]:
-    """Extra files that only duplicate data we already have, safe to delete.
+def _consumed_extra_files(session, joinables: list[str]) -> list[str]:
+    """Extra files par2 took blocks from that are not part of the finished set.
 
-    Replaces the old "duplicate data blocks" line match.
+    Obfuscated or partially-good copies that par2 read data out of would otherwise be
+    left on disk, where a later stage can mistake them for another archive set. Three
+    kinds of file are excluded: the set's own targets, anything par2 is about to rename
+    into a target, and the joinables, which par_cleanup removes via used_joinables.
+
+    Must be called before repair(), which applies the renames and clears the state.
     """
-    duplicates = []
-    for entry in session.repairer.files:
-        found = entry.get("found")
-        if found and entry.get("complete") and found != entry.get("target"):
-            duplicates.append(os.path.basename(found))
-    return duplicates
+    targets = {os.path.basename(entry["target"]) for entry in session.repairer.files}
+    renamed = {os.path.basename(path) for path in session.repairer.renames}
+    joinable_names = {os.path.basename(path) for path in joinables}
+
+    consumed = []
+    for filename in session.blocks_from:
+        name = os.path.basename(filename)
+        if name in targets or name in renamed or name in joinable_names or name in consumed:
+            continue
+        consumed.append(name)
+    return consumed
 
 
 def _handle_unusable_parfile(nzo: NzbObject, setname: str, session) -> tuple[bool, bool, list[str], list[str]]:

@@ -287,6 +287,81 @@ class TestPar2Repair:
 
 
 @pytest.mark.usefixtures("clean_cache_dir")
+class TestPar2RepairResume:
+    """The 'not enough recovery blocks, go and fetch more' path.
+
+    The repairer is kept alive on the NzbObject between the two attempts, so the second
+    one only loads the new par2 files and repairs - it must not verify again.
+    """
+
+    TEST_DIR = "tests/data/par2repair/basic"
+
+    def _stage(self, with_volumes: bool):
+        temp_test_dir = os.path.join(SAB_CACHE_DIR, "par2repair_resume")
+        os.makedirs(os.path.join(temp_test_dir, JOB_ADMIN), exist_ok=True)
+        for file in glob.glob(self.TEST_DIR + "/*"):
+            name = os.path.basename(file)
+            # Withhold everything carrying recovery blocks for the first attempt
+            if not with_volumes and name.endswith(".par2") and name != "par2test.par2":
+                continue
+            shutil.copy(file, temp_test_dir)
+        return temp_test_dir
+
+    def _make_nzo(self, temp_test_dir):
+        nzo = mock.Mock()
+        nzo.download_path = temp_test_dir
+        nzo.admin_path = os.path.join(temp_test_dir, JOB_ADMIN)
+        nzo.fail_msg = ""
+        nzo.extrapars = {"par2test": []}
+        nzo.par2packs = {"par2test": None}
+        # Real dict: par2repair stores live repair sessions here
+        nzo.par2_sessions = {}
+        nzo.get_extra_blocks.return_value = 5
+        return nzo
+
+    def test_resume_reuses_the_verification(self, caplog):
+        temp_test_dir = self._stage(with_volumes=False)
+        nzo = self._make_nzo(temp_test_dir)
+        parfile = os.path.join(temp_test_dir, "par2test.par2")
+
+        try:
+            with caplog.at_level(logging.DEBUG):
+                finished, readd, _, _ = newsunpack.par2_verify_and_repair(parfile, nzo, "par2test", [])
+
+            # Nothing to repair with yet, so more blocks are requested
+            assert not finished
+            assert readd
+            nzo.get_extra_blocks.assert_called()
+
+            # The session survives, carrying the verification with it
+            session = nzo.par2_sessions["par2test"]
+            assert session.verified
+            assert session.repairer.recovery_block_count == 0
+
+            # SABnzbd downloads the remaining par2 files. Note they are *not* added to
+            # extrapars: handle_par2() drops them from there once they complete, so the
+            # resume path has to find them on disk.
+            self._stage(with_volumes=True)
+            assert not nzo.extrapars["par2test"]
+
+            stages = []
+            session.repairer.progress_callback = lambda stage, filename, percent: stages.append(stage)
+
+            with caplog.at_level(logging.DEBUG):
+                finished, readd, _, _ = newsunpack.par2_verify_and_repair(parfile, nzo, "par2test", [])
+
+            assert finished
+            assert not readd
+            # The expensive part must not have been repeated
+            assert "verifying" not in stages
+            assert "repairing" in stages
+            # And the session is released once the set is done
+            assert not nzo.par2_sessions
+        finally:
+            shutil.rmtree(temp_test_dir, ignore_errors=True)
+
+
+@pytest.mark.usefixtures("clean_cache_dir")
 class TestRarUnpack:
     @staticmethod
     def _create_test_nzo(temp_dir, filename: str = "test.nzb", password: Optional[str] = None):
