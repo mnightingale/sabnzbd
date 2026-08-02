@@ -43,6 +43,7 @@ from typing import Optional
 import sabctools
 
 import sabnzbd
+import sabnzbd.cfg as cfg
 from sabnzbd.constants import Status
 from sabnzbd.filesystem import get_ext, globber_full
 from sabnzbd.misc import format_time_string
@@ -135,6 +136,29 @@ class RepairSession:
 
     # -- work --------------------------------------------------------------------
 
+    def apply_known_blocks(self):
+        """Hand par2 the blocks the download already vouched for, if enabled.
+
+        Purely an optimisation, so anything that goes wrong here is logged and dropped:
+        par2 then reads and hashes the files itself, which is merely the slower answer
+        rather than a wrong one.
+        """
+        try:
+            known = article_backed_blocks(self.nzo, self.repairer)
+            if not known:
+                return
+            self.repairer.set_known_blocks(known)
+        except Exception:
+            logging.info("Could not use article checksums for %s, verifying in full", self.setname, exc_info=True)
+            return
+
+        logging.info(
+            "Quick verify: %s of %s files in set %s covered by verified articles",
+            len(known),
+            self.repairer.recoverable_file_count,
+            self.setname,
+        )
+
     def verify(self) -> sabctools.Par2Result:
         self.nzo.status = Status.VERIFYING
         self.stage_start = time.time()
@@ -147,7 +171,12 @@ class RepairSession:
         elapsed = format_time_string(time.time() - self.stage_start)
         if result == sabctools.Par2Result.SUCCESS:
             self.nzo.set_unpack_info("Repair", T("[%s] Verified in %s, all files correct") % (self.setname, elapsed))
-            logging.info("Verified %s in %s, all files correct", self.setname, elapsed)
+            logging.info(
+                "Verified %s in %s, all files correct (%s file(s) taken from article checksums)",
+                self.setname,
+                elapsed,
+                self.repairer.quick_verified_files,
+            )
         else:
             self.nzo.set_unpack_info("Repair", T("[%s] Verified in %s, repair is required") % (self.setname, elapsed))
             logging.info(
@@ -277,6 +306,77 @@ def cancel(nzo: NzbObject):
         if session.repairer is not None:
             logging.info("Cancelling par2 repair of %s", setname)
             session.repairer.cancel()
+
+
+def article_backed_blocks(nzo: NzbObject, repairer: sabctools.Par2Repairer) -> dict[str, list[bool]]:
+    """Which par2 blocks are already covered by articles that checked out on arrival.
+
+    Every article is checksummed against its yEnc trailer as it is decoded, so for the
+    parts of a file built from articles that matched, there is nothing on disk worth
+    reading again. Handing those blocks to par2 lets it skip hashing them entirely.
+
+    Requires direct write: only then does article.data_begin describe where the bytes
+    actually landed. Without it the assembler packs articles in completion order, so a
+    file with holes has offsets that do not line up with par2's blocks.
+    """
+    if not cfg.par2_quick_verify() or not cfg.direct_write():
+        return {}
+
+    blocksize = repairer.block_size
+    if not blocksize:
+        return {}
+
+    by_name = {nzf.filename: nzf for nzf in nzo.finished_files}
+    known = {}
+    for entry in repairer.files:
+        # Deliberately not filtered on entry["exists"]: par2 only sets that while
+        # scanning the source files, so straight after load() it is false for
+        # everything. _blocks_from_articles checks the file on disk instead.
+        if nzf := by_name.get(entry["name"]):
+            if blocks := _blocks_from_articles(nzf, blocksize, entry["blocks"], entry["target"]):
+                known[entry["name"]] = blocks
+    return known
+
+
+def _blocks_from_articles(nzf, blocksize: int, blockcount: int, target: str) -> Optional[list[bool]]:
+    """Mark the blocks of one file that good articles fully cover."""
+    try:
+        filesize = os.path.getsize(target)
+    except OSError:
+        return None
+
+    # crc32 is None when the decoded data did not match the yEnc trailer, so it is a
+    # positive statement that the article is bad rather than merely unknown
+    ranges = sorted(
+        (article.data_begin, article.data_begin + article.data_size)
+        for article in nzf.decodetable
+        if article.crc32 is not None and article.on_disk and article.data_begin is not None and article.data_size
+    )
+    if not ranges:
+        return None
+
+    # Merge, so a block spanning several consecutive articles still counts as covered
+    merged = [list(ranges[0])]
+    for start, end in ranges[1:]:
+        if start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+
+    good = []
+    index = 0
+    for block in range(blockcount):
+        start = block * blocksize
+        # par2 pads the final block, so only the bytes the file actually has must be covered
+        end = min(start + blocksize, filesize)
+        if start >= filesize:
+            good.append(False)
+            continue
+        while index < len(merged) and merged[index][1] <= start:
+            index += 1
+        good.append(index < len(merged) and merged[index][0] <= start and merged[index][1] >= end)
+
+    return good
 
 
 def parfile_paths(nzo: NzbObject) -> list[str]:
