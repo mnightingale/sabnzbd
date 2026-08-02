@@ -1300,6 +1300,7 @@ def par2_verify_and_repair(
             return False, False, [], []
 
     if not session.verified:
+        session.apply_known_blocks()
         session.verify()
 
     if not session.repairer.repair_possible:

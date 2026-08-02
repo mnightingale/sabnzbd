@@ -162,6 +162,8 @@ class TestPar2Repair:
         nzo.extrapars = {"test": []}
         nzo.par2packs = {"test": None}
         nzo.par2_sessions = {}
+        # Real list: quick verify walks these to map articles onto par2 blocks
+        nzo.finished_files = []
 
         for file in glob.glob(test_dir + "/*.par2"):
             # Simple NZF mock for the filename
@@ -317,6 +319,8 @@ class TestPar2RepairResume:
         nzo.par2packs = {"par2test": None}
         # Real dict: par2repair stores live repair sessions here
         nzo.par2_sessions = {}
+        # Real list: quick verify walks these to map articles onto par2 blocks
+        nzo.finished_files = []
         nzo.get_extra_blocks.return_value = 5
         return nzo
 
