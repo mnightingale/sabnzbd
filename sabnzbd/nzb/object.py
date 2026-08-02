@@ -289,6 +289,10 @@ class NzbObject(TryList):
         self.meta = {}
         self.servercount: dict[str, int] = {}  # Dict to keep bytes per server
         self.direct_unpacker: Optional[sabnzbd.directunpacker.DirectUnpacker] = None  # The DirectUnpacker instance
+        # Live par2 repair sessions per set name, see sabnzbd.par2repair. Deliberately
+        # not in NzbObjectSaver: they hold a C extension object that cannot be pickled,
+        # and a repairer is only meaningful while the job is being worked on.
+        self.par2_sessions: dict[str, sabnzbd.par2repair.RepairSession] = {}
         self.bytes: int = 0  # Original bytesize
         self.bytes_par2: int = 0  # Bytes in par2 files
         self.bytes_downloaded: int = 0  # Downloaded byte
@@ -1787,6 +1791,7 @@ class NzbObject(TryList):
         self.url_tries = 0
         self.to_be_removed = False
         self.direct_unpacker = None
+        self.par2_sessions = {}
         self.filenames = set()
         for nzf in self.files_table.values():
             if nzf.filepath:

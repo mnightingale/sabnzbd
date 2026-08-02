@@ -1317,7 +1317,7 @@ def par2_verify_and_repair(
             session.add_parfiles(par2repair.parfile_paths(nzo, setname))
         except sabctools.Par2Error:
             logging.info("Could not load the extra par2 files for %s", setname, exc_info=True)
-            par2repair.discard(nzo.nzo_id, setname)
+            par2repair.discard(nzo, setname)
             return False, False, [], []
 
     if not session.verified:
@@ -1333,11 +1333,11 @@ def par2_verify_and_repair(
     result = session.repair()
 
     if result == sabctools.Par2Result.SUCCESS:
-        par2repair.discard(nzo.nzo_id, setname)
+        par2repair.discard(nzo, setname)
         return True, False, used_joinables, used_for_repair
 
     _report_repair_failure(nzo, setname, result)
-    par2repair.discard(nzo.nzo_id, setname)
+    par2repair.discard(nzo, setname)
     return False, False, [], []
 
 
@@ -1378,7 +1378,7 @@ def _handle_unusable_parfile(nzo: NzbObject, setname: str, session) -> tuple[boo
     """
     msg = T("Invalid par2 files or invalid PAR2 parameters, cannot verify or repair")
     logging.info("%s (set %s)", msg, setname)
-    par2repair.discard(nzo.nzo_id, setname)
+    par2repair.discard(nzo, setname)
 
     # Look for the smallest par2 file we have not tried yet
     block_table = {nzf.blocks: nzf for nzf in nzo.extrapars[setname] if not nzf.completed}
@@ -1412,7 +1412,7 @@ def _request_more_blocks(nzo: NzbObject, setname: str, session) -> tuple[bool, b
     nzo.fail_msg = msg
     nzo.set_unpack_info("Repair", msg, setname)
     nzo.status = Status.FAILED
-    par2repair.discard(nzo.nzo_id, setname)
+    par2repair.discard(nzo, setname)
     return False, False, [], []
 
 

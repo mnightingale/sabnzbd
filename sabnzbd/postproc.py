@@ -31,6 +31,7 @@ import rarfile
 from typing import Optional
 
 import sabnzbd
+import sabnzbd.par2repair
 from sabnzbd.newsunpack import (
     unpacker,
     par2_repair,
@@ -241,6 +242,8 @@ class PostProcessor(Thread):
         for nzo in self.history_queue:
             if nzo.nzo_id in nzo_ids:
                 nzo.abort_direct_unpacker()
+                # par2 runs in-process now, so it is asked to stop rather than killed
+                sabnzbd.par2repair.cancel(nzo)
                 if nzo.pp_active:
                     nzo.pp_active = False
                     try:
@@ -695,6 +698,9 @@ def process_job(nzo: NzbObject) -> bool:
         # Be aware that series/generic/date sorting may move a single file into a folder containing other files
         workdir_complete = one_file_or_folder(workdir_complete)
         workdir_complete = os.path.normpath(workdir_complete)
+
+    # Release any par2 repairer still held for this job
+    sabnzbd.par2repair.discard(nzo)
 
     # Clean up the NZO data
     try:

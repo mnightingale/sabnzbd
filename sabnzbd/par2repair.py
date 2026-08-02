@@ -29,9 +29,10 @@ the queue to fetch more par2 files, and when it comes back the retained repairer
 take the new blocks through load_more() and go straight to repairing. Verification -
 the expensive part - happens once per set rather than once per attempt.
 
-Sessions live here rather than on the NzbObject because NzbObject is pickled into
-__ADMIN__ and a C extension object cannot be pickled. They are keyed by nzo_id and set
-name, and dropped by discard() when a job leaves post-processing.
+Sessions hang off the job as nzo.par2_sessions, keyed by set name, in the same way as
+nzo.direct_unpacker: absent from NzbObjectSaver so they are never pickled, and reset by
+NzbObject.__setstate__. Tying their lifetime to the job means a removed or abandoned
+job cannot leak a repairer.
 """
 
 import logging
@@ -45,10 +46,6 @@ import sabnzbd
 from sabnzbd.constants import Status
 from sabnzbd.misc import format_time_string
 from sabnzbd.nzb.object import NzbObject
-
-# Live sessions, keyed by (nzo_id, setname). See the module docstring for why these
-# cannot simply hang off the NzbObject.
-_SESSIONS: dict[tuple[str, str], "RepairSession"] = {}
 
 
 class RepairSession:
@@ -226,35 +223,36 @@ class RepairSession:
 
 def get_session(nzo: NzbObject, setname: str, parfile: str) -> Optional[RepairSession]:
     """Return the live session for this set, if the parfile still matches."""
-    session = _SESSIONS.get((nzo.nzo_id, setname))
+    session = nzo.par2_sessions.get(setname)
     if session is not None and session.parfile == parfile and session.repairer is not None:
         return session
     if session is not None:
         # A different base par2 file means starting over
-        discard(nzo.nzo_id, setname)
+        discard(nzo, setname)
     return None
 
 
 def create_session(nzo: NzbObject, setname: str, parfile: str) -> RepairSession:
     session = RepairSession(nzo, setname, parfile)
-    _SESSIONS[(nzo.nzo_id, setname)] = session
+    nzo.par2_sessions[setname] = session
     return session
 
 
-def discard(nzo_id: str, setname: Optional[str] = None):
+def discard(nzo: NzbObject, setname: Optional[str] = None):
     """Drop sessions for a job, or for one of its sets."""
-    for key in [k for k in _SESSIONS if k[0] == nzo_id and (setname is None or k[1] == setname)]:
-        _SESSIONS.pop(key).close()
+    for name in [setname] if setname else list(nzo.par2_sessions):
+        if session := nzo.par2_sessions.pop(name, None):
+            session.close()
 
 
-def cancel(nzo_id: str):
+def cancel(nzo: NzbObject):
     """Ask any in-flight verify or repair for this job to stop.
 
     Called from PostProcessor.cancel_pp, where killing the par2 subprocess used to be.
     """
-    for key, session in _SESSIONS.items():
-        if key[0] == nzo_id and session.repairer is not None:
-            logging.info("Cancelling par2 repair of %s", key[1])
+    for setname, session in nzo.par2_sessions.items():
+        if session.repairer is not None:
+            logging.info("Cancelling par2 repair of %s", setname)
             session.repairer.cancel()
 
 
