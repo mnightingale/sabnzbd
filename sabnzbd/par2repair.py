@@ -37,6 +37,7 @@ job cannot leak a repairer.
 
 import logging
 import os
+import sys
 import time
 from typing import Optional
 
@@ -44,10 +45,38 @@ import sabctools
 
 import sabnzbd
 import sabnzbd.cfg as cfg
-from sabnzbd.constants import Status
+from sabnzbd.constants import GIGI, MEBI, PAR2_MINIMUM_MEMORY, PAR2_RESERVED_MEMORY, Status
 from sabnzbd.filesystem import get_ext, globber_full
-from sabnzbd.misc import format_time_string
+from sabnzbd.misc import format_time_string, get_memory
 from sabnzbd.nzb.object import NzbObject
+
+
+def memory_limit() -> int:
+    """Bytes par2 may use for its output buffers.
+
+    par2 asks the OS for the host's physical memory and takes half of it, so left to its
+    own devices it would size against memory a container is not allowed to touch. The
+    figure here comes from get_memory(), which clamps to any cgroup limit, and is a
+    quarter rather than a half because the article cache has its own claim on the same
+    memory and the rest of SABnzbd has to live in what is left.
+    """
+    memory = get_memory()
+
+    # A quarter of what we are really allowed to use, or of a guess at it
+    limit = (memory or int(512 * MEBI)) // 4
+
+    # Skipped when memory could not be determined, or the clamp would be meaningless
+    if memory:
+        limit = min(limit, max(0, memory - PAR2_RESERVED_MEMORY - cfg.cache_limit.get_int()))
+
+    # par2 limits itself on 32-bit to avoid exhausting the addressable space
+    if sys.maxsize <= 2**32:
+        limit = min(limit, int(GIGI))
+
+    # Never zero: par2 reads that as "work it out yourself", which would undo the clamp
+    # above and let it size against the host. The floor also keeps it usable - par2 does
+    # fewer blocks per pass as the budget shrinks, so too little just makes it crawl.
+    return max(limit, PAR2_MINIMUM_MEMORY)
 
 
 class RepairSession:
@@ -83,6 +112,7 @@ class RepairSession:
             self.parfile,
             extrafiles=extrafiles,
             basepath=basepath,
+            memory_limit=memory_limit(),
         )
         self.repairer.progress_callback = self._on_progress
         self.repairer.file_done_callback = self._on_file_done
