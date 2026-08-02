@@ -260,7 +260,6 @@ SKIN_TEXT = {
     "confirmWithoutSavingPrompt": TT("Changes have not been saved, and will be lost."),
     "explain-sessionExpire": TT("When your IP address changes or SABnzbd is restarted the session will expire."),
     "opt-enable_7zip": TT("Enable 7zip"),
-    "explain-getpar2turbo": TT("Speed up repairs by installing par2cmdline-turbo, it is available for many platforms."),
     "version": TT("Version"),
     "uptime": TT("Uptime"),
     "backup": TT("Backup"),  #: Indicates that server is Backup server in Status page

@@ -89,13 +89,11 @@ PAR2_FILENAME_RE = re.compile(r'"([^"]+)"')
 
 # Constants
 SEVENZIP_ID = b"7z\xbc\xaf'\x1c"
-PAR2_COMMAND = None
 RAR_COMMAND = None
 NICE_COMMAND = None
 SEVENZIP_COMMAND = None
 IONICE_COMMAND = None
 RAR_PROBLEM = False
-PAR2_TURBO = True
 RAR_VERSION = 0
 SEVENZIP_VERSION = ""
 
@@ -118,24 +116,14 @@ def find_programs(curdir: str):
             # Regular x64 version
             sabnzbd.newsunpack.RAR_COMMAND = check(curdir, "macos/unrar/unrar")
 
-        # The par2 and 7zip binary are universal2
-        sabnzbd.newsunpack.PAR2_COMMAND = check(curdir, "macos/par2/par2")
+        # The 7zip binary is universal2
         sabnzbd.newsunpack.SEVENZIP_COMMAND = check(curdir, "macos/7zip/7zz")
 
     if sabnzbd.WINDOWS:
-        if sabnzbd.WINDOWSARM64:
-            # ARM64 version of par2
-            sabnzbd.newsunpack.PAR2_COMMAND = check(curdir, "win/par2/arm64/par2.exe")
-        else:
-            # Regular x64 version
-            sabnzbd.newsunpack.PAR2_COMMAND = check(curdir, "win/par2/par2.exe")
-
         # UnRAR has no arm64 version, so we skip it also for 7zip
         sabnzbd.newsunpack.RAR_COMMAND = check(curdir, "win/unrar/UnRAR.exe")
         sabnzbd.newsunpack.SEVENZIP_COMMAND = check(curdir, "win/7zip/7za.exe")
     else:
-        if not sabnzbd.newsunpack.PAR2_COMMAND:
-            sabnzbd.newsunpack.PAR2_COMMAND = find_on_path("par2")
         if not sabnzbd.newsunpack.RAR_COMMAND:
             sabnzbd.newsunpack.RAR_COMMAND = find_on_path(
                 (
@@ -176,9 +164,6 @@ def find_programs(curdir: str):
 
         # Run check on 7zip
         sabnzbd.newsunpack.SEVENZIP_VERSION = sevenzip_check(sabnzbd.newsunpack.SEVENZIP_COMMAND)
-
-        # Run check on par2-multicore
-        sabnzbd.newsunpack.PAR2_TURBO = par2_turbo_check(sabnzbd.newsunpack.PAR2_COMMAND)
 
     # Set the path for rarfile
     rarfile.UNRAR_TOOL = sabnzbd.newsunpack.RAR_COMMAND
@@ -1461,7 +1446,6 @@ def create_env(nzo: Optional[NzbObject] = None, extra_env_fields: dict[str, Any]
             "program_dir": sabnzbd.DIR_PROG,
             "api_key": cfg.api_key(),
             "api_url": f"{sabnzbd.BROWSER_URL}/api",
-            "par2_command": sabnzbd.newsunpack.PAR2_COMMAND,
             "rar_command": sabnzbd.newsunpack.RAR_COMMAND,
             "7zip_command": sabnzbd.newsunpack.SEVENZIP_COMMAND,
             "version": sabnzbd.__version__,
@@ -1650,16 +1634,6 @@ def sevenzip_check(sevenzip: str) -> str:
         except Exception:
             pass
     return ""
-
-
-def par2_turbo_check(par2_path: str) -> bool:
-    """Detect if we have the turbo par2 variant"""
-    try:
-        if "par2cmdline-turbo" in run_command([par2_path, "-V"]):
-            return True
-    except Exception:
-        pass
-    return False
 
 
 def is_sfv_file(myfile: str) -> bool:

@@ -61,6 +61,12 @@ class RepairSession:
         self.loaded_parfiles: set[str] = set()
         self.verified = False
 
+        # Files par2 scanned and how many blocks it took from each, filled in by
+        # file_done_callback. This is what identifies the files on disk that actually
+        # contributed data - joinable .001/.002 parts in particular, which par2 consumes
+        # without ever reporting them as a source file.
+        self.blocks_from: dict[str, int] = {}
+
         # Progress bookkeeping, reset per stage
         self.stage_start = time.time()
         self.last_percent = -1
@@ -77,6 +83,7 @@ class RepairSession:
             basepath=basepath,
         )
         self.repairer.progress_callback = self._on_progress
+        self.repairer.file_done_callback = self._on_file_done
 
         # par2 pulls in sibling volume files by name during load()
         self.loaded_parfiles.add(os.path.abspath(self.parfile))
@@ -122,6 +129,7 @@ class RepairSession:
         if self.repairer is not None:
             self.repairer.cancel()
             self.repairer.progress_callback = None
+            self.repairer.file_done_callback = None
             self.repairer = None
 
     # -- work --------------------------------------------------------------------
@@ -184,6 +192,14 @@ class RepairSession:
         return max(0, self.repairer.missing_block_count - self.repairer.recovery_block_count)
 
     # -- progress ----------------------------------------------------------------
+
+    def _on_file_done(self, filename: str, blocks_found: int, blocks_total: int):
+        """One call per file par2 finishes scanning."""
+        try:
+            if blocks_found:
+                self.blocks_from[filename] = blocks_found
+        except Exception:
+            logging.debug("Failed to record par2 block source", exc_info=True)
 
     def _on_progress(self, stage: str, filename: str, percent: int):
         """Called from par2's worker threads; keep it short.
@@ -267,17 +283,19 @@ def parfile_paths(nzo: NzbObject, setname: str) -> list[str]:
 
 
 def joinable_matches(session: RepairSession, joinables: list[str]) -> list[str]:
-    """Joinables par2 used as a source, so par_cleanup can remove them.
+    """Joinables par2 took data from, so par_cleanup can remove them.
 
-    par2 reports a match against the file it found on disk; when that file is one of
-    the .001/.002 parts, the whole joinable set was consumed.
+    Driven by file_done_callback rather than the source-file list: when par2 rebuilds a
+    file out of .001/.002 parts, those parts are extra files it read blocks from, never
+    source files it matched by name, so they do not appear in repairer.files at all.
     """
     if not joinables:
         return []
 
+    by_name = {os.path.basename(path): path for path in joinables}
     used = []
-    for entry in session.repairer.files:
-        found = entry.get("found")
-        if found and found in joinables and found not in used:
-            used.append(found)
+    for filename in session.blocks_from:
+        if path := by_name.get(os.path.basename(filename)):
+            if path not in used:
+                used.append(path)
     return used

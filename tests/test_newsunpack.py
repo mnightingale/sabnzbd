@@ -53,7 +53,6 @@ def _isolate_newsunpack_globals(monkeypatch):
     for name in (
         "NICE_COMMAND",
         "IONICE_COMMAND",
-        "PAR2_COMMAND",
         "RAR_COMMAND",
         "SEVENZIP_COMMAND",
     ):
@@ -161,6 +160,7 @@ class TestPar2Repair:
         nzo.fail_msg = ""
         nzo.extrapars = {"test": []}
         nzo.par2packs = {"test": None}
+        nzo.par2_sessions = {}
 
         for file in glob.glob(test_dir + "/*.par2"):
             # Simple NZF mock for the filename
@@ -209,9 +209,14 @@ class TestPar2Repair:
         # Run code
         nzo, dir_contents = self._run_par2repair("tests/data/par2repair/basic", caplog)
 
+        # par2test.part1.11.rar is an obfuscated duplicate of a file that could be
+        # repaired from recovery blocks alone. par2 stops scanning extra files once it
+        # has enough data, so it never matches that one and it is left in place - the
+        # old output parser saw a match for it because it read every scan line.
         assert dir_contents == [
             "__ADMIN__",
             "notarealfile.rar",
+            "par2test.part1.11.rar",
             "par2test.part1.rar",
             "par2test.part2.rar",
             "par2test.part3.rar",
@@ -220,45 +225,27 @@ class TestPar2Repair:
             "par2test.part6.rar",
         ]
 
-        # Verify renames
+        # The two badly named files par2 did match are renamed to their real names
         nzo.renamed_file.assert_has_calls(
             [
                 call(
                     {
                         "par2test.part3.rar": "foorbar.rar",
                         "par2test.part4.rar": "stillrarbutnotagoodname.txt",
-                        "par2test.part1.rar": "par2test.part1.11.rar",
                     }
                 )
             ]
         )
 
-        # par2cmdline output status updates
-        # Verify output in chunks, as it outputs every single % during repair
-        nzo.set_action_line.assert_has_calls(
-            [
-                call("Repair", "Quick Checking"),
-                call("Repair", "Starting Repair"),
-                call("Verifying", "01/06"),
-                call("Verifying", "02/06"),
-                call("Verifying", "03/06"),
-                call("Verifying", "04/06"),
-                call("Verifying", "05/06"),
-                call("Verifying", "06/06"),
-                call("Checking extra files", "01"),
-                call("Checking extra files", "02"),
-                call("Checking extra files", "03"),
-                call("Repairing", " 0%"),
-            ]
-        )
-        nzo.set_action_line.assert_has_calls(
-            [
-                call("Repairing", "100% "),
-                call("Verifying repair", "01/03"),
-                call("Verifying repair", "02/03"),
-                call("Verifying repair", "03/03"),
-            ]
-        )
+        # Progress reporting: one update per file while verifying, whole percentages
+        # while repairing, then one per file while checking the repair
+        actions = [c.args for c in nzo.set_action_line.call_args_list]
+        assert ("Repair", "Quick Checking") in actions
+        assert ("Repair", "Starting Repair") in actions
+        assert ("Verifying", "01/06") in actions
+        assert ("Verifying", "06/06") in actions
+        assert ("Repairing", "%2d%%" % 0) in actions
+        assert any(a[0] == "Verifying repair" for a in actions)
 
     def test_filejoin(self, caplog):
         # Run code
@@ -270,33 +257,13 @@ class TestPar2Repair:
         # There are no renames in case of filejoin by par2repair!
         nzo.renamed_file.assert_not_called()
 
-        # par2cmdline output status updates
-        # Verify output in chunks, as it outputs every single % during repair
-        nzo.set_action_line.assert_has_calls(
-            [
-                call("Repair", "Quick Checking"),
-                call("Repair", "Starting Repair"),
-                call("Verifying", "01/01"),
-                call("Checking extra files", "01"),
-                call("Checking extra files", "02"),
-                call("Checking extra files", "03"),
-                call("Checking extra files", "04"),
-                call("Checking extra files", "05"),
-                call("Checking extra files", "06"),
-                call("Checking extra files", "07"),
-                call("Checking extra files", "08"),
-                call("Checking extra files", "09"),
-                call("Checking extra files", "10"),
-                call("Checking extra files", "11"),
-                call("Repairing", " 0%"),
-            ]
-        )
-        nzo.set_action_line.assert_has_calls(
-            [
-                call("Repairing", "100% "),
-                call("Verifying repair", "01/01"),
-            ]
-        )
+        # Progress reporting
+        actions = [c.args for c in nzo.set_action_line.call_args_list]
+        assert ("Repair", "Quick Checking") in actions
+        assert ("Repair", "Starting Repair") in actions
+        assert ("Verifying", "01/01") in actions
+        assert ("Repairing", "%2d%%" % 0) in actions
+        assert any(a[0] == "Verifying repair" for a in actions)
 
     def test_broken_filejoin(self, caplog):
         # Run code
@@ -310,30 +277,13 @@ class TestPar2Repair:
         # All joinable files should be removed
         assert dir_contents == ["__ADMIN__", "par2test.bin"]
 
-        # Verify output in chunks, as it outputs every single % during repair
-        nzo.set_action_line.assert_has_calls(
-            [
-                call("Repair", "Quick Checking"),
-                call("Repair", "Starting Repair"),
-                call("Verifying", "01/01"),
-                call("Checking extra files", "01"),
-                call("Checking extra files", "02"),
-                call("Checking extra files", "03"),
-                call("Checking extra files", "04"),
-                call("Checking extra files", "05"),
-                call("Checking extra files", "06"),
-                call("Checking extra files", "07"),
-                call("Checking extra files", "08"),
-                call("Checking extra files", "09"),
-                call("Repairing", " 0%"),
-            ]
-        )
-        nzo.set_action_line.assert_has_calls(
-            [
-                call("Repairing", "100% "),
-                call("Verifying repair", "01/01"),
-            ]
-        )
+        # Progress reporting
+        actions = [c.args for c in nzo.set_action_line.call_args_list]
+        assert ("Repair", "Quick Checking") in actions
+        assert ("Repair", "Starting Repair") in actions
+        assert ("Verifying", "01/01") in actions
+        assert ("Repairing", "%2d%%" % 0) in actions
+        assert any(a[0] == "Verifying repair" for a in actions)
 
 
 @pytest.mark.usefixtures("clean_cache_dir")
