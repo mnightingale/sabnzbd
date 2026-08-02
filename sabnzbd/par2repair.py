@@ -44,6 +44,7 @@ import sabctools
 
 import sabnzbd
 from sabnzbd.constants import Status
+from sabnzbd.filesystem import get_ext, globber_full
 from sabnzbd.misc import format_time_string
 from sabnzbd.nzb.object import NzbObject
 
@@ -145,14 +146,10 @@ class RepairSession:
 
         elapsed = format_time_string(time.time() - self.stage_start)
         if result == sabctools.Par2Result.SUCCESS:
-            self.nzo.set_unpack_info(
-                "Repair", T("[%s] Verified in %s, all files correct") % (self.setname, elapsed)
-            )
+            self.nzo.set_unpack_info("Repair", T("[%s] Verified in %s, all files correct") % (self.setname, elapsed))
             logging.info("Verified %s in %s, all files correct", self.setname, elapsed)
         else:
-            self.nzo.set_unpack_info(
-                "Repair", T("[%s] Verified in %s, repair is required") % (self.setname, elapsed)
-            )
+            self.nzo.set_unpack_info("Repair", T("[%s] Verified in %s, repair is required") % (self.setname, elapsed))
             logging.info(
                 "Verified %s in %s, repair required: %s damaged, %s missing, %s renamed, %s of %s blocks missing",
                 self.setname,
@@ -225,7 +222,8 @@ class RepairSession:
                     self.last_percent = percent
                     self.nzo.status = Status.REPAIRING
                     self.nzo.set_action_line(
-                        T("Repairing"), "%2d%% %s" % (percent, sabnzbd.newsunpack.add_time_left(percent, self.stage_start))
+                        T("Repairing"),
+                        "%2d%% %s" % (percent, sabnzbd.newsunpack.add_time_left(percent, self.stage_start)),
                     )
             elif stage == "verifying_repair":
                 if filename:
@@ -272,14 +270,18 @@ def cancel(nzo: NzbObject):
             session.repairer.cancel()
 
 
-def parfile_paths(nzo: NzbObject, setname: str) -> list[str]:
-    """Every par2 file of this set currently on disk."""
-    paths = []
-    for nzf in nzo.extrapars.get(setname, []):
-        path = os.path.join(nzo.download_path, nzf.filename)
-        if os.path.exists(path):
-            paths.append(path)
-    return paths
+def parfile_paths(nzo: NzbObject) -> list[str]:
+    """Every par2 file for this job currently on disk.
+
+    Deliberately taken from the download directory rather than nzo.extrapars. A par2
+    file is dropped from extrapars the moment it finishes downloading - handle_par2()
+    calls remove_extrapar() - which is precisely when we want to feed it to the
+    repairer, so extrapars would come up empty exactly when it matters.
+
+    Files belonging to another set in the same directory are harmless: par2 locks onto
+    a set id during load() and gates every packet on it, so foreign packets are ignored.
+    """
+    return [path for path in globber_full(nzo.download_path) if get_ext(path) == ".par2"]
 
 
 def joinable_matches(session: RepairSession, joinables: list[str]) -> list[str]:
