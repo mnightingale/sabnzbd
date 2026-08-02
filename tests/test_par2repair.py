@@ -27,7 +27,7 @@ import pytest
 
 import sabnzbd.cfg as cfg
 from sabnzbd.constants import GIGI, MEBI, PAR2_MINIMUM_MEMORY, PAR2_RESERVED_MEMORY
-from sabnzbd.par2repair import _blocks_from_articles, article_backed_blocks, memory_limit
+from sabnzbd.par2repair import RepairSession, _blocks_from_articles, article_backed_blocks, memory_limit
 
 
 class FakeArticle:
@@ -247,3 +247,33 @@ class TestPar2MemoryLimit:
                 assert memory_limit() == int(1024 * MEBI)
             # 64-bit gets the full quarter
             assert memory_limit() == int(4096 * MEBI)
+
+
+class TestPar2Threads:
+    """Left at 0, par2 counts the host's CPUs. get_cpus() knows about cgroup quotas."""
+
+    def opened_with(self, tmp_path):
+        """Open a session against a stubbed repairer and return the keyword arguments"""
+        parfile = tmp_path / "test.par2"
+        parfile.write_bytes(b"")
+        session = RepairSession(mock.Mock(), "test", str(parfile))
+        with mock.patch("sabnzbd.par2repair.sabctools.Par2Repairer") as repairer:
+            session.open([])
+        return repairer.call_args.kwargs
+
+    def test_leaves_one_cpu_for_the_rest_of_sabnzbd(self, tmp_path):
+        with mock.patch("sabnzbd.par2repair.get_cpus", return_value=4):
+            assert self.opened_with(tmp_path)["threads"] == 3
+
+    def test_a_single_cpu_still_gets_a_thread(self, tmp_path):
+        with mock.patch("sabnzbd.par2repair.get_cpus", return_value=1):
+            assert self.opened_with(tmp_path)["threads"] == 1
+
+    def test_falls_back_to_par2_when_undetectable(self, tmp_path):
+        """Zero hands the decision back to par2, which is better than guessing 1"""
+        with mock.patch("sabnzbd.par2repair.get_cpus", return_value=0):
+            assert self.opened_with(tmp_path)["threads"] == 0
+
+    def test_file_threads_are_left_to_par2(self, tmp_path):
+        """This one is about I/O concurrency, not CPU count - par2's 2 stands"""
+        assert "file_threads" not in self.opened_with(tmp_path)

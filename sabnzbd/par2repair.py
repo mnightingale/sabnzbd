@@ -47,7 +47,7 @@ import sabnzbd
 import sabnzbd.cfg as cfg
 from sabnzbd.constants import GIGI, MEBI, PAR2_MINIMUM_MEMORY, PAR2_RESERVED_MEMORY, Status
 from sabnzbd.filesystem import get_ext, globber_full
-from sabnzbd.misc import format_time_string, get_memory
+from sabnzbd.misc import format_time_string, get_cpus, get_memory
 from sabnzbd.nzb.object import NzbObject
 
 
@@ -108,11 +108,20 @@ class RepairSession:
     def open(self, extrafiles: list[str]) -> sabctools.Par2Result:
         """Create the repairer and read the par2 packets."""
         basepath = os.path.dirname(self.parfile)
+
+        # par2 counts the host's CPUs for itself, which ignores a cgroup quota. One is
+        # left for the downloader and the assembler, which run alongside a repair; only
+        # where the count cannot be read at all does par2 decide for itself.
+        cpus = get_cpus()
+
+        # file_threads is left out: it sizes I/O concurrency rather than CPU work, and
+        # par2's own default of 2 is what we would ask for
         self.repairer = sabctools.Par2Repairer(
             self.parfile,
             extrafiles=extrafiles,
             basepath=basepath,
             memory_limit=memory_limit(),
+            threads=max(1, cpus - 1) if cpus else 0,
         )
         self.repairer.progress_callback = self._on_progress
         self.repairer.file_done_callback = self._on_file_done
