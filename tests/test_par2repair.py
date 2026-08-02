@@ -20,12 +20,14 @@ tests.test_par2repair - mapping article state onto par2 blocks
 """
 
 import os
+import sys
 from unittest import mock
 
 import pytest
 
 import sabnzbd.cfg as cfg
-from sabnzbd.par2repair import _blocks_from_articles, article_backed_blocks
+from sabnzbd.constants import MEBI
+from sabnzbd.par2repair import _blocks_from_articles, article_backed_blocks, par2_memory_limit
 
 
 class FakeArticle:
@@ -202,3 +204,34 @@ class TestArticleBackedBlocks:
             mock.patch.object(cfg.direct_write, "get", return_value=True),
         ):
             assert article_backed_blocks(nzo, repairer) == {}
+
+
+class TestPar2MemoryLimit:
+    """par2 defaults to half the host's physical memory. We give it half of
+    get_memory() instead, which is clamped by any cgroup limit."""
+
+    def test_half_of_available_memory(self):
+        with mock.patch("sabnzbd.par2repair.get_memory", return_value=int(8192 * MEBI)):
+            assert par2_memory_limit() == int(4096 * MEBI)
+
+    def test_respects_a_cgroup_limit(self):
+        # get_memory() already returns min(physical, cgroup), so a container with a
+        # 512MB budget must not be handed half of the host's 32GB
+        with mock.patch("sabnzbd.par2repair.get_memory", return_value=int(512 * MEBI)):
+            assert par2_memory_limit() == int(256 * MEBI)
+
+    def test_falls_back_when_memory_is_unknown(self):
+        # Same 256MB assumption par2 makes for itself
+        with mock.patch("sabnzbd.par2repair.get_memory", return_value=0):
+            assert par2_memory_limit() == int(128 * MEBI)
+
+    def test_never_returns_zero(self):
+        with mock.patch("sabnzbd.par2repair.get_memory", return_value=1024):
+            assert par2_memory_limit() == int(MEBI)
+
+    def test_capped_on_32bit(self):
+        with mock.patch("sabnzbd.par2repair.get_memory", return_value=int(16384 * MEBI)):
+            with mock.patch.object(sys, "maxsize", 2**31 - 1):
+                assert par2_memory_limit() == int(1024 * MEBI)
+            # 64-bit gets the full half
+            assert par2_memory_limit() == int(8192 * MEBI)
