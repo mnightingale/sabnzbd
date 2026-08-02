@@ -1279,7 +1279,7 @@ def par2_verify_and_repair(
     call finds the same session, feeds the new files in with load_more() and repairs
     without verifying a second time.
     """
-    session = par2repair.get_session(nzo, setname, parfile)
+    session = par2repair.get_session(nzo, setname)
     resuming = session is not None
 
     if not resuming:

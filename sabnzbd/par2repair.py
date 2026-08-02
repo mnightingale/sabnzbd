@@ -235,13 +235,22 @@ class RepairSession:
             logging.debug("Failed to report par2 progress", exc_info=True)
 
 
-def get_session(nzo: NzbObject, setname: str, parfile: str) -> Optional[RepairSession]:
-    """Return the live session for this set, if the parfile still matches."""
+def get_session(nzo: NzbObject, setname: str) -> Optional[RepairSession]:
+    """Return the live session for this set, if there is one.
+
+    Deliberately keyed on the set name alone, not on which par2 file par2_repair picked
+    this time. That file is chosen from nzo.extrapars, which shrinks as par2 files
+    finish downloading - handle_par2() removes them - so a resumed attempt often starts
+    from a different member of the same set. Requiring it to match would throw the
+    verification away for no reason.
+
+    Set names are unique per set: handle_par2() falls back to the par2 set id when two
+    sets would otherwise share a name.
+    """
     session = nzo.par2_sessions.get(setname)
-    if session is not None and session.parfile == parfile and session.repairer is not None:
+    if session is not None and session.repairer is not None:
         return session
     if session is not None:
-        # A different base par2 file means starting over
         discard(nzo, setname)
     return None
 

@@ -39,6 +39,7 @@ import pytest
 
 import sabnzbd
 import sabnzbd.newsunpack as newsunpack
+import sabnzbd.par2repair as par2repair
 from sabnzbd.constants import JOB_ADMIN
 from sabnzbd.par2file import FilePar2Info
 from tests.testhelper import SAB_CACHE_DIR
@@ -357,6 +358,41 @@ class TestPar2RepairResume:
             assert "repairing" in stages
             # And the session is released once the set is done
             assert not nzo.par2_sessions
+        finally:
+            shutil.rmtree(temp_test_dir, ignore_errors=True)
+
+    def test_resume_from_a_different_parfile_of_the_same_set(self, caplog):
+        """par2_repair picks its parfile from extrapars, which shrinks as par2 files
+        finish downloading, so a resumed attempt often starts from a different member
+        of the set. That must reuse the session rather than verifying all over again.
+
+        Asserted by counting sessions: a discarded session is replaced by a new one,
+        which would quietly redo the verification.
+        """
+        temp_test_dir = self._stage(with_volumes=False)
+        nzo = self._make_nzo(temp_test_dir)
+
+        try:
+            with mock.patch.object(par2repair, "create_session", wraps=par2repair.create_session) as create_session:
+                with caplog.at_level(logging.DEBUG):
+                    finished, readd, _, _ = newsunpack.par2_verify_and_repair(
+                        os.path.join(temp_test_dir, "par2test.par2"), nzo, "par2test", []
+                    )
+                assert not finished and readd
+                assert create_session.call_count == 1
+                assert nzo.par2_sessions["par2test"].verified
+
+                self._stage(with_volumes=True)
+
+                # Resume naming a volume file rather than the one we started from
+                with caplog.at_level(logging.DEBUG):
+                    finished, readd, _, _ = newsunpack.par2_verify_and_repair(
+                        os.path.join(temp_test_dir, "par2test.vol1+2.par2"), nzo, "par2test", []
+                    )
+
+                assert finished
+                # Still one session: the first was reused, not thrown away
+                assert create_session.call_count == 1
         finally:
             shutil.rmtree(temp_test_dir, ignore_errors=True)
 
