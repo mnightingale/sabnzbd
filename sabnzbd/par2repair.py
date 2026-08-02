@@ -37,6 +37,7 @@ job cannot leak a repairer.
 
 import logging
 import os
+import sys
 import time
 from typing import Optional
 
@@ -44,10 +45,29 @@ import sabctools
 
 import sabnzbd
 import sabnzbd.cfg as cfg
-from sabnzbd.constants import Status
+from sabnzbd.constants import GIGI, MEBI, Status
 from sabnzbd.filesystem import get_ext, globber_full
-from sabnzbd.misc import format_time_string
+from sabnzbd.misc import format_time_string, get_memory
 from sabnzbd.nzb.object import NzbObject
+
+
+def par2_memory_limit() -> int:
+    """Bytes par2 may use for its output buffers.
+
+    Same calculation par2 makes for itself - half the memory, rounded down to whole
+    megabytes, capped at 1GB on 32-bit builds, falling back to 256MB when the total
+    cannot be determined - but taken from get_memory(), which clamps to any cgroup
+    limit. par2 asks the OS for the host's physical memory, so left to its own devices
+    it would size against memory a container is not allowed to touch.
+    """
+    memory = get_memory() or int(256 * MEBI)
+    megabytes = int(memory / MEBI) // 2
+
+    # par2 limits itself on 32-bit to avoid exhausting the addressable space
+    if sys.maxsize <= 2**32:
+        megabytes = min(megabytes, int(GIGI / MEBI))
+
+    return int(max(megabytes, 1) * MEBI)
 
 
 class RepairSession:
@@ -83,6 +103,7 @@ class RepairSession:
             self.parfile,
             extrafiles=extrafiles,
             basepath=basepath,
+            memory_limit=par2_memory_limit(),
         )
         self.repairer.progress_callback = self._on_progress
         self.repairer.file_done_callback = self._on_file_done
