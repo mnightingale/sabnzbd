@@ -1207,9 +1207,7 @@ def par2_repair(nzo: NzbObject, setname: str) -> tuple[bool, bool]:
 
             joinables, _, _, _, _ = build_filelists(nzo.download_path, check_rar=False)
 
-            finished, readd, used_joinables, used_for_repair = par2_verify_and_repair(
-                parfile, nzo, setname, joinables
-            )
+            finished, readd, used_joinables, used_for_repair = par2_verify_and_repair(parfile, nzo, setname, joinables)
 
             if finished:
                 result = True
@@ -1295,7 +1293,7 @@ def par2_verify_and_repair(
         # Back from fetching more recovery blocks
         logging.info("Resuming repair of %s with additional par2 files", setname)
         try:
-            session.add_parfiles(par2repair.parfile_paths(nzo, setname))
+            session.add_parfiles(par2repair.parfile_paths(nzo))
         except sabctools.Par2Error:
             logging.info("Could not load the extra par2 files for %s", setname, exc_info=True)
             par2repair.discard(nzo, setname)
