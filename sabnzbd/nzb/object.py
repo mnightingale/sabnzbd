@@ -89,6 +89,7 @@ from sabnzbd.filesystem import (
     remove_data,
     get_ext,
     create_work_name,
+    same_directory,
     RAR_RE,
 )
 from sabnzbd.par2file import FilePar2Info, has_par2_in_filename, analyse_par2, parse_par2_file, is_par2_file
@@ -1439,6 +1440,21 @@ class NzbObject(TryList):
                     self.renames[name] = self.renames.pop(old_name, old_name)
         elif old_name is not None:
             self.renames[renames_or_name] = self.renames.pop(old_name, old_name)
+
+    def relocated_directories(self) -> set[str]:
+        """Sub-folders of the download folder that par2-driven renames moved files into.
+        Par2 sets can store their files in a folder of their own, quick_check_set() and
+        par2cmdline then recreate that folder. These are the only sub-folders we know of,
+        so the rest of the download folder is left unscanned, see #1304.
+        """
+        relocated = set()
+        for name in [nzf.filename for nzf in self.finished_files] + list(self.renames):
+            if subdir := os.path.dirname(name):
+                path = os.path.join(self.download_path, subdir)
+                # Never step outside the download folder, no matter what the par2 claimed
+                if same_directory(self.download_path, path) == 2:
+                    relocated.add(path)
+        return relocated
 
     @synchronized()
     def get_unique_filepath(self, filename: str) -> str:
