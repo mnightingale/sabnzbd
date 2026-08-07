@@ -510,7 +510,8 @@ def build_filelists(
         filelist.extend(listdir_full(workdir_complete))
 
     if workdir and (not filelist or check_both):
-        filelist.extend(listdir_full(workdir, recursive=False))
+        # Scan sub-folders too, par2 repair can restore files into a folder of their own
+        filelist.extend(file for file in listdir_full(workdir) if JOB_ADMIN not in file)
 
     for file in filelist:
         # Extra check for rar (takes CPU/disk)
