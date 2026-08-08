@@ -26,7 +26,7 @@ from tests.testhelper import SAB_CACHE_DIR, create_and_read_nzb_fp
 from sabnzbd.nzb import NzbObject
 from sabnzbd.config import ConfigCat
 from sabnzbd.constants import NORMAL_PRIORITY, MAX_BAD_ARTICLES
-from sabnzbd.filesystem import globber
+from sabnzbd.filesystem import globber, sanitize_filename, same_directory
 
 
 @pytest.mark.usefixtures("clean_cache_dir")
@@ -75,6 +75,32 @@ class TestNZO:
         assert nzo.repair and nzo.unpack and nzo.delete
 
         # TODO: More checks!
+
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+    def test_get_unique_filepath_subdirs(self):
+        """Par2 can name a file inside a sub-directory of the job, which we have to create"""
+        ConfigCat("*", {"pp": 3, "script": "None", "priority": NORMAL_PRIORITY})
+        nzo = NzbObject("test_subdirs", nzb_fp=create_and_read_nzb_fp("basic_rar5"))
+
+        filename, path = nzo.get_unique_filepath(sanitize_filename("sub/testfile.rar", allow_subdirs=True))
+        assert filename == os.path.join("sub", "testfile.rar")
+        assert path == os.path.join(nzo.download_path, "sub", "testfile.rar")
+        # Created up front, so the assembler can write straight into it
+        assert os.path.isdir(os.path.join(nzo.download_path, "sub"))
+
+        # A repeat stays in the same folder and only the name is made unique
+        filename, _path = nzo.get_unique_filepath(sanitize_filename("sub/testfile.rar", allow_subdirs=True))
+        assert filename == os.path.join("sub", "testfile.1.rar")
+
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+    def test_get_unique_filepath_cannot_escape_download_path(self):
+        """Sanitizing strips the traversal, so nothing can be written outside the job folder"""
+        ConfigCat("*", {"pp": 3, "script": "None", "priority": NORMAL_PRIORITY})
+        nzo = NzbObject("test_no_escape", nzb_fp=create_and_read_nzb_fp("basic_rar5"))
+
+        for hostile in ("../escape.rar", "/escape.rar", "sub/../../escape.rar", "../../../etc/escape.rar"):
+            _filename, path = nzo.get_unique_filepath(sanitize_filename(hostile, allow_subdirs=True))
+            assert same_directory(nzo.download_path, path) == 2, "%s escaped to %s" % (hostile, path)
 
 
 class TestCheckAvailabilityRatio:

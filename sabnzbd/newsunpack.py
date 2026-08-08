@@ -1677,6 +1677,8 @@ def quick_check_set(setname: str, nzo: NzbObject) -> bool:
         par2info = par2pack[file]
         found = False
         file_to_ignore = get_ext(file).replace(".", "") in ignore_ext
+        # Sub-directories in par2 always use "/", nzf.filename uses the platform separator
+        file = os.path.normpath(file)
         for nzf in nzf_list:
             # Do a simple filename based check
             if file == nzf.filename:
@@ -1708,9 +1710,7 @@ def quick_check_set(setname: str, nzo: NzbObject) -> bool:
                 try:
                     logging.debug("Quick-check will rename %s to %s", nzf.filename, file)
 
-                    # Note: file can and is allowed to be in a subdirectory.
-                    # Subdirectories in par2 always contain "/", not "\" so we need to normalize
-                    file = os.path.normpath(file)
+                    # Note: file can and is allowed to be in a subdirectory
                     renamer(
                         os.path.join(nzo.download_path, nzf.filename),
                         os.path.join(nzo.download_path, file),

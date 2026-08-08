@@ -123,6 +123,35 @@ class TestFileFolderNameSanitizer:
         assert filesystem.sanitize_filename("../") == ".._"
         assert filesystem.sanitize_filename("../test") == ".._test"
 
+    @pytest.mark.parametrize("platform", ["win32", "macos", "linux"])
+    @pytest.mark.platform()
+    def test_file_allow_subdirs(self, platform):
+        """Par2 uses "/" to separate sub-directories, no matter which platform created the set"""
+        assert filesystem.sanitize_filename("sub/test.rar", allow_subdirs=True) == os.path.join("sub", "test.rar")
+        assert filesystem.sanitize_filename("sub/deeper/test.rar", allow_subdirs=True) == os.path.join(
+            "sub", "deeper", "test.rar"
+        )
+        assert filesystem.sanitize_filename("test.rar", allow_subdirs=True) == "test.rar"
+        # Each part is sanitized on its own, chr(0) is illegal on every platform
+        assert filesystem.sanitize_filename("sub" + chr(0) + "1/test" + chr(0) + "2.rar", allow_subdirs=True) == (
+            os.path.join("sub_1", "test_2.rar")
+        )
+
+    @pytest.mark.parametrize("platform", ["win32", "macos", "linux"])
+    @pytest.mark.platform()
+    def test_file_allow_subdirs_stays_local(self, platform):
+        """Whatever the par2 claims, the result can never point outside the current folder"""
+        assert filesystem.sanitize_filename("/test.rar", allow_subdirs=True) == "test.rar"
+        assert filesystem.sanitize_filename("../test.rar", allow_subdirs=True) == "test.rar"
+        assert filesystem.sanitize_filename("../../../etc/passwd", allow_subdirs=True) == os.path.join("etc", "passwd")
+        assert filesystem.sanitize_filename("sub/../../test.rar", allow_subdirs=True) == os.path.join("sub", "test.rar")
+        assert filesystem.sanitize_filename("sub/./test.rar", allow_subdirs=True) == os.path.join("sub", "test.rar")
+        assert filesystem.sanitize_filename("a//b.rar", allow_subdirs=True) == os.path.join("a", "b.rar")
+        # Nothing usable left
+        assert filesystem.sanitize_filename("/", allow_subdirs=True) == "unknown"
+        assert filesystem.sanitize_filename("../", allow_subdirs=True) == "unknown"
+        assert filesystem.sanitize_filename("../..", allow_subdirs=True) == "unknown"
+
     @pytest.mark.platform("linux")
     def test_folder_illegal_chars_linux(self):
         assert filesystem.sanitize_foldername('test"aftertest') == "test_aftertest"

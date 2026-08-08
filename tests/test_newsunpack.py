@@ -1052,7 +1052,8 @@ class TestUnpackNestedRarSets:
         assert newsunpack.quick_check_set("testset", nzo)
 
         assert nzf.filename == os.path.normpath(par2_name)
-        assert (nzf.setname, nzf.vol) == (os.path.join(self.SUBDIR, "foo.bar.s05e03"), 2)
+        # The setname is the name of the set, never the folder it happens to live in
+        assert (nzf.setname, nzf.vol) == ("foo.bar.s05e03", 2)
 
     def test_sfv_check_rename_updates_setname_and_vol(self, tmp_path):
         """sfv_check() de-obfuscates the same way quick_check_set() does"""
