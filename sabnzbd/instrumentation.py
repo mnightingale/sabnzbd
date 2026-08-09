@@ -48,7 +48,6 @@ import datetime
 import functools
 import logging
 import os
-import resource
 import sys
 import threading
 import time
@@ -57,6 +56,17 @@ from typing import Any, Callable
 
 import sabnzbd
 from sabnzbd.misc import to_units
+
+try:
+    import resource
+except ImportError:
+    resource = None
+
+try:
+    import win32api
+    import win32process
+except ImportError:
+    pass
 
 # Recording is off unless the special is enabled. Read on every hot path, so it stays
 # a plain module global rather than a config lookup.
@@ -240,9 +250,7 @@ def current_rss() -> int:
     global _libproc
     try:
         if sabnzbd.WINDOWS:
-            import win32process
-
-            return win32process.GetProcessMemoryInfo(win32process.GetCurrentProcess())["WorkingSetSize"]
+            return win32process.GetProcessMemoryInfo(win32api.GetCurrentProcess())["WorkingSetSize"]
         if sabnzbd.MACOS:
             if _libproc is None:
                 _libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
@@ -263,14 +271,14 @@ def peak_rss() -> int:
     """Highest resident set size reached, in bytes, or 0 if it cannot be determined"""
     try:
         if sabnzbd.WINDOWS:
-            import win32process
-
-            return win32process.GetProcessMemoryInfo(win32process.GetCurrentProcess())["PeakWorkingSetSize"]
-        # ru_maxrss is bytes on macOS but kilobytes on Linux
-        max_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        return max_rss if sabnzbd.MACOS else max_rss * 1024
+            return win32process.GetProcessMemoryInfo(win32api.GetCurrentProcess())["PeakWorkingSetSize"]
+        if resource:
+            # ru_maxrss is bytes on macOS but kilobytes on Linux
+            max_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            return max_rss if sabnzbd.MACOS else max_rss * 1024
     except Exception:
-        return 0
+        pass
+    return 0
 
 
 ##############################################################################
