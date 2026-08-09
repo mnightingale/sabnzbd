@@ -63,6 +63,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import sabnzbd
+from sabnzbd.decorators import synchronized
 from sabnzbd.filesystem import same_device
 
 # Span the writes are scattered over. Preallocated as a hole, so it costs nothing to
@@ -122,7 +123,7 @@ class DeviceProfile:
         )
 
 
-_lock = threading.Lock()
+STORAGE_LOCK = threading.RLock()
 # Keyed by path, not by st_dev. Two paths sharing a device share a profile, but whether
 # they share one is filesystem.same_device's question to answer: st_dev alone is not
 # reliable for network locations on Windows, where two different UNC shares can report
@@ -207,31 +208,66 @@ def profile_for(path: str) -> DeviceProfile:
 
     A path sharing a device with one already profiled reuses its answer, so a download
     and complete directory on one disk cost one probe between them.
+
+    Deliberately not @synchronized itself: the probe runs between the two locked
+    sections, because holding the lock across PROBE_TIME_BUDGET would block every
+    cached_profile() call on the receive threads for half a second.
     """
-    with _lock:
-        if (cached := _profiles.get(path)) is not None:
-            return cached
-        for known, profile in _profiles.items():
-            # Only a real measurement is shared. A failure says something about that
-            # path, not about the device: same_device resolves a missing path to its
-            # nearest existing parent, so a typo in one directory would otherwise mark
-            # every other directory on the same disk unmeasurable.
-            if profile.measured and same_device(path, known):
-                _profiles[path] = profile
-                return profile
+    if (known := _lookup(path)) is not None:
+        return known
 
-    # Probing outside the lock: it takes up to PROBE_TIME_BUDGET, and two callers
-    # racing to measure one device costs only the duplicated work
-    measured = probe(path)
-
-    with _lock:
-        return _profiles.setdefault(path, measured)
+    # Two callers racing to measure one device costs only the duplicated work
+    return _remember(path, probe(path))
 
 
+@synchronized(STORAGE_LOCK)
+def _lookup(path: str) -> Optional[DeviceProfile]:
+    """A profile already held for this path, or one measured on the same device"""
+    if (cached := _profiles.get(path)) is not None:
+        return cached
+    for known, profile in _profiles.items():
+        # Only a real measurement is shared. A failure says something about that path,
+        # not about the device: same_device resolves a missing path to its nearest
+        # existing parent, so a typo in one directory would otherwise mark every other
+        # directory on the same disk unmeasurable.
+        if profile.measured and same_device(path, known):
+            _profiles[path] = profile
+            return profile
+    return None
+
+
+@synchronized(STORAGE_LOCK)
+def _remember(path: str, profile: DeviceProfile) -> DeviceProfile:
+    """Store a measurement, keeping whichever one got there first"""
+    return _profiles.setdefault(path, profile)
+
+
+@synchronized(STORAGE_LOCK)
+def cached_profile(path: str) -> Optional[DeviceProfile]:
+    """Profile of a path if one has already been measured, without measuring it.
+
+    For callers on a hot path. profile_for() blocks for up to PROBE_TIME_BUDGET the
+    first time it sees a device, which is fine at startup and not fine on a receive
+    thread with a connection waiting on it. Absent means "not known yet", which every
+    caller should read the same way it reads unmeasurable.
+    """
+    return _profiles.get(path)
+
+
+def download_dir_supports_random_writes() -> bool:
+    """May articles be written straight to their offset as they arrive?
+
+    Never probes: until the startup profile has landed the answer is no, so the first
+    articles of a session take the ordered path and nothing waits on a disk probe.
+    """
+    profile = cached_profile(sabnzbd.cfg.download_dir.get_path())
+    return profile is not None and profile.supports_random_writes
+
+
+@synchronized(STORAGE_LOCK)
 def forget():
     """Drop cached profiles, so the next request probes again"""
-    with _lock:
-        _profiles.clear()
+    _profiles.clear()
 
 
 def profile_directories() -> dict[str, DeviceProfile]:

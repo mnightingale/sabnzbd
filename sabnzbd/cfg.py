@@ -530,7 +530,11 @@ enable_season_sorting = OptionBool("misc", "enable_season_sorting", True)
 verify_xff_header = OptionBool("misc", "verify_xff_header", True)
 direct_write = OptionBool("misc", "direct_write", True)
 instrumentation = OptionBool("misc", "instrumentation", False)
-direct_decode = OptionBool("misc", "direct_decode", False)
+# Permission rather than instruction, which is why it can default to on: articles are
+# only streamed straight to their offset where the destination was measured able to
+# absorb scattered writes. Turning it off forces the ordered path everywhere; leaving
+# it on lets sabnzbd.storage decide per destination.
+direct_decode = OptionBool("misc", "direct_decode", True)
 
 # Text values
 rss_odd_titles = OptionList("misc", "rss_odd_titles", ["nzbindex.nl/", "nzbindex.com/", "nzbclub.com/"])
