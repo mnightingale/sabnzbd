@@ -52,7 +52,7 @@ import sys
 import threading
 import time
 from collections import deque
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import sabnzbd
 from sabnzbd.misc import to_units
@@ -241,28 +241,113 @@ class _MacTaskInfo(ctypes.Structure):
     ]
 
 
-_libproc = None
 _PROC_PIDTASKINFO = 4
+# Cached: os.getpid() is a syscall on some platforms and never changes here
+PID = os.getpid()
+
+# Everything below is set up once and reused. current_rss() is called from the sampler
+# and from every API poll, and the measured cost is dominated by per-call setup rather
+# than by the kernel: allocating the structure each time costs more than the syscall,
+# and on Linux the open/close pair costs more than everything else put together.
+_mac_info = _MacTaskInfo()
+_mac_info_ref = ctypes.byref(_mac_info)
+_mac_info_size = ctypes.sizeof(_MacTaskInfo)
+# libSystem re-exports libproc, so the handle SABnzbd already loaded at startup will do
+# and there is no second library to open
+_proc_pidinfo = getattr(sabnzbd.MACOSLIBC, "proc_pidinfo", None) if sabnzbd.MACOSLIBC else None
+
+
+class _MachTaskBasicInfo(ctypes.Structure):
+    """mach_task_basic_info, as declared in <mach/task_info.h>.
+
+    Carries current and peak resident size together, which is why rss() can answer
+    both from one call where proc_pidinfo would need help from getrusage.
+    """
+
+    _fields_ = [
+        ("virtual_size", ctypes.c_uint64),
+        ("resident_size", ctypes.c_uint64),
+        ("resident_size_max", ctypes.c_uint64),
+        # time_value_t is a pair of 32-bit counts, twice over
+        ("user_time_seconds", ctypes.c_int32),
+        ("user_time_microseconds", ctypes.c_int32),
+        ("system_time_seconds", ctypes.c_int32),
+        ("system_time_microseconds", ctypes.c_int32),
+        ("policy", ctypes.c_int32),
+        ("suspend_count", ctypes.c_int32),
+    ]
+
+
+_MACH_TASK_BASIC_INFO = 20
+# task_info counts in 32-bit words, not bytes
+_MACH_TASK_BASIC_INFO_COUNT = ctypes.sizeof(_MachTaskBasicInfo) // ctypes.sizeof(ctypes.c_uint32)
+_mach_info = _MachTaskBasicInfo()
+_mach_info_ref = ctypes.byref(_mach_info)
+_mach_count = ctypes.c_uint(_MACH_TASK_BASIC_INFO_COUNT)
+_mach_count_ref = ctypes.byref(_mach_count)
+_task_info = getattr(sabnzbd.MACOSLIBC, "task_info", None) if sabnzbd.MACOSLIBC else None
+_mach_task = None
+if _task_info:
+    try:
+        sabnzbd.MACOSLIBC.mach_task_self.restype = ctypes.c_uint
+        # A fixed port for the life of the process, so it is resolved once
+        _mach_task = sabnzbd.MACOSLIBC.mach_task_self()
+    except Exception:
+        _task_info = None
+
+# Cached read-only descriptor on /proc/self/statm. procfs regenerates the contents on
+# each pread, so one descriptor serves the life of the process. Named rather than
+# inlined so the Linux path can be pointed at a fixture and tested anywhere.
+STATM_PATH = "/proc/self/statm"
+_statm_fd: Optional[int] = None
+_statm_lock = threading.Lock()
+_page_size = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
+
+
+def _statm_descriptor() -> int:
+    """Open the statm file once, under a lock so a race cannot leak a descriptor"""
+    global _statm_fd
+    with _statm_lock:
+        if _statm_fd is None:
+            _statm_fd = os.open(STATM_PATH, os.O_RDONLY)
+        return _statm_fd
+
+
+def _drop_statm_descriptor():
+    """Close and forget the cached descriptor, so the next call opens a fresh one"""
+    global _statm_fd
+    with _statm_lock:
+        if _statm_fd is not None:
+            try:
+                os.close(_statm_fd)
+            except OSError:
+                pass
+            _statm_fd = None
 
 
 def current_rss() -> int:
     """Resident set size of this process in bytes, or 0 if it cannot be determined"""
-    global _libproc
     try:
         if sabnzbd.WINDOWS:
             return win32process.GetProcessMemoryInfo(win32api.GetCurrentProcess())["WorkingSetSize"]
         if sabnzbd.MACOS:
-            if _libproc is None:
-                _libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
-            info = _MacTaskInfo()
-            if _libproc.proc_pidinfo(
-                os.getpid(), _PROC_PIDTASKINFO, ctypes.c_uint64(0), ctypes.byref(info), ctypes.sizeof(info)
-            ) == ctypes.sizeof(info):
-                return info.pti_resident_size
+            if not _proc_pidinfo:
+                return 0
+            # The structure is shared rather than per-call. Two threads sampling at once
+            # can interleave, but both are writing the same quantity for the same
+            # process microseconds apart, so either value is equally true.
+            if _proc_pidinfo(PID, _PROC_PIDTASKINFO, 0, _mac_info_ref, _mac_info_size) == _mac_info_size:
+                return _mac_info.pti_resident_size
             return 0
-        # Second field of statm is the resident pages
-        with open("/proc/self/statm") as statm:
-            return int(statm.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+        # Second field of statm is the resident pages. pread takes its own offset, so
+        # this needs no seek and is safe to call from several threads at once.
+        return int(os.pread(_statm_descriptor(), 64, 0).split()[1]) * _page_size
+    except OSError:
+        # Only the descriptor can go bad this way, and a cached bad one would fail for
+        # the rest of the run. Closing rather than just forgetting it avoids leaking
+        # the descriptor when it was still open.
+        _drop_statm_descriptor()
+        return 0
     except Exception:
         return 0
 
@@ -279,6 +364,30 @@ def peak_rss() -> int:
     except Exception:
         pass
     return 0
+
+
+def rss() -> tuple[int, int]:
+    """Current and peak resident set size in bytes, 0 for whatever cannot be read.
+
+    Windows and macOS both report the two figures in a single structure, so asking for
+    them separately runs the same kernel work twice. Linux has no such pairing - statm
+    carries no high-water mark - so there it is still two calls, just the cheap ones.
+
+    Use this wherever both are wanted. current_rss() and peak_rss() stay because the
+    sampler only ever needs the current figure and the summary only the peak.
+    """
+    try:
+        if sabnzbd.WINDOWS:
+            info = win32process.GetProcessMemoryInfo(win32api.GetCurrentProcess())
+            return info["WorkingSetSize"], info["PeakWorkingSetSize"]
+        if sabnzbd.MACOS and _task_info:
+            _mach_count.value = _MACH_TASK_BASIC_INFO_COUNT
+            if _task_info(_mach_task, _MACH_TASK_BASIC_INFO, _mach_info_ref, _mach_count_ref) == 0:
+                return _mach_info.resident_size, _mach_info.resident_size_max
+            return 0, 0
+    except Exception:
+        return 0, 0
+    return current_rss(), peak_rss()
 
 
 ##############################################################################
@@ -581,10 +690,13 @@ def snapshot() -> dict[str, Any]:
             "samples": list(_samples),
         }
 
+    # Both figures at once: on Windows and macOS this is a single call, and it also
+    # keeps them consistent with each other rather than sampled moments apart
+    current, peak_value = rss()
     data["process"] = {
-        "pid": os.getpid(),
-        "rss": current_rss(),
-        "peak_rss": peak_rss(),
+        "pid": PID,
+        "rss": current,
+        "peak_rss": peak_value,
         "cpu_seconds": round(time.process_time(), 3),
         # Needed to read cpu_seconds as a rate. START is a datetime, not a timestamp.
         "uptime_seconds": round((datetime.datetime.now() - sabnzbd.START).total_seconds(), 1),

@@ -20,6 +20,7 @@ tests.test_instrumentation - Testing sabnzbd.instrumentation
 """
 
 import json
+import os
 import re
 import threading
 
@@ -378,3 +379,49 @@ class TestSnapshot:
         assert rss > 1024 * 1024
         # Peak can only ever be at least the current value
         assert not_recording.peak_rss() >= rss * 0.5
+
+    def test_combined_rss_agrees_with_the_separate_accessors(self, not_recording):
+        current, peak = not_recording.rss()
+        assert current > 1024 * 1024
+        assert peak >= current
+        assert not_recording.peak_rss() == peak
+
+
+class TestStatmDescriptor:
+    """The Linux reader caches its descriptor, which is what made it 20x cheaper than
+    reopening per call, and is also the only part of it that can go wrong"""
+
+    @pytest.fixture
+    def as_linux(self, monkeypatch, tmp_path):
+        statm = tmp_path / "statm"
+        statm.write_text("35190 4933 2626 2 0 8663 0\n")
+        monkeypatch.setattr(sabnzbd, "WINDOWS", False)
+        monkeypatch.setattr(sabnzbd, "MACOS", False)
+        monkeypatch.setattr(instrumentation, "STATM_PATH", str(statm))
+        instrumentation._drop_statm_descriptor()
+        yield statm
+        instrumentation._drop_statm_descriptor()
+
+    def test_reads_the_resident_field(self, as_linux):
+        """Resident pages are the second field of statm, not the first"""
+        assert instrumentation.current_rss() == 4933 * instrumentation._page_size
+
+    def test_the_descriptor_is_opened_once(self, as_linux, monkeypatch):
+        opened = []
+        real_open = os.open
+        monkeypatch.setattr(os, "open", lambda *a, **kw: (opened.append(a[0]), real_open(*a, **kw))[1])
+        for _ in range(10):
+            instrumentation.current_rss()
+        assert len(opened) == 1
+
+    def test_a_stale_descriptor_is_recovered_from(self, as_linux):
+        """Caching a descriptor that has gone bad would fail for the rest of the run"""
+        assert instrumentation.current_rss() > 0
+        os.close(instrumentation._statm_fd)
+        assert instrumentation.current_rss() == 0
+        assert instrumentation._statm_fd is None
+        assert instrumentation.current_rss() == 4933 * instrumentation._page_size
+
+    def test_unparsable_contents_do_not_raise(self, as_linux):
+        as_linux.write_text("not a statm file\n")
+        assert instrumentation.current_rss() == 0
