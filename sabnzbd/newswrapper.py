@@ -22,7 +22,6 @@ sabnzbd.newswrapper
 import errno
 import socket
 import threading
-from collections import deque
 from contextlib import suppress
 from selectors import EVENT_READ, EVENT_WRITE
 from threading import Thread
