@@ -869,4 +869,4 @@ class TestWriterCache:
         for thread in threads:
             thread.join()
 
-        assert len(set(id(writer) for writer in seen)) == 1
+        assert len({id(writer) for writer in seen}) == 1
