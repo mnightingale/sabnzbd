@@ -110,6 +110,7 @@ import sabnzbd.assembler
 import sabnzbd.articlecache
 import sabnzbd.bpsmeter
 import sabnzbd.instrumentation
+import sabnzbd.storage
 import sabnzbd.scheduler as scheduler
 import sabnzbd.notifier as notifier
 import sabnzbd.sorting
@@ -316,6 +317,11 @@ def initialize(pause_downloader=False, clean_up=False, repair=0):
     sabnzbd.Scheduler.analyse(pause_downloader)
     sabnzbd.ArticleCache.new_limit(cfg.cache_limit.get_int())
     sabnzbd.Assembler.new_limit(sabnzbd.ArticleCache.cache_info().cache_limit)
+
+    # Measure what the destinations can do, off the startup path so a slow disk does
+    # not delay the interface coming up. Advisory: logged and exposed, consumed by
+    # nothing yet.
+    sabnzbd.THREAD_POOL.submit(sabnzbd.storage.log_profiles)
 
     logging.info("All processes started")
     sabnzbd.RESTART_REQ = False

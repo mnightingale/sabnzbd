@@ -660,6 +660,26 @@ def live_state() -> dict[str, Any]:
         pass
 
     try:
+        # Advisory for now: what each destination can do, measured rather than declared
+        # Omitted rather than reported empty, matching the other sections: a key that is
+        # present says something was measurable
+        storage = {
+            path: {
+                "device": profile.device,
+                "random_write_iops": round(profile.iops, 1),
+                "random_write_mbps": round(profile.mbps, 1),
+                "measured": profile.measured,
+                "supports_random_writes": profile.supports_random_writes,
+                "error": profile.error,
+            }
+            for path, profile in sabnzbd.storage.profile_directories().items()
+        }
+        if storage:
+            state["storage"] = storage
+    except Exception:
+        pass
+
+    try:
         state["postproc"] = {
             "queue_length": len(sabnzbd.PostProcessor.history_queue),
             "paused": sabnzbd.PostProcessor.paused,

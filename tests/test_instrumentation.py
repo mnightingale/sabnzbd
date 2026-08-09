@@ -396,8 +396,11 @@ class TestSnapshot:
         assert isinstance(snapshot["state"], dict)
 
     def test_live_state_tolerates_an_unstarted_sabnzbd(self, not_recording):
-        """Every section is guarded, so a missing singleton drops one key rather than raising"""
-        assert not_recording.live_state() == {} or "cache" in not_recording.live_state()
+        """Every section is guarded, so an unavailable one drops its key rather than
+        raising or reporting an empty section"""
+        state = not_recording.live_state()
+        assert isinstance(state, dict)
+        assert all(state[section] for section in state), "a present section should have content"
 
     def test_rss_is_plausible(self, not_recording):
         rss = not_recording.current_rss()
