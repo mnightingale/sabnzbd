@@ -53,6 +53,7 @@ from sabnzbd.constants import (
     ASSEMBLER_TRIGGER_PERCENTAGE,
 )
 import sabnzbd.cfg as cfg
+import sabnzbd.instrumentation as instrumentation
 from sabnzbd.nzb import NzbFile, NzbObject, Article
 import sabnzbd.par2file as par2file
 from sabnzbd.postproc import get_complete_directory
@@ -261,6 +262,8 @@ class Assembler(Thread):
             # from this thread do not keep the objects alive (see #1628)
             nzo = nzf = None
             nzo, nzf, file_done, allow_non_contiguous, direct_write = self.queue.get()
+            # Reported here rather than per write, so the figure covers the whole loop
+            instrumentation.record_thread_cpu("assembler")
             if not nzo:
                 logging.debug("Shutting down assembler")
                 break
@@ -455,8 +458,14 @@ class Assembler(Thread):
                 nzf.assembled = True
 
     @staticmethod
+    @instrumentation.instrument("assembler.assemble_article")
     def assemble_article(article: Article, data: bytearray) -> bool:
-        """Write a single article to disk"""
+        """Write a single article to disk.
+
+        Reached when the article could not be held in the cache, so this is one article
+        written at its own offset rather than as part of a batch. The rate is the signal
+        for how fragmented the writes are.
+        """
         if not article.can_direct_write:
             return False
         nzf = article.nzf
@@ -517,10 +526,13 @@ class Assembler(Thread):
     ) -> int:
         """Write data at position in a file"""
         pos = article.data_begin if offset is None else offset
+        instrumentation.count_labelled("assembler.writes", "direct" if offset is None else "append")
+        instrumentation.count("assembler.bytes_written", len(data))
         written = Assembler._write(fd, nzf, data, pos)
         # In raw/non-buffered mode os.write may not write everything requested:
         # https://docs.python.org/3/library/io.html?highlight=write#io.RawIOBase.write
         if written < len(data) and (mv := memoryview(data)):
+            instrumentation.count("assembler.short_writes")
             while written < len(data):
                 written += Assembler._write(fd, nzf, mv[written:], pos + written)
 

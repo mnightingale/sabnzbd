@@ -109,6 +109,7 @@ import sabnzbd.decoder
 import sabnzbd.assembler
 import sabnzbd.articlecache
 import sabnzbd.bpsmeter
+import sabnzbd.instrumentation
 import sabnzbd.scheduler as scheduler
 import sabnzbd.notifier as notifier
 import sabnzbd.sorting
@@ -128,6 +129,7 @@ DirScanner: sabnzbd.dirscanner.DirScanner
 BPSMeter: sabnzbd.bpsmeter.BPSMeter
 RSSReader: sabnzbd.rss.RSSReader
 Scheduler: sabnzbd.scheduler.Scheduler
+Sampler: sabnzbd.instrumentation.Sampler
 
 # For backwards compatibility with pre-5.0 queue files
 sys.modules["sabnzbd.nzbstuff"] = sabnzbd.nzb
@@ -251,6 +253,7 @@ def initialize(pause_downloader=False, clean_up=False, repair=0):
     # Set call backs for Config items
     cfg.cache_limit.callback(cfg.new_limit)
     cfg.direct_write.callback(cfg.new_direct_write)
+    cfg.instrumentation.callback(cfg.new_instrumentation)
     cfg.web_host.callback(cfg.guard_restart)
     cfg.web_port.callback(cfg.guard_restart)
     cfg.web_dir.callback(cfg.guard_restart)
@@ -303,6 +306,10 @@ def initialize(pause_downloader=False, clean_up=False, repair=0):
     sabnzbd.URLGrabber = sabnzbd.urlgrabber.URLGrabber()
     sabnzbd.RSSReader = sabnzbd.rss.RSSReader()
     sabnzbd.Scheduler = sabnzbd.scheduler.Scheduler()
+    sabnzbd.Sampler = sabnzbd.instrumentation.Sampler()
+
+    # Apply the configured state, since the callback only fires on change
+    cfg.new_instrumentation()
 
     # Run startup tasks
     sabnzbd.NzbQueue.read_queue(repair)
@@ -339,6 +346,9 @@ def start():
         logging.debug("Starting urlgrabber")
         sabnzbd.URLGrabber.start()
 
+        logging.debug("Starting instrumentation sampler")
+        sabnzbd.Sampler.start()
+
 
 @synchronized(INIT_LOCK)
 def halt():
@@ -360,6 +370,9 @@ def halt():
         sabnzbd.directunpacker.abort_all()
 
         sabnzbd.THREAD_POOL.shutdown(wait=False)
+
+        logging.debug("Stopping instrumentation sampler")
+        sabnzbd.Sampler.stop()
 
         logging.debug("Stopping RSSReader")
         sabnzbd.RSSReader.stop()

@@ -1118,6 +1118,20 @@ def _api_gc_stats(name: str, kwargs: QueryParams) -> Response:
     return report(kwargs, data=[str(obj) for obj in gc.get_objects() if isinstance(obj, TryList)])
 
 
+def _api_instrumentation(name: str, kwargs: ApiParams) -> bytes:
+    """Function only intended for development profiling of the download path
+
+    Recording is controlled by the "instrumentation" special and is off by default.
+    The "state" section is read from the running objects, so it is always populated;
+    everything else stays empty until recording is enabled.
+
+    Pass reset=1 to clear the recorded counters and start a fresh measurement window.
+    """
+    if bool_conv(kwargs.get("reset")):
+        sabnzbd.instrumentation.reset()
+    return report(keyword="", data=sabnzbd.instrumentation.snapshot())
+
+
 ##############################################################################
 # Fallback for an unrecognised mode. The level matches the most restrictive access,
 # so an unknown call can never be dispatched on looser terms than a known one.
@@ -1157,6 +1171,7 @@ _api_table: ApiHandlerTable = {
     ("restart_repair", ""): ApiEntry(_api_restart_repair, 3),
     ("disconnect", ""): ApiEntry(_api_disconnect, 2),
     ("gc_stats", ""): ApiEntry(_api_gc_stats, 3),
+    ("instrumentation", ""): ApiEntry(_api_instrumentation, 3),
     ("eval_sort", ""): ApiEntry(_api_eval_sort, 3),
     ("watched_now", ""): ApiEntry(_api_watched_now, 2),
     ("resume_pp", ""): ApiEntry(_api_resume_pp, 2),

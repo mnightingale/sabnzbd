@@ -529,6 +529,7 @@ allow_old_ssl_tls = OptionBool("misc", "allow_old_ssl_tls", False)
 enable_season_sorting = OptionBool("misc", "enable_season_sorting", True)
 verify_xff_header = OptionBool("misc", "verify_xff_header", True)
 direct_write = OptionBool("misc", "direct_write", True)
+instrumentation = OptionBool("misc", "instrumentation", False)
 
 # Text values
 rss_odd_titles = OptionList("misc", "rss_odd_titles", ["nzbindex.nl/", "nzbindex.com/", "nzbclub.com/"])
@@ -771,6 +772,11 @@ def new_direct_write():
     """Callback for direct write changes"""
     sabnzbd.Assembler.change_direct_write(bool(direct_write()))
     sabnzbd.ArticleCache.change_direct_write(bool(direct_write()))
+
+
+def new_instrumentation():
+    """Callback for instrumentation changes"""
+    sabnzbd.instrumentation.enable(bool(instrumentation()))
 
 
 def guard_restart():

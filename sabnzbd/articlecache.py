@@ -27,6 +27,7 @@ from typing import Collection, Optional
 
 import sabnzbd
 import sabnzbd.cfg as cfg
+import sabnzbd.instrumentation as instrumentation
 from sabnzbd.decorators import synchronized
 from sabnzbd.constants import (
     GIGI,
@@ -156,6 +157,7 @@ class ArticleCache(threading.Thread):
         """Is there space left in the set limit?"""
         return self.__cache_size < self.__cache_limit
 
+    @instrumentation.instrument("articlecache.save_article")
     def save_article(self, article: Article, data: bytearray):
         """Save article in cache, either memory or disk"""
         nzo = article.nzf.nzo
@@ -175,6 +177,7 @@ class ArticleCache(threading.Thread):
             # Write the first-fetched articles to temporary file unless downloading
             # of the rest of the parts has started or filename is verified.
             # Otherwise the cache could overflow.
+            instrumentation.count_labelled("articlecache.flushed", "first-part")
             self.__flush_article_to_disk(article, data)
             return
 
@@ -182,8 +185,11 @@ class ArticleCache(threading.Thread):
         if self.__cache_limit and self.reserve_space(len(data)):
             # Add new article to the cache
             self.__article_table[article] = data
+            instrumentation.count("articlecache.held")
+            instrumentation.peak("articlecache.size", self.__cache_size)
         else:
             # No data saved in memory, direct to disk
+            instrumentation.count_labelled("articlecache.flushed", "cache-full")
             self.__flush_article_to_disk(article, data)
 
     def load_article(self, article: Article) -> Optional[bytearray]:
@@ -195,6 +201,7 @@ class ArticleCache(threading.Thread):
             try:
                 data = self.__article_table.pop(article)
                 self.free_reserved_space(len(data))
+                instrumentation.count("articlecache.reread_memory")
             except KeyError:
                 # Could fail due the article already being deleted by purge_articles, for example
                 # when post-processing deletes the job while delayed articles still come in
@@ -204,6 +211,10 @@ class ArticleCache(threading.Thread):
             data = sabnzbd.filesystem.load_data(
                 article.art_id, nzo.admin_path, remove=True, do_pickle=False, silent=True, mutable=True
             )
+            # The read half of the cache-overflow round trip: these bytes were written to the
+            # admin directory only because they could not be held, and are now read back
+            instrumentation.count("articlecache.reread_admin_file")
+            instrumentation.count("articlecache.reread_admin_file_bytes", len(data) if data else 0)
         with nzo.lock:
             nzo.saved_articles.discard(article)
         return data
@@ -238,11 +249,18 @@ class ArticleCache(threading.Thread):
         # because this flush may come after completion of the NZO.
         # Direct write to destination if cache is being used
         if self.__direct_write and sabnzbd.Assembler.assemble_article(article, data):
+            # Straight to its final offset, so no extra copy of the payload is made
+            instrumentation.count("articlecache.flush_direct_write")
+            instrumentation.count("articlecache.flush_direct_write_bytes", len(data))
             with article.nzf.nzo.lock:
                 article.nzf.nzo.saved_articles.discard(article)
             return
 
         # Fallback to disk cache
+        # The write half of the cache-overflow round trip. Every byte counted here is written
+        # to the download disk twice: once now, and again when the assembler picks it back up
+        instrumentation.count("articlecache.flush_admin_file")
+        instrumentation.count("articlecache.flush_admin_file_bytes", len(data))
         sabnzbd.filesystem.save_data(
             data, article.get_art_id(), article.nzf.nzo.admin_path, do_pickle=False, silent=True
         )

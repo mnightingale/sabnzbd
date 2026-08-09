@@ -24,6 +24,7 @@ import hashlib
 from typing import Optional
 
 import sabnzbd
+import sabnzbd.instrumentation as instrumentation
 from sabnzbd.constants import SABCTOOLS_VERSION_REQUIRED
 from sabnzbd.nzb import Article
 from sabnzbd.misc import match_str
@@ -60,6 +61,7 @@ class BadUu(Exception):
     pass
 
 
+@instrumentation.instrument("decoder.decode")
 def decode(article: Article, decoder: sabctools.NNTPResponse):
     decoded_data: Optional[bytearray] = None
     nzo = article.nzf.nzo
@@ -93,6 +95,8 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         return
 
     except BadData as error:
+        instrumentation.count("decoder.crc_failed")
+
         # Continue to the next one if we found new server
         if search_new_server(article):
             return
@@ -146,6 +150,9 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
             return
 
     if decoded_data:
+        instrumentation.count("decoder.articles")
+        instrumentation.count("decoder.bytes", len(decoded_data))
+
         # If the data needs to be written to disk due to full cache, this will be slow
         # Causing the decoder-queue to fill up and delay the downloader
         sabnzbd.ArticleCache.save_article(article, decoded_data)
