@@ -318,11 +318,6 @@ def initialize(pause_downloader=False, clean_up=False, repair=0):
     sabnzbd.ArticleCache.new_limit(cfg.cache_limit.get_int())
     sabnzbd.Assembler.new_limit(sabnzbd.ArticleCache.cache_info().cache_limit)
 
-    # Measure what the destinations can do, off the startup path so a slow disk does
-    # not delay the interface coming up. Advisory: logged and exposed, consumed by
-    # nothing yet.
-    sabnzbd.THREAD_POOL.submit(sabnzbd.storage.log_profiles)
-
     logging.info("All processes started")
     sabnzbd.RESTART_REQ = False
     sabnzbd.__INITIALIZED__ = True
@@ -597,6 +592,10 @@ def delayed_startup_actions():
                 "SABnzbd %s" % sabnzbd.__version__,
                 ssdp_broadcast_interval=sabnzbd.cfg.ssdp_broadcast_interval(),
             )
+
+    # What the destinations can actually do. Here rather than in initialize() because
+    # it takes up to a second per device and nothing waits on the answer yet.
+    sabnzbd.storage.log_profiles()
 
 
 def check_all_tasks():
