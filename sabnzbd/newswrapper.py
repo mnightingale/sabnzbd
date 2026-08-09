@@ -72,7 +72,6 @@ class NewsWrapper:
         "force_login",
         "next_request",
         "concurrent_requests",
-        "_response_queue",
         "selector_events",
         "lock",
         "generation",
@@ -107,7 +106,6 @@ class NewsWrapper:
         self.concurrent_requests: threading.BoundedSemaphore = threading.BoundedSemaphore(
             self.server.pipelining_requests()
         )
-        self._response_queue: deque[Optional[sabnzbd.nzb.Article]] = deque()
         self.selector_events = 0
         self.tls_wants_write: bool = False
 
@@ -115,8 +113,10 @@ class NewsWrapper:
     def article(self) -> Optional["sabnzbd.nzb.Article"]:
         """The article currently being downloaded"""
         with self.lock:
-            if self._response_queue:
-                return self._response_queue[0]
+            # `is not None`: a Decoder is falsy whenever it has no collected
+            # responses waiting, which is most of the time
+            if self.decoder is not None and (pending := self.decoder.pending):
+                return pending[0]
             return None
 
     def init_connect(self):
@@ -131,7 +131,7 @@ class NewsWrapper:
         self.timeout = time.time() + self.server.timeout
 
         # On connect the first "response" will be 200 Welcome
-        self._response_queue.append(None)
+        self.decoder.expect(None)
         self.concurrent_requests.acquire()
 
     def finish_connect(self, code: int, message: str) -> None:
@@ -179,6 +179,42 @@ class NewsWrapper:
                 self.ready = True
 
         self.timeout = time.time() + self.server.timeout
+
+    def article_sink(self, article: Optional["sabnzbd.nzb.Article"]) -> Optional[sabctools.FileWriter]:
+        """Where this article's data should be written, or None to decode into memory.
+
+        Decided before the request goes out, which is possible because the file an
+        article belongs to is known then; only the offset within it is not, and the
+        decoder reads that from the yEnc headers itself.
+
+        Streaming is refused whenever the bytes are still needed in memory. The first
+        article of a file is the clearest case: until the filename has been checked,
+        decode_yenc uses the data to derive md5of16k and to rename the file, and the
+        file has no path to write to yet. Those articles take the cache path exactly as
+        before, so the in-memory route stays live in every configuration.
+        """
+        if not article or not sabnzbd.cfg.direct_decode() or not sabnzbd.cfg.direct_write():
+            return None
+
+        nzf = article.nzf
+        # type is only known once the first article of the file has decoded, and uu
+        # carries no offsets to write at
+        if nzf.type != "yenc":
+            return None
+        # The first article is the one decode_yenc derives md5of16k from, so its bytes
+        # have to be in memory. Every other article only feeds verify_nzf_filename,
+        # which gives up as soon as there is a filepath - and there is one below.
+        if article.lowest_partnum:
+            return None
+        if not nzf.prepare_filepath():
+            return None
+
+        try:
+            return sabnzbd.Assembler.get_writer(nzf)
+        except OSError:
+            # Cannot open the file: fall back to memory rather than failing the article
+            logging.debug("Could not open %s for streaming", nzf.filepath, exc_info=True)
+            return None
 
     def queue_command(
         self,
@@ -319,9 +355,12 @@ class NewsWrapper:
             for response in self.decoder:
                 with self.lock:
                     # Check generation under lock to avoid racing with hard_reset
-                    if self.generation != generation or not self._response_queue:
+                    if self.generation != generation:
                         return bytes_recv, None
-                    article = self._response_queue.popleft()
+                # Paired by the decoder as the response was created, so this is the
+                # article whose request produced it rather than whatever a second queue
+                # happened to hold
+                article = response.context
                 if on_response:
                     on_response(response.status_code, response.message)
                 self.on_response(response, article)
@@ -371,7 +410,7 @@ class NewsWrapper:
         server = self.server
 
         # Do not pipeline requests until authentication is completed (connected)
-        if not self.blocking and (self.ready or not self._response_queue):
+        if not self.blocking and (self.ready or not (self.decoder is not None and self.decoder.expected)):
             server_ready = (
                 server.active
                 and not server.restart
@@ -397,7 +436,7 @@ class NewsWrapper:
                         self.next_request = None
 
         # Return True if there is work queued or in flight
-        return bool(self.next_request or self._response_queue)
+        return bool(self.next_request or (self.decoder is not None and self.decoder.expected))
 
     def write(self):
         """Send data to server"""
@@ -440,7 +479,10 @@ class NewsWrapper:
                         logging.debug("%s@%s: Partial send", self.thrdnum, server.host)
                         self.nntp.write_buffer = command[sent:]
 
-                    self._response_queue.append(article)
+                    # Recorded here rather than in a queue of our own: responses come
+                    # back in this order, and the decoder pairing them itself is what
+                    # stops a drift from writing one article's bytes into another's file
+                    self.decoder.expect(article, self.article_sink(article))
                     self.next_request = None
                 else:
                     # Concurrency limit reached; wait until a response is read to prevent hot looping on EVENT_WRITE
@@ -474,10 +516,12 @@ class NewsWrapper:
                 _, article = self.next_request
                 self.discard(article, count_article_try=False, retry_article=True)
                 self.next_request = None
-            # Drain responses
-            while self._response_queue:
-                if article := self._response_queue.popleft():
-                    self.discard(article, count_article_try=False, retry_article=True)
+            # Drain responses. The decoder is replaced by __init__ below, so its own
+            # queue goes with it; only the articles need handing back.
+            if self.decoder is not None:
+                for article in self.decoder.pending:
+                    if article:
+                        self.discard(article, count_article_try=False, retry_article=True)
 
             if self.nntp:
                 sabnzbd.Downloader.remove_socket(self)
