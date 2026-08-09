@@ -25,6 +25,7 @@ import threading
 
 import pytest
 
+import sabnzbd
 import sabnzbd.instrumentation as instrumentation
 
 
@@ -232,12 +233,120 @@ class TestSummaryLine:
         line = next(r.getMessage() for r in caplog.records if "Instrumentation:" in r.getMessage())
         assert re.search(r"over \d+s: saved=", line)
 
+    def test_idle_line_is_marked(self, recording, caplog):
+        """The final summary has to be findable in a log, since it is the one carrying
+        the totals for a completed run"""
+        sampler = recording.Sampler()
+        with caplog.at_level("DEBUG", logger="root"):
+            sampler.log_summary(cpu_percent=0.0, rss=1024, elapsed=60.0, finished=True)
+        line = next(r.getMessage() for r in caplog.records if "Instrumentation" in r.getMessage())
+        assert line.startswith("Instrumentation (idle):")
+
     def test_summary_survives_an_empty_window(self, recording, caplog):
         """Logging must not divide by zero when nothing has been recorded yet"""
         sampler = recording.Sampler()
         with caplog.at_level("DEBUG", logger="root"):
             sampler.log_summary(cpu_percent=0.0, rss=0, elapsed=0.0)
         assert any("Instrumentation:" in r.getMessage() for r in caplog.records)
+
+
+class TestIdleSuppression:
+    """A SABnzbd with nothing to do must not fill the log, but a finished run must
+    still be summarised once"""
+
+    @staticmethod
+    def run_samples(sampler, count, caplog):
+        """Drive count samples and return the summary lines produced"""
+        start = len(caplog.records)
+        for _ in range(count):
+            sampler.sample()
+        return [r.getMessage() for r in caplog.records[start:] if "Instrumentation" in r.getMessage()]
+
+    def test_idle_produces_no_logs_at_all(self, recording, caplog):
+        """A SABnzbd that starts and does nothing must stay silent, including the line
+        that would otherwise mark the transition into idle"""
+        sampler = recording.Sampler()
+        sampler.reset_baselines()
+        # Pretend a whole log interval has elapsed, so only idleness can suppress it
+        sampler._Sampler__next_log = 0
+        with caplog.at_level("DEBUG", logger="root"):
+            lines = self.run_samples(sampler, recording.IDLE_SAMPLES + 10, caplog)
+        assert lines == []
+
+    def test_work_is_logged_on_the_interval(self, recording, caplog):
+        sampler = recording.Sampler()
+        sampler.reset_baselines()
+        with caplog.at_level("DEBUG", logger="root"):
+            for _ in range(3):
+                # Counter movement is what marks the pipeline as busy
+                recording.count("decoder.articles")
+                sampler._Sampler__next_log = 0
+                sampler.sample()
+            lines = [r.getMessage() for r in caplog.records if "Instrumentation" in r.getMessage()]
+        assert len(lines) == 3
+        assert not any("(idle)" in line for line in lines)
+
+    def test_one_final_summary_after_work_stops(self, recording, caplog):
+        """The run's totals are only complete once post-processing has finished, so the
+        transition to idle has to produce exactly one more line"""
+        sampler = recording.Sampler()
+        sampler.reset_baselines()
+        recording.count("decoder.articles")
+        sampler.sample()
+
+        with caplog.at_level("DEBUG", logger="root"):
+            lines = self.run_samples(sampler, recording.IDLE_SAMPLES + 5, caplog)
+        assert len(lines) == 1
+        assert lines[0].startswith("Instrumentation (idle):")
+
+    def test_intermittent_work_does_not_flap(self, recording, caplog):
+        """Articles arriving with gaps must not settle into idle and re-report on every
+        dip, which would log more than a fixed interval would"""
+        sampler = recording.Sampler()
+        sampler.reset_baselines()
+        with caplog.at_level("DEBUG", logger="root"):
+            for _ in range(6):
+                recording.count("decoder.articles")
+                sampler.sample()
+                # A gap shorter than the idle threshold
+                for _ in range(recording.IDLE_SAMPLES - 1):
+                    sampler.sample()
+            lines = [r.getMessage() for r in caplog.records if "Instrumentation" in r.getMessage()]
+        assert not any("(idle)" in line for line in lines)
+
+    def test_a_slow_transfer_is_not_idle_between_articles(self, recording, monkeypatch):
+        """On a throttled link an article can take longer to arrive than the idle
+        threshold. Judging on completed articles alone reports the run finished in every
+        gap, so throughput has to count as work in its own right."""
+
+        class Meter:
+            bps = 40000.0
+
+        monkeypatch.setattr(sabnzbd, "BPSMeter", Meter, raising=False)
+        sampler = recording.Sampler()
+        sampler.reset_baselines()
+        # Far longer than the idle threshold with no article completing
+        for _ in range(recording.IDLE_SAMPLES * 4):
+            assert sampler.work_seen() is True
+
+        Meter.bps = 0.0
+        assert sampler.work_seen() is False
+
+    def test_work_after_idle_starts_logging_again(self, recording, caplog):
+        sampler = recording.Sampler()
+        sampler.reset_baselines()
+        recording.count("decoder.articles")
+        sampler.sample()
+        for _ in range(recording.IDLE_SAMPLES + 2):
+            sampler.sample()
+
+        with caplog.at_level("DEBUG", logger="root"):
+            recording.count("decoder.articles")
+            sampler._Sampler__next_log = 0
+            sampler.sample()
+            lines = [r.getMessage() for r in caplog.records if "Instrumentation" in r.getMessage()]
+        assert len(lines) == 1
+        assert "(idle)" not in lines[0]
 
 
 class TestSnapshot:

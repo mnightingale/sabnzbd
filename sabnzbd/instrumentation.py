@@ -64,8 +64,11 @@ ENABLED: bool = False
 
 # How often the sampler wakes to record CPU and RSS
 SAMPLE_INTERVAL = 1.0
-# How often the summary line is written to the log
+# How often the summary line is written to the log, while there is work to report
 LOG_INTERVAL = 60.0
+# Consecutive quiet samples before work is considered finished. Enough to ride out the
+# gaps between articles without delaying the final summary noticeably.
+IDLE_SAMPLES = 5
 # Roughly an hour of samples at SAMPLE_INTERVAL, bounded so nothing grows without limit
 MAX_SAMPLES = 3600
 
@@ -287,6 +290,12 @@ class Sampler(threading.Thread):
         self.__last_log_time = 0.0
         self.__last_thread_cpu: dict[str, float] = {}
         self.__next_log = 0.0
+        # Idle tracking, so a SABnzbd with nothing to do does not fill the log. Starts
+        # already idle: a sampler that has never seen work has nothing to summarise, and
+        # counting up from zero would emit one line shortly after every startup.
+        self.__last_counter_total = 0
+        self.__idle_samples = IDLE_SAMPLES
+        self.__was_idle = True
 
     def stop(self):
         self.shutdown = True
@@ -297,6 +306,40 @@ class Sampler(threading.Thread):
         self.__last_cpu = self.__last_log_cpu = cpu
         self.__last_time = self.__last_log_time = now
         self.__next_log = now + LOG_INTERVAL
+
+    def work_seen(self) -> bool:
+        """Is anything happening, as of this sample?
+
+        Completed articles alone are not enough to go on. On a slow or throttled link a
+        500 KB article can take longer to arrive than the idle threshold, so a download
+        in progress would look idle between articles and report itself finished over and
+        over. Throughput is therefore checked as well, which covers the gaps and costs
+        nothing to read.
+
+        Post-processing is checked because it moves no article counters while being
+        exactly when RSS and CPU peak, and the assembler because decoded bytes can still
+        be waiting to be written after the last article has arrived.
+
+        Deliberately not checked: whether jobs are queued. A paused or stalled queue has
+        nothing happening in it and nothing to report.
+        """
+        with _LOCK:
+            total = sum(_counters.values())
+        moved = total != self.__last_counter_total
+        self.__last_counter_total = total
+        if moved:
+            return True
+        try:
+            if sabnzbd.BPSMeter.bps:
+                return True
+            if len(sabnzbd.PostProcessor.history_queue):
+                return True
+            if sabnzbd.Assembler.total_ready_bytes():
+                return True
+        except Exception:
+            # Not fully started, or already shutting down
+            pass
+        return False
 
     def run(self):
         logging.debug("Instrumentation sampler starting")
@@ -329,17 +372,35 @@ class Sampler(threading.Thread):
         rss = current_rss()
         peak("process.rss", rss)
 
+        try:
+            bps = sabnzbd.BPSMeter.bps
+        except Exception:
+            # Not fully started, or torn down while the sampler was between ticks. An
+            # exception here reaches run() and silently stops all further sampling.
+            bps = 0.0
+
         with _LOCK:
             _samples.append(
                 {
                     "time": time.time(),
                     "rss": rss,
                     "cpu_percent": round(cpu_percent, 2),
-                    "bps": sabnzbd.BPSMeter.bps,
+                    "bps": bps,
                 }
             )
 
-        if now >= self.__next_log:
+        # A few quiet samples are required before calling it idle. Articles arriving
+        # every couple of seconds would otherwise flip in and out of idle and log a
+        # summary on every dip, which is worse than logging on a fixed interval.
+        self.__idle_samples = 0 if self.work_seen() else self.__idle_samples + 1
+        idle = self.__idle_samples >= IDLE_SAMPLES
+        finished = idle and not self.__was_idle
+        self.__was_idle = idle
+
+        # Log on the interval while there is work, plus exactly one final summary once
+        # everything including post-processing has stopped. That last one is the whole
+        # point: peak RSS and total CPU are only complete after unpacking and par2.
+        if (not idle and now >= self.__next_log) or finished:
             self.__next_log = now + LOG_INTERVAL
             # Averaged over the log interval, not over the last sample, so the process
             # figure and the per-thread figures are on the same base and can be compared
@@ -347,12 +408,19 @@ class Sampler(threading.Thread):
             log_cpu_percent = 100.0 * (cpu - self.__last_log_cpu) / log_elapsed if log_elapsed > 0 else 0.0
             self.__last_log_cpu = cpu
             self.__last_log_time = now
-            self.log_summary(log_cpu_percent, rss, log_elapsed)
+            self.log_summary(log_cpu_percent, rss, log_elapsed, finished)
+        elif idle:
+            # Nothing to report, so roll the baselines forward. Without this the first
+            # summary after work resumes would average its rates over the idle stretch.
+            self.__last_log_cpu = cpu
+            self.__last_log_time = now
+            self.__next_log = now + LOG_INTERVAL
 
-    def log_summary(self, cpu_percent: float, rss: int, elapsed: float):
+    def log_summary(self, cpu_percent: float, rss: int, elapsed: float, finished: bool = False):
         """One compact line, at debug level, covering the metrics S0 exists to answer.
 
         Every percentage is an average over ``elapsed``, which is the log interval.
+        ``finished`` marks the summary written once work has stopped.
         """
         threads = []
         with _LOCK:
@@ -384,9 +452,10 @@ class Sampler(threading.Thread):
         # The percentages cover the log interval, but the counters are cumulative over the
         # whole recording window, so the window is stated to keep the two apart
         logging.debug(
-            "Instrumentation: cpu=%.1f%%%s rss=%s peak=%s | speed=%s/s cache=%s/%s (%s articles) "
+            "Instrumentation%s: cpu=%.1f%%%s rss=%s peak=%s | speed=%s/s cache=%s/%s (%s articles) "
             "pending=%s | over %.0fs: saved=%s held=%s cache-full=%s (%.1f%%) | "
             "amplification: +%s written +%s reread",
+            " (idle)" if finished else "",
             cpu_percent,
             " [" + " ".join(threads) + "]" if threads else "",
             to_units(rss, "B"),
