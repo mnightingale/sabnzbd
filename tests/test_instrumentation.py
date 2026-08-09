@@ -406,10 +406,29 @@ class TestSnapshot:
         assert not_recording.peak_rss() >= rss * 0.5
 
     def test_combined_rss_agrees_with_the_separate_accessors(self, not_recording):
+        """rss() answers both questions from one call where the OS offers them together,
+        so it has to report the same quantities as the individual accessors.
+
+        Not asserting exact equality: on Linux the two come from different sources read
+        moments apart, and even on one platform the process can grow in between. They
+        have to track, not match.
+        """
         current, peak = not_recording.rss()
         assert current > 1024 * 1024
+        assert peak > 1024 * 1024
+        assert current == pytest.approx(not_recording.current_rss(), rel=0.1)
+        assert peak == pytest.approx(not_recording.peak_rss(), rel=0.1)
+
+    def test_peak_rss_is_never_below_current(self, not_recording):
+        """A peak lower than the current size is nonsense to read on a memory panel.
+
+        Linux reports ru_maxrss from a high-water mark refreshed at checkpoints rather
+        than on every allocation, so a process that has just grown gets a stale peak.
+        Seen on CI as current 207568896 against peak 207368192.
+        """
+        current, peak = not_recording.rss()
         assert peak >= current
-        assert not_recording.peak_rss() == peak
+        assert not_recording.peak_rss() >= not_recording.current_rss()
 
 
 @pytest.mark.skipif(not hasattr(os, "pread"), reason="os.pread is Unix only, so the statm reader cannot run here")

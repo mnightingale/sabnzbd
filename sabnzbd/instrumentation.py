@@ -360,7 +360,13 @@ def peak_rss() -> int:
         if resource:
             # ru_maxrss is bytes on macOS but kilobytes on Linux
             max_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            return max_rss if sabnzbd.MACOS else max_rss * 1024
+            if sabnzbd.MACOS:
+                return max_rss
+            # Linux refreshes this high-water mark at checkpoints rather than on every
+            # allocation, so a process that has just grown reports a peak below its own
+            # current size. Current RSS is a lower bound on the peak by definition, so
+            # taking the larger is both more accurate and keeps the figure sane to read.
+            return max(max_rss * 1024, current_rss())
     except Exception:
         pass
     return 0
