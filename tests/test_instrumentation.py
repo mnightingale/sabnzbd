@@ -23,6 +23,7 @@ import json
 import os
 import re
 import threading
+import time
 
 import pytest
 
@@ -158,6 +159,30 @@ class TestRecording:
         assert not snapshot["timings"]
 
 
+# Comfortably above both the ~15.6 ms Windows scheduler tick and the millisecond
+# rounding that snapshot() applies to these totals
+BURN_SECONDS = 0.05
+
+
+def burn_cpu(seconds: float = BURN_SECONDS, timeout: float = 10.0):
+    """Burn at least ``seconds`` of this thread's own CPU time.
+
+    Two things make a fixed amount of work unreliable here. Windows measures per-thread
+    CPU with GetThreadTimes at roughly a 15.6 ms scheduler tick, and snapshot() rounds
+    these totals to milliseconds, so a short burst can legitimately report as exactly
+    zero on either count. Burning against the same clock the code reads keeps the test
+    about whether deltas accumulate rather than about the platform's resolution.
+
+    Waiting for the clock merely to *change* does not work: reading it costs CPU, so on
+    a fine-grained clock it has already moved by the first comparison and nothing is
+    burned at all. The wall-clock timeout keeps a stalled clock from hanging the suite.
+    """
+    start = time.thread_time()
+    deadline = time.monotonic() + timeout
+    while time.thread_time() - start < seconds and time.monotonic() < deadline:
+        sum(range(50000))
+
+
 class TestThreadCpu:
     def test_first_report_only_sets_a_baseline(self, recording):
         """time.thread_time() is cumulative, so the first call has no delta to add"""
@@ -168,7 +193,7 @@ class TestThreadCpu:
     def test_repeated_reports_accumulate(self, recording):
         def burn():
             recording.record_thread_cpu("worker")
-            sum(range(400000))
+            burn_cpu()
             recording.record_thread_cpu("worker")
 
         thread = threading.Thread(target=burn)
@@ -181,7 +206,7 @@ class TestThreadCpu:
 
         def burn():
             recording.record_thread_cpu("receive")
-            sum(range(400000))
+            burn_cpu()
             recording.record_thread_cpu("receive")
 
         threads = [threading.Thread(target=burn) for _ in range(3)]
@@ -387,16 +412,21 @@ class TestSnapshot:
         assert not_recording.peak_rss() == peak
 
 
+@pytest.mark.skipif(not hasattr(os, "pread"), reason="os.pread is Unix only, so the statm reader cannot run here")
+@pytest.mark.platform("linux")
 class TestStatmDescriptor:
     """The Linux reader caches its descriptor, which is what made it 20x cheaper than
-    reopening per call, and is also the only part of it that can go wrong"""
+    reopening per call, and is also the only part of it that can go wrong.
+
+    Faking the platform flags is not enough to run this on Windows: the reader calls
+    os.pread, which does not exist there, so the whole class is skipped rather than
+    pretending to cover a path that platform cannot execute.
+    """
 
     @pytest.fixture
     def as_linux(self, monkeypatch, tmp_path):
         statm = tmp_path / "statm"
         statm.write_text("35190 4933 2626 2 0 8663 0\n")
-        monkeypatch.setattr(sabnzbd, "WINDOWS", False)
-        monkeypatch.setattr(sabnzbd, "MACOS", False)
         monkeypatch.setattr(instrumentation, "STATM_PATH", str(statm))
         instrumentation._drop_statm_descriptor()
         yield statm
