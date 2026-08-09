@@ -18,10 +18,15 @@
 """
 instrumentation_poll - Record a measurement run from mode=instrumentation
 
-Polls the instrumentation API, turns the cumulative counters into per-interval rates,
-and writes a CSV for plotting plus a JSONL of the raw responses. Deliberately lives
-outside SABnzbd: pointing Prometheus at this script rather than at the API keeps a
+Polls the instrumentation API and writes a CSV for plotting plus a JSONL of the raw
+responses, and can serve the same data to Prometheus. Deliberately lives outside
+SABnzbd: pointing Prometheus at this script rather than at the API keeps a
 metric-naming compatibility promise out of SABnzbd itself.
+
+The two outputs are shaped differently on purpose. The CSV carries per-interval rates,
+because a spreadsheet has no rate() to call. Prometheus gets the cumulative counters
+untouched, so the window is the dashboard's choice, counter resets across a restart are
+detected, and the scrape interval no longer has to match the poll interval.
 
 The run this is built for is fast machine, fast line, slow or exhausted disk. That is
 the regime where the article cache cannot drain, fills, and starts writing articles to
@@ -337,19 +342,124 @@ def build_row(
 ##############################################################################
 # Prometheus
 ##############################################################################
+def metric_name(name: str) -> str:
+    """SABnzbd's dotted counter names into legal Prometheus metric names"""
+    return "".join(character if character.isalnum() else "_" for character in name)
+
+
+def escape_label(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
 class PrometheusState:
-    """Latest row, rendered on demand in the Prometheus text format"""
+    """Latest snapshot, rendered on demand in the Prometheus text format.
+
+    Cumulative counters are exported raw, as counters, rather than as the per-interval
+    rates the CSV carries. The CSV needs its own deltas because a spreadsheet has no
+    rate() to call, but handing Prometheus pre-computed rates throws away everything it
+    is good at: rate() picks its own window, so smoothing is a dashboard decision rather
+    than something baked in at collection time and needing the run repeated to change;
+    counter resets across a SABnzbd restart are detected; and a scrape interval that
+    does not match the poll interval stops mattering, because scraping an unchanged
+    counter twice contributes nothing instead of duplicating a rate sample.
+
+    New counters are picked up automatically, so a breakdown added to
+    sabnzbd/instrumentation.py needs no change here.
+    """
 
     def __init__(self):
-        self.row: dict[str, Any] = {}
+        self.snapshot: dict[str, Any] = {}
+        self.disk: Optional[dict[str, int]] = None
+
+    def update(self, snapshot: dict[str, Any], disk: Optional[dict[str, int]]):
+        self.snapshot, self.disk = snapshot, disk
 
     def render(self) -> bytes:
-        lines = []
-        for name, value in self.row.items():
-            if name == "timestamp" or not isinstance(value, (int, float)):
-                continue
-            lines.append("# TYPE sabnzbd_%s gauge" % name)
-            lines.append("sabnzbd_%s %s" % (name, value))
+        snapshot = self.snapshot
+        if not snapshot:
+            return b"# no sample collected yet\n"
+
+        lines: list[str] = []
+
+        def emit(name: str, value: Any, kind: str, labels: str = ""):
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                return
+            lines.append("# TYPE %s %s" % (name, kind))
+            lines.append("%s%s %s" % (name, labels, value))
+
+        # Counters, straight from the API. rate() turns these into whatever the
+        # dashboard asks for.
+        for name, value in sorted(snapshot.get("counters", {}).items()):
+            emit("sabnzbd_%s_total" % metric_name(name), value, "counter")
+
+        # Labelled counters become real Prometheus labels, so a breakdown can be summed
+        # or split in the query rather than needing one metric per label
+        for name, labels in sorted(snapshot.get("labelled", {}).items()):
+            metric = "sabnzbd_%s_total" % metric_name(name)
+            lines.append("# TYPE %s counter" % metric)
+            for label, value in sorted(labels.items()):
+                lines.append('%s{label="%s"} %s' % (metric, escape_label(label), value))
+
+        # Cumulative CPU per role: rate() over these gives the fraction of a core, which
+        # is what the pre-computed percentage was approximating
+        thread_cpu = snapshot.get("thread_cpu_seconds", {})
+        if thread_cpu:
+            lines.append("# TYPE sabnzbd_thread_cpu_seconds_total counter")
+            for role, value in sorted(thread_cpu.items()):
+                lines.append('sabnzbd_thread_cpu_seconds_total{role="%s"} %s' % (escape_label(role), value))
+
+        # Spans as a total and a count, so rate(total)/rate(count) is the mean latency
+        # over the dashboard's window rather than over the whole run
+        timings = snapshot.get("timings", {})
+        if timings:
+            lines.append("# TYPE sabnzbd_span_seconds_total counter")
+            for name, entry in sorted(timings.items()):
+                lines.append('sabnzbd_span_seconds_total{span="%s"} %s' % (escape_label(name), entry["total_seconds"]))
+            lines.append("# TYPE sabnzbd_span_calls_total counter")
+            for name, entry in sorted(timings.items()):
+                lines.append('sabnzbd_span_calls_total{span="%s"} %s' % (escape_label(name), entry["count"]))
+            lines.append("# TYPE sabnzbd_span_max_seconds gauge")
+            for name, entry in sorted(timings.items()):
+                lines.append('sabnzbd_span_max_seconds{span="%s"} %s' % (escape_label(name), entry["max_seconds"]))
+
+        # Peaks are tracked in-process, so they catch bursts that fall between polls.
+        # Named for the recording window to keep them apart from peak_rss_bytes below,
+        # which is the OS figure for the whole process lifetime.
+        for name, value in sorted(snapshot.get("peaks", {}).items()):
+            emit("sabnzbd_window_peak_%s" % metric_name(name), value, "gauge")
+
+        process = snapshot.get("process", {})
+        emit("sabnzbd_rss_bytes", process.get("rss"), "gauge")
+        emit("sabnzbd_peak_rss_bytes", process.get("peak_rss"), "gauge")
+        emit("sabnzbd_process_cpu_seconds_total", process.get("cpu_seconds"), "counter")
+        emit("sabnzbd_threads", process.get("thread_count"), "gauge")
+
+        state = snapshot.get("state", {})
+        cache = state.get("cache", {})
+        emit("sabnzbd_cache_used_bytes", cache.get("size"), "gauge")
+        emit("sabnzbd_cache_limit_bytes", cache.get("limit"), "gauge")
+        emit("sabnzbd_cache_articles", cache.get("articles"), "gauge")
+
+        assembler = state.get("assembler", {})
+        emit("sabnzbd_assembler_ready_bytes", assembler.get("ready_bytes"), "gauge")
+        emit("sabnzbd_assembler_queue_size", assembler.get("queue_size"), "gauge")
+        emit("sabnzbd_assembler_delay_seconds", assembler.get("delay"), "gauge")
+
+        downloader = state.get("downloader", {})
+        emit("sabnzbd_speed_bytes_per_second", downloader.get("speed_bps"), "gauge")
+
+        queue = state.get("queue", {})
+        emit("sabnzbd_queue_jobs", queue.get("jobs"), "gauge")
+        emit("sabnzbd_queue_bytes_left", queue.get("bytes_left"), "gauge")
+        emit("sabnzbd_postproc_queue", state.get("postproc", {}).get("queue_length"), "gauge")
+
+        # Device counters are cumulative by nature, so they need no special handling
+        if self.disk:
+            emit("sabnzbd_disk_read_bytes_total", self.disk.get("read_bytes"), "counter")
+            emit("sabnzbd_disk_write_bytes_total", self.disk.get("write_bytes"), "counter")
+            # Milliseconds with I/O in flight; as seconds, rate() is utilisation directly
+            emit("sabnzbd_disk_io_seconds_total", self.disk.get("io_ticks", 0) / 1000.0, "counter")
+
         return ("\n".join(lines) + "\n").encode()
 
 
@@ -368,7 +478,7 @@ def serve_prometheus(port: int, state: PrometheusState):
         def log_message(self, *args):
             pass
 
-    server = HTTPServer(("127.0.0.1", port), Handler)
+    server = HTTPServer(("0.0.0.0", port), Handler)
     Thread(target=server.serve_forever, daemon=True).start()
     print("Prometheus metrics on http://127.0.0.1:%s/metrics" % port)
 
@@ -512,6 +622,9 @@ def main():
                 interval = now - previous_time
                 row = build_row(snapshot, previous, disk_now, previous_disk, now - started, interval)
 
+                # Exported raw, so unlike the CSV it needs no previous sample to be useful
+                prometheus.update(snapshot, disk_now)
+
                 # The raw response goes to JSONL so anything not in CSV_COLUMNS, including
                 # counters added later, is still recoverable after the run
                 jsonl_file.write(json.dumps({"elapsed": row["elapsed"], "snapshot": snapshot}) + "\n")
@@ -520,7 +633,6 @@ def main():
                 if previous is not None:
                     writer.writerow(row)
                     csv_file.flush()
-                    prometheus.row = row
                     rows += 1
                     print(
                         "%6.0fs  %8s/s  cache %5.1f%%  spill %5.1f/s  admin-w %8s/s  disk-w %8s/s  util %5.1f%%  rss %8s"
