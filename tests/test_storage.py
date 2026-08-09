@@ -23,7 +23,6 @@ import os
 
 import pytest
 
-import sabnzbd
 import sabnzbd.storage as storage
 
 
