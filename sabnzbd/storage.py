@@ -69,7 +69,6 @@ import os
 import random
 import tempfile
 import threading
-import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -157,14 +156,13 @@ def probe(path: str) -> DeviceProfile:
     except OSError as err:
         return DeviceProfile(device=0, path=path, error=str(err))
 
-    handle = None
     writer = None
     probe_path = None
     try:
-        # mkstemp's descriptor is kept only to fsync through: FileWriter owns its own and
-        # exposes no way to flush it. Flushing one descriptor commits the file's cached
-        # data whichever descriptor dirtied it, so the barrier still holds.
+        # mkstemp only to get a name nothing else can be holding; FileWriter opens its
+        # own handle, so this descriptor has no further use
         handle, probe_path = tempfile.mkstemp(prefix=".sabnzbd-probe-", dir=path)
+        os.close(handle)
         writer = sabctools.FileWriter(probe_path)
 
         # A hole rather than 256 MB of real writes, and the same shape as a direct-write
@@ -173,19 +171,15 @@ def probe(path: str) -> DeviceProfile:
 
         block = bytearray(os.urandom(PROBE_BLOCK))
         # Seeded, so two runs on one machine are comparable
-        offsets = random.Random(0x5AB4).sample(range(PROBE_SPAN // PROBE_BLOCK), PROBE_MAX_OPS)
+        offsets = [
+            index * PROBE_BLOCK
+            for index in random.Random(0x5AB4).sample(range(PROBE_SPAN // PROBE_BLOCK), PROBE_MAX_OPS)
+        ]
 
-        ops = 0
-        deadline = time.monotonic() + PROBE_TIME_BUDGET
-        started = time.monotonic()
-        for index in offsets:
-            writer.write(block, index * PROBE_BLOCK)
-            # What makes this a measurement of the device rather than of memory
-            os.fsync(handle)
-            ops += 1
-            if time.monotonic() >= deadline:
-                break
-        elapsed = time.monotonic() - started
+        # The loop itself lives in FileWriter, so what gets timed is the write the
+        # download path will actually perform - the same handle, the same lock, and on
+        # Windows the same OVERLAPPED write rather than a seek-and-write stand-in
+        ops, elapsed = writer.probe(block, offsets, PROBE_TIME_BUDGET)
 
         if elapsed <= 0:
             return DeviceProfile(device=device, path=path, ops=ops, error="no elapsed time")
@@ -204,11 +198,6 @@ def probe(path: str) -> DeviceProfile:
         if writer is not None:
             try:
                 writer.close()
-            except OSError:
-                pass
-        if handle is not None:
-            try:
-                os.close(handle)
             except OSError:
                 pass
         if probe_path:
