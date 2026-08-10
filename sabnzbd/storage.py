@@ -46,6 +46,17 @@ without flushing its cache - only F_FULLFSYNC does that, at a cost far beyond wh
 startup probe should pay - so the barrier is weaker there. It still leaves the page
 cache, which is all the measurement needs.
 
+**The hole has to be a real hole.** os.ftruncate on Windows is _chsize_s, which extends
+a file by writing the zeros rather than by moving its end, so preallocating the span
+left 256 MB of dirty pages behind: the first fsync then flushed all of them and the
+whole time budget went on one operation, which the probe reported as an SSD managing
+two writes a second. Skipping the preallocation is no better, because NTFS zero-fills
+the gap between a file's valid data length and any write past it, moving the same cost
+into the first few writes. Both disappear once the file is marked sparse before its
+length is set, which is what FileWriter.preallocate does and what the assembler already
+does for every download - so the probe now preallocates and writes through the same
+FileWriter the real path uses, and measures the device instead of the file system.
+
 **The threshold errs towards sequential.** Calling a solid state disk slow costs
 nothing: writes stay ordered, which is what happens today. Calling a spinning disk
 fast costs a seek per article. So an unmeasurable device, a failed probe and a
@@ -61,6 +72,8 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Optional
+
+import sabctools
 
 import sabnzbd
 from sabnzbd.decorators import synchronized
@@ -81,10 +94,12 @@ PROBE_TIME_BUDGET = 0.5
 PROBE_MIN_OPS = 8
 
 # Durable random writes per second above which scattering writes is worth doing.
-# A 7200 rpm disk seeks in 7-12 ms and so lands near 60-130; anything solid state is
-# in the thousands even with a flush on every write. The gap is wide enough that the
-# exact number here does not matter much, which is the point of choosing a threshold
-# in the middle of a chasm rather than near either population.
+# A 7200 rpm disk seeks in 7-12 ms and so lands near 60-130. Solid state is well clear
+# of that, but by less than the raw hardware suggests, because what is being timed is a
+# cache flush and not a write: four SSDs on one Windows machine measured 500-1000, with
+# the NVMe drive slower than the SATA ones for exactly that reason. So the gap is
+# roughly 4-8x rather than the order of magnitude the raw device figures imply, and the
+# threshold sits nearer the fast population than a reading of those figures suggests.
 FAST_RANDOM_WRITE_IOPS = 400
 
 
@@ -143,15 +158,20 @@ def probe(path: str) -> DeviceProfile:
         return DeviceProfile(device=0, path=path, error=str(err))
 
     handle = None
+    writer = None
     probe_path = None
     try:
+        # mkstemp's descriptor is kept only to fsync through: FileWriter owns its own and
+        # exposes no way to flush it. Flushing one descriptor commits the file's cached
+        # data whichever descriptor dirtied it, so the barrier still holds.
         handle, probe_path = tempfile.mkstemp(prefix=".sabnzbd-probe-", dir=path)
+        writer = sabctools.FileWriter(probe_path)
 
-        # A hole rather than 256 MB of real writes. Also the same shape as a
-        # direct-write download: preallocate, then fill pieces of it out of order.
-        os.ftruncate(handle, PROBE_SPAN)
+        # A hole rather than 256 MB of real writes, and the same shape as a direct-write
+        # download: preallocate, then fill pieces of it out of order.
+        writer.preallocate(PROBE_SPAN)
 
-        block = os.urandom(PROBE_BLOCK)
+        block = bytearray(os.urandom(PROBE_BLOCK))
         # Seeded, so two runs on one machine are comparable
         offsets = random.Random(0x5AB4).sample(range(PROBE_SPAN // PROBE_BLOCK), PROBE_MAX_OPS)
 
@@ -159,7 +179,7 @@ def probe(path: str) -> DeviceProfile:
         deadline = time.monotonic() + PROBE_TIME_BUDGET
         started = time.monotonic()
         for index in offsets:
-            _write_at(handle, block, index * PROBE_BLOCK)
+            writer.write(block, index * PROBE_BLOCK)
             # What makes this a measurement of the device rather than of memory
             os.fsync(handle)
             ops += 1
@@ -181,6 +201,11 @@ def probe(path: str) -> DeviceProfile:
     except Exception as err:
         return DeviceProfile(device=device, path=path, error=str(err))
     finally:
+        if writer is not None:
+            try:
+                writer.close()
+            except OSError:
+                pass
         if handle is not None:
             try:
                 os.close(handle)
@@ -191,16 +216,6 @@ def probe(path: str) -> DeviceProfile:
                 os.remove(probe_path)
             except OSError:
                 logging.debug("Could not remove storage probe file %s", probe_path, exc_info=True)
-
-
-def _write_at(handle: int, data: bytes, offset: int):
-    """Positional write. os.pwrite is Unix only, and the probe is single threaded, so
-    seek-and-write is an adequate stand-in on Windows."""
-    if sabnzbd.WINDOWS:
-        os.lseek(handle, offset, os.SEEK_SET)
-        os.write(handle, data)
-    else:
-        os.pwrite(handle, data, offset)
 
 
 def profile_for(path: str) -> DeviceProfile:

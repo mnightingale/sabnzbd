@@ -76,18 +76,20 @@ class TestProbe:
     def test_the_deadline_bounds_a_slow_device(self, tmp_path, monkeypatch):
         """On a spinning disk each write costs a seek, so the op count alone would let
         the probe run for the best part of a second"""
-        real_write = storage._write_at
+        real_fsync = os.fsync
         calls = []
 
-        def slow(handle, data, offset):
-            calls.append(offset)
-            real_write(handle, data, offset)
+        def slow(handle):
+            calls.append(handle)
+            real_fsync(handle)
             # Roughly one seek, so the budget runs out well before PROBE_MAX_OPS
             import time
 
             time.sleep(0.01)
 
-        monkeypatch.setattr(storage, "_write_at", slow)
+        # The durable write is the whole per-operation cost, and its flush half is the
+        # part that stalls on a seek, so that is where the delay belongs
+        monkeypatch.setattr(storage.os, "fsync", slow)
         profile = storage.probe(str(tmp_path))
 
         assert len(calls) < storage.PROBE_MAX_OPS, "the deadline did not stop it"
