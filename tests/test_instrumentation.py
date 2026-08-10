@@ -250,6 +250,19 @@ class TestSummaryLine:
         assert "saved=40 held=30 cache-full=10 (25.0%)" in line
         assert "amplification: +1 KB written +1 KB reread" in line
 
+    def test_summary_shows_which_route_articles_took(self, recording, caplog):
+        """Zero streamed on a run that expects to stream is the first thing worth
+        knowing, and it was not in this line at all"""
+        recording.count_labelled("decoder.written", "streamed", 7)
+        recording.count_labelled("decoder.written", "cached", 6)
+
+        sampler = recording.Sampler()
+        with caplog.at_level("DEBUG", logger="root"):
+            sampler.log_summary(cpu_percent=0.0, rss=1024, elapsed=60.0)
+
+        line = next(r.getMessage() for r in caplog.records if "Instrumentation:" in r.getMessage())
+        assert "streamed=7 cached=6" in line
+
     def test_summary_states_the_counter_window(self, recording, caplog):
         """Percentages cover the log interval but counters are cumulative, so the line has
         to say which window the counts belong to"""
@@ -257,7 +270,7 @@ class TestSummaryLine:
         with caplog.at_level("DEBUG", logger="root"):
             sampler.log_summary(cpu_percent=0.0, rss=1024, elapsed=60.0)
         line = next(r.getMessage() for r in caplog.records if "Instrumentation:" in r.getMessage())
-        assert re.search(r"over \d+s: saved=", line)
+        assert re.search(r"over \d+s: streamed=", line)
 
     def test_idle_line_is_marked(self, recording, caplog):
         """The final summary has to be findable in a log, since it is the one carrying

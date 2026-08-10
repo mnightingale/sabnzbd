@@ -550,6 +550,7 @@ class Sampler(threading.Thread):
             thread_cpu = dict(_thread_cpu)
             counters = dict(_counters)
             flushed = dict(_labelled.get("articlecache.flushed", {}))
+            written = dict(_labelled.get("decoder.written", {}))
         for role, total in sorted(thread_cpu.items()):
             delta = total - self.__last_thread_cpu.get(role, 0.0)
             self.__last_thread_cpu[role] = total
@@ -576,7 +577,7 @@ class Sampler(threading.Thread):
         # whole recording window, so the window is stated to keep the two apart
         logging.debug(
             "Instrumentation%s: cpu=%.1f%%%s rss=%s peak=%s | speed=%s/s cache=%s/%s (%s articles) "
-            "pending=%s | over %.0fs: saved=%s held=%s cache-full=%s (%.1f%%) | "
+            "pending=%s | over %.0fs: streamed=%s cached=%s saved=%s held=%s cache-full=%s (%.1f%%) | "
             "amplification: +%s written +%s reread",
             " (idle)" if finished else "",
             cpu_percent,
@@ -589,6 +590,10 @@ class Sampler(threading.Thread):
             cache.get("articles", 0),
             to_units(assembler.get("ready_bytes", 0), "B"),
             time.monotonic() - _started_at,
+            # Which route the articles took. Zero streamed on a run that expects to
+            # stream is the first thing worth knowing and was previously invisible here.
+            written.get("streamed", 0),
+            written.get("cached", 0),
             saved,
             held,
             cache_full,

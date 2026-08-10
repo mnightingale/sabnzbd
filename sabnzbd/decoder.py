@@ -152,6 +152,7 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
     if decoded_data:
         instrumentation.count("decoder.articles")
         instrumentation.count("decoder.bytes", len(decoded_data))
+        instrumentation.count_labelled("decoder.written", "cached")
 
         # If the data needs to be written to disk due to full cache, this will be slow
         # Causing the decoder-queue to fill up and delay the downloader
