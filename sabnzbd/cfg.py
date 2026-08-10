@@ -25,6 +25,7 @@ import re
 import argparse
 import socket
 import ipaddress
+import threading
 from typing import TypeAlias
 
 import sabnzbd
@@ -782,6 +783,13 @@ def new_direct_write():
 def new_instrumentation():
     """Callback for instrumentation changes"""
     sabnzbd.instrumentation.enable(bool(instrumentation()))
+
+
+def new_storage_dir():
+    """Callback for download or complete directory changes"""
+    if sabnzbd.__INITIALIZED__:
+        # Only update after full startup
+        threading.Thread(target=sabnzbd.storage.log_profiles, name="storage-profile", daemon=True).start()
 
 
 def guard_restart():
