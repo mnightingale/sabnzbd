@@ -1026,6 +1026,7 @@ SPECIAL_VALUE_LIST = (
     "ssdp_broadcast_interval",
     "unrar_parameters",
     "outgoing_nntp_ip",
+    "api_cors",
 )
 SPECIAL_LIST_LIST = (
     "rss_odd_titles",
@@ -2313,6 +2314,30 @@ def config_notify_save(request: Request):
 ##############################################################################
 
 
+class ApiCorsMiddleware:
+    """Add Access-Control-Allow-Origin to API responses when the api_cors special
+    (Config->Special) is set, so browser-based third-party tools can call the API
+    with the apikey and read the response cross-origin. The value entered is sent
+    as-is as the header value (e.g. "*" or a specific origin). Empty by default:
+    the bundled frontend is same-origin and authenticates by cookie, so it needs
+    no CORS. The setting is read per request, so changing it needs no restart."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        api_cors = cfg.api_cors()
+        if scope["type"] != "http" or not api_cors or scope["path"] not in ("/api", cfg.url_base() + "/api"):
+            return await self.app(scope, receive, send)
+
+        async def send_with_header(message):
+            if message["type"] == "http.response.start":
+                MutableHeaders(scope=message)["Access-Control-Allow-Origin"] = api_cors
+            await send(message)
+
+        await self.app(scope, receive, send_with_header)
+
+
 class XFrameOptionsMiddleware:
     """Add X-Frame-Options to every response when cfg.x_frame_options is enabled,
     mitigating clickjacking. Applied as middleware rather than in secured_expose so
@@ -2534,6 +2559,7 @@ def create_app() -> Starlette:
         Middleware(XFrameOptionsMiddleware),
         Middleware(HostnameCheckMiddleware),
         Middleware(RequestLoggingMiddleware),
+        Middleware(ApiCorsMiddleware),
         Middleware(GZipMiddleware, minimum_size=1000, compresslevel=2),
         Middleware(SecureSessionCookieMiddleware),
         # Signed session cookie, used for short-lived per-client UI state such as the

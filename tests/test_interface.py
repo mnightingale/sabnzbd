@@ -310,3 +310,47 @@ class TestInterfaceFunctions:
                 assert network not in networks
 
         _func()
+
+
+def run_response_middleware(middleware_cls, path: str = "/") -> Headers:
+    """Run a minimal request through a response-header middleware and return the response headers"""
+    captured = {}
+
+    async def asgi_app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/html")]})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            captured["headers"] = Headers(raw=message["headers"])
+
+    asyncio.run(middleware_cls(asgi_app)({"type": "http", "path": path, "headers": []}, None, send))
+    return captured["headers"]
+
+
+class TestApiCorsMiddleware:
+    @pytest.mark.config({"api_cors": "*", "url_base": "/sabnzbd"})
+    def test_header_added_on_api_routes_when_set(self):
+        assert run_response_middleware(interface.ApiCorsMiddleware, "/api").get("Access-Control-Allow-Origin") == "*"
+        assert (
+            run_response_middleware(interface.ApiCorsMiddleware, "/sabnzbd/api").get("Access-Control-Allow-Origin")
+            == "*"
+        )
+
+    @pytest.mark.config({"api_cors": "https://example.com"})
+    def test_header_uses_configured_value(self):
+        assert (
+            run_response_middleware(interface.ApiCorsMiddleware, "/api").get("Access-Control-Allow-Origin")
+            == "https://example.com"
+        )
+
+    @pytest.mark.config({"api_cors": "*"})
+    def test_header_absent_on_other_routes(self):
+        assert run_response_middleware(interface.ApiCorsMiddleware, "/").get("Access-Control-Allow-Origin") is None
+        assert (
+            run_response_middleware(interface.ApiCorsMiddleware, "/config").get("Access-Control-Allow-Origin") is None
+        )
+
+    @pytest.mark.config({"api_cors": ""})
+    def test_header_absent_when_empty(self):
+        assert run_response_middleware(interface.ApiCorsMiddleware, "/api").get("Access-Control-Allow-Origin") is None

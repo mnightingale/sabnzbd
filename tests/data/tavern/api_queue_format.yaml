@@ -20,7 +20,6 @@ stages:
         content-type: !re_search "charset=(UTF|utf)-8"
         cache-control: "no-store"
         pragma: "no-cache"
-        access-control-allow-origin: "*"
       json:
         queue:
           version: "{SAB_VERSION}"
@@ -97,7 +96,6 @@ stages:
         content-type: !re_search "charset=(UTF|utf)-8"
         cache-control: "no-store"
         pragma: "no-cache"
-        access-control-allow-origin: "*"
         content-length: !re_match "[0-9]+"
       verify_response_with:
         function: tavalidate:assert_xml

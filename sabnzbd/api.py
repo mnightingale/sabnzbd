@@ -1261,7 +1261,6 @@ def report(
         headers={
             "Cache-Control": "no-store",
             "Pragma": "no-cache",
-            "Access-Control-Allow-Origin": "*",
         },
     )
 
