@@ -19,14 +19,18 @@
 tests.test_database - Testing the HistoryDB connection pool
 """
 
+import asyncio
+import os
 import sqlite3
 import threading
+import time
 from unittest import mock
 
 import pytest
 
 import sabnzbd
 import sabnzbd.database as db
+import sabnzbd.sessionstore as sessionstore
 
 
 @pytest.fixture
@@ -121,6 +125,109 @@ class TestHistoryDBPool:
         with pool.connection() as history_db:
             history_db.execute("PRAGMA journal_mode;")
             assert history_db.cursor.fetchone()[0] == "wal"
+
+
+class TestAsyncSessionStore:
+    """Sessions live in their own database (sessions.db, not part of config
+    backups), owned exclusively by the async store on the web server's loop"""
+
+    def test_creates_own_database_file(self, tmp_path):
+        session_db = str(tmp_path / "sessions.db")
+
+        async def scenario():
+            store = sessionstore.AsyncSessionStore(db_path=session_db)
+            try:
+                # Opened lazily on first use, table created on the fly
+                assert await store.get_session("missing") is None
+            finally:
+                await store.close()
+
+        asyncio.run(scenario())
+        assert os.path.isfile(session_db)
+
+    def test_session_crud_roundtrip(self, tmp_path):
+        # Expiries must lie in the future: the store purges expired rows itself
+        now = int(time.time())
+
+        async def scenario():
+            store = sessionstore.AsyncSessionStore(db_path=str(tmp_path / "sessions.db"))
+            try:
+                await store.add_session(
+                    token_hash="hash1",
+                    created=now,
+                    expires=now + 2000,
+                    cred_fingerprint="fp",
+                    last_ip="127.0.0.1",
+                    user_agent="pytest",
+                )
+                session = await store.get_session("hash1")
+                assert session["token_hash"] == "hash1"
+                assert session["expires"] == now + 2000
+                assert session["cred_fingerprint"] == "fp"
+
+                # Sliding expiry
+                await store.touch_session("hash1", now + 5000)
+                assert (await store.get_session("hash1"))["expires"] == now + 5000
+
+                # Delete
+                await store.delete_session("hash1")
+                assert await store.get_session("hash1") is None
+            finally:
+                await store.close()
+
+        asyncio.run(scenario())
+
+    def test_expired_sessions_purged_on_first_use(self, tmp_path):
+        session_db = str(tmp_path / "sessions.db")
+        now = int(time.time())
+
+        async def fill():
+            store = sessionstore.AsyncSessionStore(db_path=session_db)
+            await store.add_session("old", 0, now - 100, "fp")
+            await store.add_session("fresh", 0, now + 10000, "fp")
+            await store.close()
+
+        async def reopen():
+            # A fresh store purges expired rows on the first lookup
+            store = sessionstore.AsyncSessionStore(db_path=session_db)
+            try:
+                assert await store.get_session("fresh") is not None
+                assert await store.get_session("old") is None
+            finally:
+                await store.close()
+
+        asyncio.run(fill())
+        asyncio.run(reopen())
+
+    def test_closed_store_fails_closed(self, tmp_path):
+        async def scenario():
+            store = sessionstore.AsyncSessionStore(db_path=str(tmp_path / "sessions.db"))
+            await store.add_session("hash1", 0, int(time.time()) + 10000, "fp")
+            await store.close()
+            # After close (shutdown), lookups fail closed and writes are no-ops
+            assert await store.get_session("hash1") is None
+            await store.add_session("hash2", 0, int(time.time()) + 10000, "fp")
+            await store.delete_session("hash1")
+
+        asyncio.run(scenario())
+
+    def test_corrupt_database_discarded_and_recreated(self, tmp_path):
+        session_db = str(tmp_path / "sessions.db")
+        with open(session_db, "wb") as garbage_ref:
+            garbage_ref.write(b"this is not a database" * 42)
+
+        async def scenario():
+            store = sessionstore.AsyncSessionStore(db_path=session_db)
+            try:
+                # First call fails closed and discards the damaged file
+                assert await store.get_session("hash1") is None
+                # The next call recreates a working, empty database
+                await store.add_session("hash1", 0, int(time.time()) + 10000, "fp")
+                assert await store.get_session("hash1") is not None
+            finally:
+                await store.close()
+
+        asyncio.run(scenario())
 
 
 class TestHistoryDBSnapshot:

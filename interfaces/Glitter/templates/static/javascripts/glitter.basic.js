@@ -27,7 +27,6 @@ if(isMobile) {
 function callAPI(data, timeout = 10000) {
     // Fill basis var's
     data.output = "json";
-    data.apikey = apiKey;
     var ajaxQuery = $.ajax({
         url: "./api",
         type: "GET",

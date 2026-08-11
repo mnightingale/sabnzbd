@@ -88,6 +88,7 @@ import sabnzbd.encoding as encoding
 import sabnzbd.config as config
 import sabnzbd.cfg as cfg
 import sabnzbd.database
+import sabnzbd.sessionstore
 import sabnzbd.lang as lang
 import sabnzbd.nzb
 import sabnzbd.nzbparser as nzbparser
@@ -219,6 +220,11 @@ INIT_LOCK = Lock()
 # Pool of History database connections, shared by web handlers and workers.
 # Borrow with: with sabnzbd.db_pool.connection() as history_db
 db_pool = sabnzbd.database.HistoryDBPool()
+
+# Async store for web-UI login sessions (sessions.db), used exclusively by the
+# web interface on its event loop. Opened lazily on the first session lookup,
+# closed by the Starlette lifespan in interface.create_app().
+session_store = sabnzbd.sessionstore.AsyncSessionStore()
 
 
 @synchronized(INIT_LOCK)
