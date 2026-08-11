@@ -226,6 +226,7 @@ def run_sabnews_and_selenium(request):
     # Headless during CI testing
     if "CI" in os.environ:
         driver_options.browser_version = "127"
+        driver_options.add_argument("--disable-features=MacAppCodeSignClone")
         driver_options.add_argument("--headless")
         driver_options.add_argument("--no-sandbox")
 
