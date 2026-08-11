@@ -313,10 +313,25 @@ async def create_session(request: Request, response: Response, remember_me: bool
     )
 
 
-# Anonymous sessions (used when no username/password is set, so the frontend can
-# authenticate API calls by cookie without the apikey) are stateless: the cookie
-# holds an HMAC tag instead of a database-backed token, so cookie-less clients
-# (bots, scanners) cannot grow the sessions table by minting a row per request.
+def login_bypassed(request: Request) -> bool:
+    """Return True when check_login lets this request through without a login session:
+    either no credentials are configured at all, or inet_exposure 5 waives the login for
+    local clients. The single definition of "no login needed", because every one of these
+    requests arrives with no proof that it came from this instance's own UI: they are
+    exactly the requests that must be issued an anonymous session cookie, and whose POSTs
+    the CSRF guard has to check it on (see SecurityMiddleware)."""
+    # No authentication required when no username/password is set
+    if not cfg.username() or not cfg.password():
+        return True
+
+    # If we show login for external IP, by using access_type=6 we can check if IP match
+    return cfg.inet_exposure() == 5 and check_access(request, access_type=6)
+
+
+# Anonymous sessions (used when the login is bypassed, so the frontend can authenticate
+# API calls by cookie without the apikey) are stateless: the cookie holds an HMAC tag
+# instead of a database-backed token, so cookie-less clients (bots, scanners) cannot
+# grow the sessions table by minting a row per request.
 # The key is regenerated each run; after a restart the next page load simply
 # receives a fresh cookie. All anonymous clients share the same tag: it carries
 # no identity, it only proves the client loaded a UI page from this instance.
@@ -329,9 +344,11 @@ def anonymous_session_tag() -> str:
 
 
 def validate_anonymous_session(request: Request) -> bool:
-    """Return True when no credentials are configured and the request
-    carries a valid anonymous session cookie"""
-    if cfg.username() and cfg.password():
+    """Return True when the login is bypassed for this request and it carries a valid
+    anonymous session cookie. Gated on login_bypassed rather than on the credentials
+    alone: inet_exposure 5 waives the login for local clients while credentials are
+    set, and those page loads are issued an anonymous cookie that has to validate."""
+    if not login_bypassed(request):
         return False
     return hmac.compare_digest(request.cookies.get(SESSION_COOKIE, ""), anonymous_session_tag())
 
@@ -390,14 +407,20 @@ async def validate_session(request: Request) -> bool:
     return True
 
 
+async def validate_any_session(request: Request) -> bool:
+    """Return True when the request carries a session cookie this instance issued: the
+    anonymous tag, or a database-backed login session. For the places that ask "did this
+    client load a page from us" rather than "who is this client" — the CSRF guard, the
+    anonymous-cookie issuing check and API authorization. The anonymous check comes
+    first: it is a pure HMAC compare, and a request without a cookie never reaches the
+    database either, so neither steady-state path pays for a lookup."""
+    return validate_anonymous_session(request) or await validate_session(request)
+
+
 async def check_login(request: Request) -> bool:
     """Check if user is logged in (Starlette version)"""
-    # No authentication required when no username/password is set
-    if not cfg.username() or not cfg.password():
-        return True
-
-    # If we show login for external IP, by using access_type=6 we can check if IP match
-    if cfg.inet_exposure() == 5 and check_access(request, access_type=6):
+    # No authentication required, or waived for this client
+    if login_bypassed(request):
         return True
 
     # Check the session cookie
@@ -425,9 +448,8 @@ async def check_apikey(request: Request) -> Optional[Response]:
         return None
 
     # A valid browser session (login or anonymous cookie) authorizes API calls without
-    # the apikey, so the frontend no longer needs the key embedded in the page. The
-    # anonymous check comes first: it is a pure HMAC compare, no database access.
-    if validate_anonymous_session(request) or await validate_session(request):
+    # the apikey, so the frontend no longer needs the key embedded in the page
+    if await validate_any_session(request):
         return None
 
     # First check API-key, if OK that's sufficient
@@ -599,20 +621,21 @@ class SecurityMiddleware:
             request = Request(scope, receive)
             if response := await self.denied_response(request):
                 return await response(scope, receive, send)
-            # When authentication is disabled, issue a stateless anonymous session cookie on
-            # the UI page routes so the frontend authenticates API calls by cookie instead of
-            # the apikey, and POSTs pass the CSRF guard in denied_response. Limited to
-            # check_for_login routes (the real UI pages) so bots hitting robots.txt/favicon and
-            # the login/logout routes don't get one, and API routes never set it: the browser
-            # always loads a page (and its cookie) first. Pure ASGI, so the cookie is injected
-            # into the response start rather than onto a Response. The credentials condition
-            # matches check_login's definition of "no authentication required" (either field
-            # missing), so partial credentials cannot leave the UI without a cookie.
+            # Whenever the login is bypassed (see login_bypassed), issue a stateless anonymous
+            # session cookie on the UI page routes so the frontend authenticates API calls by
+            # cookie instead of the apikey, and POSTs pass the CSRF guard in denied_response.
+            # Limited to check_for_login routes (the real UI pages) so bots hitting
+            # robots.txt/favicon and the login/logout routes don't get one, and API routes never
+            # set it: the browser always loads a page (and its cookie) first. Skipped when the
+            # client already holds a usable session, so a login session created before the
+            # bypass applied (a laptop that was remote and is now on the local network) is not
+            # overwritten by the anonymous tag. Pure ASGI, so the cookie is injected into the
+            # response start rather than onto a Response.
             if (
                 self.check_for_login
                 and not self.check_api_key
-                and (not cfg.username() or not cfg.password())
-                and not validate_anonymous_session(request)
+                and login_bypassed(request)
+                and not await validate_any_session(request)
             ):
                 send = _anonymous_session_sender(request, send)
         await self.app(scope, receive, send)
@@ -631,17 +654,19 @@ class SecurityMiddleware:
         if self.check_for_login and not self.check_api_key and not await check_login(request):
             return base_redirect_response("/login")
 
-        # CSRF guard for state-changing requests. With credentials configured, the
-        # check_login above already required the SameSite=Strict login cookie, which
-        # cross-site requests never carry. Without (full) credentials check_login passes
-        # with no cookie at all, so a cross-site form could otherwise POST config changes:
-        # require the SameSite=Strict anonymous session cookie, which every UI page load issues.
+        # CSRF guard for state-changing requests. Wherever the login is bypassed (see
+        # login_bypassed) the check_login above passes with no cookie at all, so a cross-site
+        # form could otherwise POST config changes: require a SameSite=Strict session cookie,
+        # which cross-site requests never carry and which every UI page load issues. Where the
+        # login is not bypassed, check_login already required the login session cookie, and
+        # that does the same job. Keyed on login_bypassed rather than on the credentials
+        # alone, so the inet_exposure 5 waiver cannot leave a page POST unguarded.
         if (
             self.check_for_login
             and not self.check_api_key
             and request.method == "POST"
-            and (not cfg.username() or not cfg.password())
-            and not validate_anonymous_session(request)
+            and login_bypassed(request)
+            and not await validate_any_session(request)
         ):
             log_warning_and_ip(request, T("Refused connection from:"))
             return forbidden(_MSG_MISSING_SESSION)
