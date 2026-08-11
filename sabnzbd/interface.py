@@ -956,8 +956,13 @@ async def login_index(request: Request):
     return await run_in_threadpool(render_login_page)
 
 
-@secured_expose(route="/logout", check_for_login=False, methods=["GET"])
-async def logout_index(request: Request):
+@secured_expose(route="/logout", methods=["POST"])
+async def logout(request: Request):
+    """Clear the session and return to the main page. POST-only and the UI submits it
+    as a form, like /shutdown, and authorized like any other page POST — the login
+    check (or the CSRF guard when no credentials are set) requires the SameSite=Strict
+    session cookie, which a cross-site page cannot send, so a stray GET (an <img> or
+    link prefetch) or a forged cross-site form cannot log the user out."""
     response = base_redirect_response("/")
     await clear_session(request, response)
     return response
