@@ -289,6 +289,79 @@ class TestSummaryLine:
         assert any("Instrumentation:" in r.getMessage() for r in caplog.records)
 
 
+class TestResetDuringARun:
+    """reset() empties the counters and opens a new window. Anything the sampler is
+    holding as a baseline belongs to the old one, and subtracting it from totals that
+    have started again from zero reports large negative percentages."""
+
+    def test_thread_cpu_does_not_go_negative_after_a_reset(self, recording, caplog):
+        """The reported failure: a long window, a reset, then a short one.
+
+        Written against the totals directly rather than by burning CPU, because the
+        sign of the bug depends on the first window being much larger than the second
+        and two equal burns hide it.
+        """
+        sampler = recording.Sampler()
+        sampler.reset_baselines()
+
+        recording._thread_cpu["receive"] = 100.0  # a long first window
+        with caplog.at_level("DEBUG", logger="root"):
+            sampler.log_summary(cpu_percent=1.0, rss=1024, elapsed=60.0)
+
+        # A new window, as reset=1 on the API does mid-run: the totals start again
+        recording.reset()
+        recording._thread_cpu["receive"] = 1.0
+        sampler.reset_baselines()
+
+        caplog.clear()
+        with caplog.at_level("DEBUG", logger="root"):
+            sampler.log_summary(cpu_percent=1.0, rss=1024, elapsed=60.0)
+
+        line = next(r.getMessage() for r in caplog.records if "Instrumentation" in r.getMessage())
+        assert "=-" not in line, "a percentage went negative: %s" % line
+        assert "receive=1.7%" in line, "expected 1.0s over 60s, got: %s" % line
+
+    def test_the_sampler_notices_a_new_window(self, recording):
+        """reset() is a module function called from whichever thread served the API
+        request, so it cannot push into the sampler. The sampler spots it instead."""
+        sampler = recording.Sampler()
+        sampler.reset_baselines()
+        assert sampler._Sampler__window == recording._started_at
+
+        recording.reset()
+        assert sampler._Sampler__window != recording._started_at, "the window did not change"
+
+        sampler.reset_baselines()
+        assert sampler._Sampler__window == recording._started_at
+
+    def test_sample_rebaselines_itself_on_a_new_window(self, recording):
+        """The sampler runs on its own thread, so nothing hands it the reset. It has to
+        pick the new window up the next time it samples."""
+        sampler = recording.Sampler()
+        sampler.reset_baselines()
+        recording._thread_cpu["receive"] = 100.0
+        sampler.log_summary(cpu_percent=0.0, rss=1024, elapsed=60.0)
+
+        recording.reset()
+        assert sampler._Sampler__last_thread_cpu, "precondition: a stale baseline is held"
+
+        sampler.sample()
+
+        assert sampler._Sampler__window == recording._started_at
+        assert sampler._Sampler__last_thread_cpu == {}, "sample() did not rebaseline"
+
+    def test_baselines_forget_roles_from_the_previous_window(self, recording):
+        sampler = recording.Sampler()
+        recording.record_thread_cpu("receive")
+        burn_cpu()
+        recording.record_thread_cpu("receive")
+        sampler.log_summary(cpu_percent=0.0, rss=1024, elapsed=60.0)
+        assert sampler._Sampler__last_thread_cpu, "nothing was recorded to carry over"
+
+        sampler.reset_baselines()
+        assert sampler._Sampler__last_thread_cpu == {}
+
+
 class TestIdleSuppression:
     """A SABnzbd with nothing to do must not fill the log, but a finished run must
     still be summarised once"""

@@ -413,6 +413,10 @@ class Sampler(threading.Thread):
         self.__last_log_time = 0.0
         self.__last_thread_cpu: dict[str, float] = {}
         self.__next_log = 0.0
+        # Which recording window the baselines belong to. reset() starts a new one and
+        # zeroes the counters, so baselines carried over from the previous window would
+        # be subtracted from totals that have started again from zero.
+        self.__window = 0.0
         # Idle tracking, so a SABnzbd with nothing to do does not fill the log. Starts
         # already idle: a sampler that has never seen work has nothing to summarise, and
         # counting up from zero would emit one line shortly after every startup.
@@ -429,6 +433,11 @@ class Sampler(threading.Thread):
         self.__last_cpu = self.__last_log_cpu = cpu
         self.__last_time = self.__last_log_time = now
         self.__next_log = now + LOG_INTERVAL
+        # Thread CPU is accumulated in a module global that reset() empties, so a
+        # baseline kept from before it would be subtracted from totals counting up from
+        # zero again - which reports every role as a large negative percentage.
+        self.__last_thread_cpu.clear()
+        self.__window = _started_at
 
     def work_seen(self) -> bool:
         """Is anything happening, as of this sample?
@@ -485,6 +494,14 @@ class Sampler(threading.Thread):
 
     def sample(self):
         """Record one CPU/RSS sample and log the summary when due"""
+        if _started_at != self.__window:
+            # A new recording window opened underneath us - reset=1 on the API, or the
+            # special being switched on. Noticed here rather than pushed from reset(),
+            # which is a module function with no handle on this thread and runs on
+            # whichever thread served the request.
+            self.reset_baselines()
+            return
+
         now = time.monotonic()
         cpu = time.process_time()
         elapsed = now - self.__last_time
