@@ -20,6 +20,7 @@ tests.test_storage - Testing sabnzbd.storage
 """
 
 import os
+import time
 
 import pytest
 
@@ -73,25 +74,22 @@ class TestProbe:
         finally:
             os.chmod(locked, 0o700)
 
-    def test_the_deadline_bounds_a_slow_device(self, tmp_path, monkeypatch):
+    def test_the_time_budget_reaches_the_writer(self, tmp_path, monkeypatch):
         """On a spinning disk each write costs a seek, so the op count alone would let
-        the probe run for the best part of a second"""
-        real_write = storage._write_at
-        calls = []
-
-        def slow(handle, data, offset):
-            calls.append(offset)
-            real_write(handle, data, offset)
-            # Roughly one seek, so the budget runs out well before PROBE_MAX_OPS
-            import time
-
-            time.sleep(0.01)
-
-        monkeypatch.setattr(storage, "_write_at", slow)
+        the probe run for the best part of a second. The deadline that stops it is
+        enforced inside FileWriter.probe, so all this can check is that the budget is
+        handed over and respected - sabctools covers the loop itself."""
+        monkeypatch.setattr(storage, "PROBE_TIME_BUDGET", 0.0)
         profile = storage.probe(str(tmp_path))
 
-        assert len(calls) < storage.PROBE_MAX_OPS, "the deadline did not stop it"
-        assert profile.seconds < storage.PROBE_TIME_BUDGET * 3
+        assert profile.ops < storage.PROBE_MAX_OPS, "the budget did not stop it"
+        assert profile.seconds < storage.PROBE_TIME_BUDGET + 1
+
+    def test_the_whole_probe_is_bounded_in_time(self, tmp_path):
+        """Runs at startup, so it cannot sit there for an unbounded stretch"""
+        started = time.monotonic()
+        storage.probe(str(tmp_path))
+        assert time.monotonic() - started < storage.PROBE_TIME_BUDGET * 4
 
 
 class TestClassification:
