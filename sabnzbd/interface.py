@@ -371,7 +371,14 @@ def constant_time_equals(presented: str, expected: str) -> bool:
 
 def credential_fingerprint() -> str:
     """Fingerprint of the current username/password. Stored with each session and
-    compared on validation, so changing either credential invalidates all sessions."""
+    compared on validation, so changing either credential invalidates all sessions.
+
+    Unsalted deliberately: a session written weeks ago still has to compare equal, so any salt
+    would have to be a stored one -- a fresh one per call would invalidate every session on
+    sight -- and it would only guard a password that sabnzbd.ini keeps in the clear one
+    directory up. That last part ends when the ini starts storing passwords hashed: salt this
+    from a stored salt then, or keep credentials out of it altogether and compare a marker that
+    changes whenever they do."""
     return hashlib.sha256(utob("%s:%s" % (cfg.username(), cfg.password()))).hexdigest()
 
 
