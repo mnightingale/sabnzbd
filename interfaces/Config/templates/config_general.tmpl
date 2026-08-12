@@ -305,16 +305,16 @@ jQuery(document).ready(function(){
     safeCheck.on('change', checkSafety)
 
     // Click functions
-    jQuery('#apikey, #nzbkey').click(function () { jQuery(this).select() });
+    jQuery('#apikey_display, #nzbkey').click(function () { jQuery(this).select() });
 
     jQuery('#generate_new_apikey').click(function () {
       if (confirm("$T('confirm')")) {
         $.ajax({
           type: "POST",
           url: "$url('api')",
-          data: {mode:'config', name:'set_apikey', apikey: jQuery('#apikey').val()},
+          data: { mode: 'config', name: 'set_apikey' },
           success: function(msg){
-            jQuery('#apikey').val(msg);
+            jQuery('#apikey_display').val(msg);
             document.location = document.location;
           }
         });
@@ -325,7 +325,7 @@ jQuery(document).ready(function(){
         $.ajax({
           type: "POST",
           url: "$url('api')",
-          data: { mode:'config', name:'set_nzbkey', apikey: jQuery('#apikey').val() },
+          data: { mode: 'config', name: 'set_nzbkey' },
           success: function(msg){
             jQuery('#nzbkey').val(msg);
             document.location = document.location;
@@ -360,7 +360,7 @@ jQuery(document).ready(function(){
         $.ajax({
             type: "POST",
             url: "$url('api')",
-            data: { mode: 'config', name: 'regenerate_certs', apikey: jQuery('#apikey').val() },
+            data: { mode: 'config', name: 'regenerate_certs' },
             success: function(msg) {
                 do_restart()
             }
@@ -398,7 +398,7 @@ jQuery(document).ready(function(){
         $.ajax({
           type: "POST",
           url: "$url('api')",
-          data: {mode:'config', name:'create_backup', output:'json', apikey: jQuery('#apikey').val()},
+          data: { mode: 'config', name: 'create_backup', output: 'json' },
           success: function(data) {
               if(data.value.result) {
                   alert("$T('backup'):\n" + data.value.message)
