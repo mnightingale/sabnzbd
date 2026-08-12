@@ -755,6 +755,44 @@ class TestLoginRateLimiting:
         assert "127.0.0.1" not in interface._login_attempts
 
 
+class TestSessionActivityDetails:
+    """The row is meant to describe the session as it is, not only as it was created, so that
+    a future list of active sessions can say where each one is being used from"""
+
+    @pytest.mark.config({"username": "user", "password": "pass"})
+    def test_slide_refreshes_where_the_session_is_used(self, session_store):
+        store_session(session_store, "tok", expires_offset=interface.SESSION_REFRESH_THRESHOLD)
+        token_hash = interface.hash_session_token("tok")
+        assert asyncio.run(session_store.get_session(token_hash))["last_ip"] is None
+
+        request = request_with_cookie("tok", remote_ip="10.11.12.13")
+        request.headers = Headers({"User-Agent": "some-browser"})
+        assert asyncio.run(interface.validate_session(request)) is True
+
+        session = asyncio.run(session_store.get_session(token_hash))
+        assert session["last_ip"] == "10.11.12.13"
+        assert session["user_agent"] == "some-browser"
+
+    @pytest.mark.config({"username": "user", "password": "pass"})
+    def test_details_survive_a_request_without_them(self, session_store):
+        """Validation only writes about once a day, so a request that carries no User-Agent
+        must not wipe the one already recorded"""
+        store_session(session_store, "tok", expires_offset=interface.SESSION_REFRESH_THRESHOLD)
+        token_hash = interface.hash_session_token("tok")
+
+        first = request_with_cookie("tok", remote_ip="10.11.12.13")
+        first.headers = Headers({"User-Agent": "some-browser"})
+        assert asyncio.run(interface.validate_session(first)) is True
+
+        # Wind the expiry back so the next validation writes again, this time with no UA
+        asyncio.run(session_store.touch_session(token_hash, int(time.time()) + interface.SESSION_REFRESH_THRESHOLD))
+        assert asyncio.run(interface.validate_session(request_with_cookie("tok", remote_ip="127.0.0.1"))) is True
+
+        session = asyncio.run(session_store.get_session(token_hash))
+        assert session["last_ip"] == "127.0.0.1"
+        assert session["user_agent"] == "some-browser"
+
+
 class TestSessionAbsoluteDeadline:
     """Sliding expiry on its own means a session that keeps being used never ends, so a
     stolen cookie would stay good forever. SESSION_MAX_AGE, counted from the created stamp,

@@ -20,6 +20,7 @@ tests.test_database - Testing the HistoryDB connection pool
 """
 
 import asyncio
+import logging
 import os
 import sqlite3
 import threading
@@ -165,9 +166,20 @@ class TestAsyncSessionStore:
                 assert session["expires"] == now + 2000
                 assert session["cred_fingerprint"] == "fp"
 
-                # Sliding expiry
-                await store.touch_session("hash1", now + 5000)
-                assert (await store.get_session("hash1"))["expires"] == now + 5000
+                # Sliding expiry, and where the session was last used comes along with it
+                await store.touch_session("hash1", now + 5000, last_ip="10.11.12.13", user_agent="curl")
+                session = await store.get_session("hash1")
+                assert session["expires"] == now + 5000
+                assert session["last_ip"] == "10.11.12.13"
+                assert session["user_agent"] == "curl"
+
+                # Omitting them keeps what the row had, so a caller with no request at hand
+                # cannot blank out the details a future session list would show
+                await store.touch_session("hash1", now + 6000)
+                session = await store.get_session("hash1")
+                assert session["expires"] == now + 6000
+                assert session["last_ip"] == "10.11.12.13"
+                assert session["user_agent"] == "curl"
 
                 # Delete
                 await store.delete_session("hash1")
@@ -198,6 +210,50 @@ class TestAsyncSessionStore:
 
         asyncio.run(fill())
         asyncio.run(reopen())
+
+    def test_schema_generation_bump_resets_sessions(self, tmp_path, monkeypatch, caplog):
+        """Sessions are disposable, so a schema change drops them rather than migrating. That
+        logs everyone out, so it says so -- a silent reset looks like sessions randomly
+        stopped being honoured."""
+        session_db = str(tmp_path / "sessions.db")
+        now = int(time.time())
+
+        async def fill():
+            store = sessionstore.AsyncSessionStore(db_path=session_db)
+            await store.add_session("hash1", now, now + 10000, "fp")
+            assert await store.get_session("hash1") is not None
+            await store.close()
+
+        async def reopen_at_next_generation():
+            store = sessionstore.AsyncSessionStore(db_path=session_db)
+            try:
+                # The table was dropped and recreated, so the row is gone but the store works
+                assert await store.get_session("hash1") is None
+                await store.add_session("hash2", now, now + 10000, "fp")
+                assert await store.get_session("hash2") is not None
+            finally:
+                await store.close()
+
+        asyncio.run(fill())
+        monkeypatch.setattr(sessionstore, "DB_SESSIONS_VERSION", sessionstore.DB_SESSIONS_VERSION + 1)
+        with caplog.at_level(logging.INFO):
+            asyncio.run(reopen_at_next_generation())
+        assert "resetting" in caplog.text
+
+    def test_fresh_database_resets_quietly(self, tmp_path, caplog):
+        """A new database reports generation 0 and has no sessions to lose, so it must not
+        announce a reset on every first run"""
+
+        async def scenario():
+            store = sessionstore.AsyncSessionStore(db_path=str(tmp_path / "sessions.db"))
+            try:
+                assert await store.get_session("nothing") is None
+            finally:
+                await store.close()
+
+        with caplog.at_level(logging.INFO):
+            asyncio.run(scenario())
+        assert "resetting" not in caplog.text
 
     def test_closed_store_fails_closed(self, tmp_path):
         async def scenario():

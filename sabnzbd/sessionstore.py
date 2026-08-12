@@ -108,6 +108,15 @@ class AsyncSessionStore:
                 async with connection.execute("PRAGMA user_version") as cursor:
                     version_row = await cursor.fetchone()
                 if not version_row or version_row[0] != DB_SESSIONS_VERSION:
+                    # Say so: from the user's side this logs every remembered browser out, and
+                    # a silent reset looks like sessions randomly stopped being honoured.
+                    # A fresh database reports 0 and has no table to drop, so stay quiet there.
+                    if version_row and version_row[0]:
+                        logging.info(
+                            "Sessions database is generation %s, resetting to %s: logins will be required again",
+                            version_row[0],
+                            DB_SESSIONS_VERSION,
+                        )
                     await connection.execute("DROP TABLE IF EXISTS sessions")
                     await connection.execute("PRAGMA user_version = %d" % DB_SESSIONS_VERSION)
                 await connection.execute("""CREATE TABLE IF NOT EXISTS sessions (
@@ -184,11 +193,27 @@ class AsyncSessionStore:
         except Exception as error:
             await self._handle_error(error)
 
-    async def touch_session(self, token_hash: str, expires: int):
-        """Extend the expiry of a session (sliding window)"""
+    async def touch_session(
+        self,
+        token_hash: str,
+        expires: int,
+        last_ip: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ):
+        """Extend the expiry of a session (sliding window) and record where it was last used,
+        so the row describes the session as it is now rather than only as it was created.
+
+        The caller throttles these updates to roughly one a day per session, so last_ip and
+        user_agent are that recent rather than exact -- enough to tell a browser apart from a
+        phone on another network, not a per-request audit trail. Either left as None keeps
+        whatever the row already had, so a caller without a request cannot blank them."""
         try:
             if connection := await self._connect():
-                await connection.execute("UPDATE sessions SET expires = ? WHERE token_hash = ?", (expires, token_hash))
+                await connection.execute(
+                    "UPDATE sessions SET expires = ?, last_ip = COALESCE(?, last_ip), "
+                    "user_agent = COALESCE(?, user_agent) WHERE token_hash = ?",
+                    (expires, last_ip, user_agent, token_hash),
+                )
         except Exception as error:
             await self._handle_error(error)
 

@@ -523,7 +523,14 @@ async def validate_session(request: Request) -> bool:
     # request in the session's last SESSION_DURATION would rewrite the same value.
     new_expires = min(now + SESSION_DURATION, session["created"] + SESSION_MAX_AGE)
     if new_expires > session["expires"] + SESSION_REFRESH_THRESHOLD:
-        await sabnzbd.session_store.touch_session(token_hash, new_expires)
+        # Refresh where the session was last used while writing anyway, so the row keeps
+        # describing the session as it is rather than only as it was created
+        await sabnzbd.session_store.touch_session(
+            token_hash,
+            new_expires,
+            last_ip=client_address(request).host,
+            user_agent=request.headers.get("User-Agent"),
+        )
 
     return True
 
@@ -655,8 +662,8 @@ async def get_request_params(request: Request, merge_query: bool = False) -> Mul
     parameters cannot be smuggled into form handlers via the URL. A POST without a
     form body yields an empty MultiDict.
 
-    The merged API routes (merge_query, i.e. /api and the api-key protected
-    *_save routes) keep the CherryPy behavior instead: 3rd-party clients
+    The merged API route (merge_query, i.e. /api, the only route left with
+    check_api_key) keeps the CherryPy behavior instead: 3rd-party clients
     traditionally POST an NZB as a multipart body while passing mode/apikey/output
     in the query string, so the form body and query string are merged into a
     mutable MultiDict, the body winning per key. A key supplied only in the query
@@ -699,9 +706,9 @@ class ParamsMiddleware:
     """Parse a request's parameters onto request.state.params before the handler
     runs, so request_params(request) returns them without a further await. Attached
     per route by secured_expose because the merge behavior is route-specific:
-    merge_query follows check_api_key (the /api and *_save routes that accept
-    mode/apikey in the query string alongside a form body). Pure ASGI, and the
-    request body is read once here; handlers only ever read the parsed params."""
+    merge_query follows check_api_key, so only /api accepts mode/apikey in the query
+    string alongside a form body. Pure ASGI, and the request body is read once here;
+    handlers only ever read the parsed params."""
 
     def __init__(self, app, merge_query: bool = False):
         self.app = app
@@ -916,7 +923,8 @@ def log(request: Request):
 @secured_expose(route="/scriptlog", methods=["GET"])
 def scriptlog(request: Request):
     """Needed for all skins, URL is fixed due to postproc"""
-    # No session key check, due to fixed URLs in history database
+    # The URL is fixed and stored in the history database, so it carries no apikey. It needs
+    # no CSRF token either, being a read-only GET, and is behind the login like any other page.
     if name := request_params(request).get("name"):
         with sabnzbd.db_pool.connection() as history_db:
             return PlainTextResponse(history_db.get_script_log(name))
