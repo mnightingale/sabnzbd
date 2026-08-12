@@ -314,8 +314,7 @@ jQuery(document).ready(function(){
           url: "$url('api')",
           data: { mode: 'config', name: 'set_apikey' },
           success: function(msg){
-            jQuery('#apikey_display').val(msg);
-            document.location = document.location;
+            jQuery('#apikey_display').val(msg.apikey);
           }
         });
       }
@@ -326,9 +325,8 @@ jQuery(document).ready(function(){
           type: "POST",
           url: "$url('api')",
           data: { mode: 'config', name: 'set_nzbkey' },
-          success: function(msg){
-            jQuery('#nzbkey').val(msg);
-            document.location = document.location;
+          success: function(msg) {
+            jQuery('#nzbkey').val(msg.nzbkey);
           }
         });
       }
