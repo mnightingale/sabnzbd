@@ -119,6 +119,9 @@ _MSG_MISSING_AUTH = "Missing authentication"
 _MSG_APIKEY_REQUIRED = "API Key Required"
 _MSG_APIKEY_INCORRECT = "API Key Incorrect"
 _MSG_MISSING_SESSION = "Access denied - Missing or invalid session token, reload the page and try again"
+_MSG_APIKEY_NOT_ON_PAGES = (
+    "Access denied - The apikey is only accepted on /api, use the matching api-call instead of this page"
+)
 _MSG_SESSION_EXPIRED = "Session expired, reload the page"
 
 RE_HOST_PORT = re.compile(":[0-9]+$")
@@ -136,7 +139,13 @@ def secured_expose(
     access_type: int = 4,
     methods: Collection = ("GET", "POST"),
 ) -> Callable:
-    """Register a handler as a Starlette route and attach its access controls"""
+    """Register a handler as a Starlette route and attach its access controls.
+
+    check_api_key belongs to /api and nothing else, on purpose. The apikey is the credential
+    for the documented, public API, and the interface's own pages are not that: they are for a
+    browser holding a session, so they authorize on the session cookie plus its CSRF token.
+    That is why an apikey no longer opens the config *_save routes -- automation that used to
+    POST to them wants the equivalent api-call (mode=set_config and friends) instead."""
     if not wrap_func:
         return functools.partial(
             secured_expose,
@@ -290,7 +299,9 @@ SESSION_REFRESH_THRESHOLD = 3600 * 24  # 1 day
 LOGIN_MAX_ATTEMPTS = 5
 LOGIN_LOCKOUT_TIME = 300  # 5 minutes
 
-# Failed attempts per client address, as {host: (failures, cooldown_expiry)}.
+# Failed attempts per client address, as {host: (failures, cooldown_expiry)}. Expiries are
+# time.monotonic() stamps, not wall clock: this is a duration to sit out, and an NTP step or a
+# manual clock change would otherwise clear an active cooldown or stretch it past its length.
 #
 # Deliberately in memory rather than in the sessions database: it is short-lived per-process
 # state, and persisting it would mean a schema change -- which logs every remembered browser
@@ -303,19 +314,36 @@ LOGIN_LOCKOUT_TIME = 300  # 5 minutes
 _login_attempts: dict[str, tuple[int, float]] = {}
 
 
+def _prune_login_attempts(now: float):
+    """Forget clients whose cooldown has run out, both to give them their allowance back and
+    to keep a distributed attempt from growing the table beyond the addresses currently in
+    a cooldown. Called from every read and write of the table, so it is bounded by live
+    traffic; entries left when traffic stops are a fixed set that waits for the restart."""
+    for host in [host for host, (_, cooldown_expiry) in _login_attempts.items() if cooldown_expiry <= now]:
+        del _login_attempts[host]
+
+
+def login_cooldown_remaining(request: Request) -> int:
+    """Whole seconds this client must sit out before another login attempt is considered,
+    or 0 when it may try now"""
+    _prune_login_attempts(time.monotonic())
+    failures, cooldown_expiry = _login_attempts.get(client_address(request).host, (0, 0.0))
+    remaining = cooldown_expiry - time.monotonic()
+    if failures < LOGIN_MAX_ATTEMPTS or remaining <= 0:
+        return 0
+    # Rounded up, because a Retry-After of 0 would invite a retry that is still too early
+    return int(remaining) + 1
+
+
 def login_locked_out(request: Request) -> bool:
     """Whether this client has used up its login attempts and is still in the cooldown"""
-    failures, cooldown_expiry = _login_attempts.get(client_address(request).host, (0, 0.0))
-    return failures >= LOGIN_MAX_ATTEMPTS and time.time() < cooldown_expiry
+    return login_cooldown_remaining(request) > 0
 
 
 def record_login_failure(request: Request):
-    """Count a failed login against this client. Clients whose cooldown has run out are
-    dropped on the way past, both to reset their allowance and to keep a distributed
-    attempt from growing the table beyond the addresses that failed within the window."""
-    now = time.time()
-    for host in [host for host, (_, cooldown_expiry) in _login_attempts.items() if cooldown_expiry <= now]:
-        del _login_attempts[host]
+    """Count a failed login against this client"""
+    now = time.monotonic()
+    _prune_login_attempts(now)
 
     host = client_address(request).host
     failures = _login_attempts.get(host, (0, 0.0))[0]
@@ -647,9 +675,11 @@ async def check_apikey(request: Request) -> Optional[Response]:
     # apikey has to stay authorized here.
     key = request_params(request).get("apikey")
     if key:
-        if req_access == 1 and key == cfg.nzb_key():
+        # Constant-time, like the login credentials: these are the other secrets a client can
+        # guess at, and a byte-by-byte == leaks how far a guess got in the response time
+        if req_access == 1 and constant_time_equals(key, cfg.nzb_key()):
             return None
-        if key == cfg.api_key():
+        if constant_time_equals(key, cfg.api_key()):
             return None
         log_warning_and_ip(
             request, T("API Key incorrect, Use the api key from Config->General in your 3rd party program:")
@@ -860,8 +890,21 @@ class SecurityMiddleware:
         if not check_access(request, access_type=self.access_type, warn_user=True):
             return forbidden(_MSG_ACCESS_DENIED)
 
+        # A client that presented an apikey to a route that does not take one is automation
+        # reaching for the interface's own pages. Both refusals below then say so plainly
+        # rather than sending it to the login form or talking about session tokens: it is not
+        # a browser to redirect, and a client that followed the redirect would read the form's
+        # 200 as success. Only consulted when the request is refused anyway, so a stray apikey
+        # on a URL a logged-in browser opens still just gets the page.
+        offered_apikey = not self.check_api_key and bool(
+            request_params(request).get("apikey") or request.query_params.get("apikey")
+        )
+
         # Verify login status, only for non-key pages
         if self.check_for_login and not self.check_api_key and not await check_login(request):
+            if offered_apikey:
+                log_warning_and_ip(request, T("Refused connection from:"))
+                return forbidden(_MSG_APIKEY_NOT_ON_PAGES)
             return base_redirect_response("/login")
 
         # CSRF guard for state-changing requests: a page POST has to echo the token belonging
@@ -873,7 +916,7 @@ class SecurityMiddleware:
         # another port on the same host is same-site and its forms do send the cookie.
         if self.check_csrf and request.method == "POST" and not await validate_csrf(request):
             log_warning_and_ip(request, T("Refused connection from:"))
-            return forbidden(_MSG_MISSING_SESSION)
+            return forbidden(_MSG_APIKEY_NOT_ON_PAGES if offered_apikey else _MSG_MISSING_SESSION)
 
         # The /api route: session cookie or apikey (see check_apikey), which returns
         # the error response to send (403, or 401 for a stale frontend session)
@@ -1169,8 +1212,12 @@ async def login_index(request: Request):
     # Check login info
     error = None
     status_code = 200
+    retry_after = 0
     if request.method == "POST":
-        if login_locked_out(request):
+        if retry_after := login_cooldown_remaining(request):
+            # Refused without looking at what was submitted: the whole point is to deny this
+            # client another guess, and checking anyway would let it keep testing passwords
+            # for as long as it is willing to be told no.
             error = T("Too many failed login attempts, try again later.")
             status_code = 429
             logging.warning(T("Login attempt refused, too many failures from %s"), client_address_info(request))
@@ -1209,11 +1256,16 @@ async def login_index(request: Request):
     def render_login_page():
         info = build_header(sabnzbd.WEB_DIR_CONFIG)
         info["error"] = error
-        return template_filtered_response(
+        response = template_filtered_response(
             file=os.path.join(sabnzbd.WEB_DIR_CONFIG, "login", "main.tmpl"),
             search_list=info,
             status_code=status_code,
         )
+        if retry_after:
+            # Say how long the cooldown has left, so an automated client waits it out instead
+            # of hammering the form and filling the log with refusals
+            response.headers["Retry-After"] = str(retry_after)
+        return response
 
     return await run_in_threadpool(render_login_page)
 

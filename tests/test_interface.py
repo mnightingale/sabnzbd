@@ -28,8 +28,8 @@ from typing import Optional
 import pytest
 from unittest.mock import Mock, patch
 from starlette.requests import Request
-from starlette.responses import RedirectResponse
-from starlette.datastructures import Headers, Address, State
+from starlette.responses import HTMLResponse, RedirectResponse
+from starlette.datastructures import Headers, Address, State, QueryParams
 import uvicorn
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from uvicorn.lifespan import on as lifespan_on
@@ -48,10 +48,11 @@ def create_mock_request(remote_ip: str = "127.0.0.1", headers: dict | None = Non
     mock_request = Mock(spec=Request)
     mock_request.client = Address(remote_ip, remote_port)
     mock_request.headers = Headers(headers or {})
-    # A real State, not the Mock's auto-created attributes: code under test asks state for
-    # values that may be absent (getattr(..., default)), and a Mock answers every such
-    # question with a truthy Mock instead of raising, which hides what the real object does
+    # Real State and QueryParams, not the Mock's auto-created attributes: code under test asks
+    # both for values that may be absent, and a Mock answers every such question with a truthy
+    # Mock instead of a miss, which quietly sends the code down the wrong branch
     mock_request.state = State({})
+    mock_request.query_params = QueryParams("")
     return mock_request
 
 
@@ -858,6 +859,66 @@ class TestLoginRateLimiting:
         asyncio.run(interface.login_index(right))
         assert "127.0.0.1" not in interface._login_attempts
 
+    def test_cooldown_remaining_counts_down_and_rounds_up(self):
+        request = login_post()
+        assert interface.login_cooldown_remaining(request) == 0
+        for _ in range(interface.LOGIN_MAX_ATTEMPTS):
+            interface.record_login_failure(request)
+
+        remaining = interface.login_cooldown_remaining(request)
+        # Rounded up, so it is never 0 while the client is still locked out
+        assert 0 < remaining <= interface.LOGIN_LOCKOUT_TIME + 1
+
+        # Most of the cooldown served: still non-zero, and smaller than it was
+        failures, cooldown_expiry = interface._login_attempts["127.0.0.1"]
+        interface._login_attempts["127.0.0.1"] = (failures, cooldown_expiry - interface.LOGIN_LOCKOUT_TIME + 2)
+        assert 0 < interface.login_cooldown_remaining(request) < remaining
+
+    def test_cooldown_survives_a_wall_clock_jump(self, monkeypatch):
+        """The cooldown is a duration, so it is measured on the monotonic clock: an NTP step
+        or a manual clock change must not hand a guesser its attempts back"""
+        request = login_post()
+        for _ in range(interface.LOGIN_MAX_ATTEMPTS):
+            interface.record_login_failure(request)
+        assert interface.login_locked_out(request) is True
+
+        # Jump the wall clock a year forward from where it really is; the cooldown is unmoved
+        real_time = time.time
+        monkeypatch.setattr(time, "time", lambda: real_time() + 3600 * 24 * 365)
+        assert interface.login_locked_out(request) is True
+
+    def test_stale_entries_are_dropped_on_a_read(self):
+        """Pruning on reads as well as writes means a client that stopped failing is forgotten
+        by the next login attempt from anyone, not only by the next failure"""
+        old = login_post(remote_ip="10.11.12.13")
+        for _ in range(interface.LOGIN_MAX_ATTEMPTS):
+            interface.record_login_failure(old)
+        failures, cooldown_expiry = interface._login_attempts["10.11.12.13"]
+        interface._login_attempts["10.11.12.13"] = (failures, cooldown_expiry - interface.LOGIN_LOCKOUT_TIME - 1)
+
+        # A read on behalf of some other client is enough
+        assert interface.login_locked_out(login_post(remote_ip="127.0.0.1")) is False
+        assert "10.11.12.13" not in interface._login_attempts
+
+    @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 0})
+    def test_lockout_response_says_how_long_to_wait(self, session_store):
+        request = login_post(username="user", password="pass")
+        for _ in range(interface.LOGIN_MAX_ATTEMPTS):
+            interface.record_login_failure(request)
+
+        # A real response, so the assertions below read the header the client would actually get
+        with (
+            patch("sabnzbd.interface.build_header", return_value={}),
+            patch(
+                "sabnzbd.interface.template_filtered_response",
+                side_effect=lambda **kwargs: HTMLResponse("", status_code=kwargs["status_code"]),
+            ),
+        ):
+            response = asyncio.run(interface.login_index(request))
+
+        assert response.status_code == 429
+        assert 0 < int(response.headers["Retry-After"]) <= interface.LOGIN_LOCKOUT_TIME + 1
+
 
 class TestSessionActivityDetails:
     """The row is meant to describe the session as it is, not only as it was created, so that
@@ -1135,6 +1196,55 @@ class TestApiCsrf:
         assert self._status(request_with_cookie(params={"mode": "queue", "name": ""})) == 403
 
     @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
+    def test_apikey_is_compared_in_constant_time(self, session_store):
+        """The apikey is the other secret a client can guess at, so it goes through the same
+        comparison as the login credentials rather than ==, which would leak how far a guess
+        got in the response time"""
+        key = cfg.api_key()
+        assert self._status(request_with_cookie(params={"mode": "queue", "name": "", "apikey": key})) is None
+        # A prefix of the real key is no better than any other wrong key
+        for wrong in (key[:-1], key[:1], "", "x" * len(key)):
+            request = request_with_cookie(params={"mode": "queue", "name": "", "apikey": wrong})
+            assert self._status(request) == 403
+
+    @pytest.mark.parametrize("credentials", [("", ""), ("user", "pass")])
+    @pytest.mark.config(
+        lambda params: {
+            "username": params["credentials"][0],
+            "password": params["credentials"][1],
+            "inet_exposure": 0,
+            "api_warnings": True,
+        }
+    )
+    def test_apikey_does_not_open_the_page_routes(self, session_store, credentials):
+        """The apikey is the credential for the public /api route and nothing else. The config
+        save routes belong to a browser holding a session, so automation wants the equivalent
+        api-call instead -- see the note on secured_expose.
+
+        Refused the same way whether or not credentials are configured: without them the CSRF
+        guard is what rejects it, with them the login check gets there first and would
+        otherwise answer with a redirect to the login form, which a client that follows
+        redirects reads as a 200 and mistakes for success."""
+        request = page_post()
+        request.state.params = {"apikey": cfg.api_key()}
+        request.query_params = QueryParams("")
+
+        response = asyncio.run(config_save_middleware().denied_response(request))
+        assert response is not None
+        assert response.status_code == 403
+        assert b"only accepted on /api" in response.body
+
+    @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 0})
+    def test_stray_apikey_does_not_break_a_valid_session(self, session_store):
+        """The explanation above is only for requests that were going to be refused: a
+        logged-in browser opening an old bookmark that still carries ?apikey= gets its page"""
+        store_session(session_store, "login-token")
+        request = page_post("login-token", csrf=interface.csrf_token_for("login-token"))
+        request.state.params = {interface.CSRF_FIELD: interface.csrf_token_for("login-token")}
+        request.query_params = QueryParams("apikey=" + cfg.api_key())
+        assert asyncio.run(config_save_middleware().denied_response(request)) is None
+
+    @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
     def test_version_and_auth_skip_the_check(self, session_store):
         for mode in ("version", "auth"):
             assert self._status(request_with_cookie(params={"mode": mode, "name": ""})) is None
@@ -1369,6 +1479,9 @@ def run_page_request(cookie: Optional[str] = None, remote_ip: str = "127.0.0.1")
         "client": (remote_ip, 12345),
         "server": ("127.0.0.1", 8080),
         "scheme": "http",
+        # secured_expose always wraps SecurityMiddleware in ParamsMiddleware, so the parsed
+        # params are part of the environment it runs in, not something it can do without
+        "state": {"params": QueryParams("")},
     }
     captured: list[str] = []
 

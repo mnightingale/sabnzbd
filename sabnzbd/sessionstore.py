@@ -136,7 +136,15 @@ class AsyncSessionStore:
 
     async def _maybe_purge(self, connection: aiosqlite.Connection):
         """Opportunistically delete expired sessions, throttled to once per PURGE_INTERVAL.
-        _last_purge starts at 0, so the first call after startup always purges."""
+        _last_purge starts at 0, so the first call after startup always purges.
+
+        The throttle is stamped before the delete, not after it succeeds, so a purge that
+        fails waits out the full interval rather than being retried. That is deliberate: this
+        runs inside get_session, on the auth path, and an exception here propagates out of the
+        lookup the caller is actually waiting for. Retrying every request would turn one
+        failed housekeeping query into a failed session check on every request, each able to
+        wait out busy_timeout first. Rows outliving a failed purge cost disk and nothing else,
+        because validate_session checks the expiry of the row it reads."""
         now = time.time()
         if now - self._last_purge >= PURGE_INTERVAL:
             self._last_purge = now
