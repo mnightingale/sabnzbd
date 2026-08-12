@@ -1250,6 +1250,32 @@ class TestApiCsrf:
             assert self._status(request_with_cookie(params={"mode": mode, "name": ""})) is None
 
 
+class TestScriptLogRoute:
+    """A job's script output, reached from the history panel. The name parameter carries the
+    job's nzo_id, which is what get_script_log looks it up by."""
+
+    def _fetch(self, params: dict):
+        request = request_with_cookie(params=params)
+        request.method = "GET"
+        with patch.object(sabnzbd, "db_pool") as db_pool:
+            history_db = db_pool.connection.return_value.__enter__.return_value
+            history_db.get_script_log.return_value = "the script output"
+            response = interface.scriptlog(request)
+        return response.body.decode(), history_db.get_script_log.call_args
+
+    @pytest.mark.config({"username": "", "password": ""})
+    def test_looks_the_job_up(self):
+        body, call = self._fetch({"name": "SABnzbd_nzo_abc123"})
+        assert body == "the script output"
+        assert call.args[0] == "SABnzbd_nzo_abc123"
+
+    @pytest.mark.config({"username": "", "password": ""})
+    def test_no_job_asked_for_yields_nothing(self):
+        body, call = self._fetch({})
+        assert body == ""
+        assert call is None
+
+
 class TestLogRoute:
     """The log is served to the interface by /log, which is what let the CSRF exemption list go
     away: a page route can take the token as a form field, where an API call needs a header the

@@ -1028,8 +1028,7 @@ def log(request: Request):
 @secured_expose(route="/scriptlog", methods=["GET"])
 def scriptlog(request: Request):
     """Needed for all skins, URL is fixed due to postproc"""
-    # The URL is fixed and stored in the history database, so it carries no apikey. It needs
-    # no CSRF token either, being a read-only GET, and is behind the login like any other page.
+    # Fixed URL from the history database, so no apikey; read-only, so no CSRF token
     if name := request_params(request).get("name"):
         with sabnzbd.db_pool.connection() as history_db:
             return PlainTextResponse(history_db.get_script_log(name))
