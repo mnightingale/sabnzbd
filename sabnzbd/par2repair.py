@@ -356,11 +356,12 @@ def article_backed_blocks(nzo: NzbObject, repairer: sabctools.Par2Repairer) -> d
     parts of a file built from articles that matched, there is nothing on disk worth
     reading again. Handing those blocks to par2 lets it skip hashing them entirely.
 
-    Requires direct write: only then does article.data_begin describe where the bytes
-    actually landed. Without it the assembler packs articles in completion order, so a
-    file with holes has offsets that do not line up with par2's blocks.
+    Only files the assembler recorded as direct-written are used. cfg.direct_write() is
+    no help here: it can be switched at runtime, and the assembler falls back to packing
+    articles in completion order per file anyway, so the setting at this point says
+    nothing about where the bytes of an already-assembled file actually landed.
     """
-    if not cfg.par2_quick_verify() or not cfg.direct_write():
+    if not cfg.par2_quick_verify():
         return {}
 
     blocksize = repairer.block_size
@@ -381,6 +382,13 @@ def article_backed_blocks(nzo: NzbObject, repairer: sabctools.Par2Repairer) -> d
 
 def _blocks_from_articles(nzf, blocksize: int, blockcount: int, target: str) -> Optional[list[bool]]:
     """Mark the blocks of one file that good articles fully cover."""
+    # The assembler clears this the moment it packs an article at a running offset
+    # rather than at its data_begin, which is exactly when the article offsets stop
+    # describing the file on disk. Such a file gets scanned in full instead. Also
+    # covers jobs queued before this flag existed, which unpickle it as None.
+    if not nzf.direct_written:
+        return None
+
     try:
         filesize = os.path.getsize(target)
     except OSError:

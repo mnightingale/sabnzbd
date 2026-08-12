@@ -40,8 +40,9 @@ class FakeArticle:
 
 
 class FakeNzf:
-    def __init__(self, articles):
+    def __init__(self, articles, direct_written=True):
         self.decodetable = articles
+        self.direct_written = direct_written
 
 
 @pytest.fixture
@@ -116,6 +117,13 @@ class TestBlocksFromArticles:
         blocks = _blocks_from_articles(FakeNzf(articles), BLOCKSIZE, 10, datafile(600))
         assert blocks == [True] * 10
 
+    def test_packed_file_is_skipped_entirely(self, datafile):
+        """One packed article poisons the file: the assembler clears the flag and the
+        whole file goes back to par2 for a full scan."""
+        articles = [FakeArticle(offset, 160) for offset in (0, 160, 320, 480)]
+        nzf = FakeNzf(articles, direct_written=False)
+        assert _blocks_from_articles(nzf, BLOCKSIZE, 10, datafile(640)) is None
+
     def test_no_good_articles(self, datafile):
         articles = [FakeArticle(None, None, good=False)]
         assert _blocks_from_articles(FakeNzf(articles), BLOCKSIZE, 10, datafile(640)) is None
@@ -166,13 +174,28 @@ class TestArticleBackedBlocks:
         ):
             assert article_backed_blocks(nzo, repairer) == {}
 
-    def test_requires_direct_write(self, tmp_path):
-        """Without direct write the assembler packs articles in completion order, so
-        data_begin no longer says where the bytes ended up."""
+    def test_ignores_the_current_direct_write_setting(self, tmp_path):
+        """What matters is how the file was written, not how the setting reads now.
+
+        cfg.direct_write can be toggled at runtime and the assembler falls back per
+        file, so at post-processing time it says nothing about an already-assembled
+        file. The per-article direct_written flag is what decides.
+        """
         nzo, repairer = self._setup(tmp_path)
         with (
             mock.patch.object(cfg.par2_quick_verify, "get", return_value=True),
             mock.patch.object(cfg.direct_write, "get", return_value=False),
+        ):
+            assert article_backed_blocks(nzo, repairer) == {"alpha.bin": [True] * 10}
+
+    def test_packed_files_are_not_trusted(self, tmp_path):
+        """A file the assembler packed sequentially is excluded even with the setting
+        on: its article offsets do not describe where the bytes landed."""
+        nzo, repairer = self._setup(tmp_path)
+        nzo.finished_files[0].direct_written = False
+        with (
+            mock.patch.object(cfg.par2_quick_verify, "get", return_value=True),
+            mock.patch.object(cfg.direct_write, "get", return_value=True),
         ):
             assert article_backed_blocks(nzo, repairer) == {}
 

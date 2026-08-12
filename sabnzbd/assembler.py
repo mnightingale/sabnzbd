@@ -571,6 +571,11 @@ class Assembler(Thread):
         # available to provide there.
         written = writer.write(data, pos)
 
+        if offset is not None:
+            # Packed at a running offset rather than at article.data_begin. From here on
+            # the file's layout no longer matches what its article offsets describe, so
+            # quick verify has to scan it in full.
+            nzf.direct_written = False
         article.on_disk = True
         sabnzbd.Assembler.remove_ready_bytes(article)
         with nzf.lock:
