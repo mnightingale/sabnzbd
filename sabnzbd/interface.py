@@ -327,6 +327,20 @@ def clear_login_failures(request: Request):
     _login_attempts.pop(client_address(request).host, None)
 
 
+def constant_time_equals(presented: str, expected: str) -> bool:
+    """Constant-time comparison of two secrets that arrived as text.
+
+    Both sides are encoded rather than handed to hmac.compare_digest as str, which refuses
+    any string holding a non-ASCII character. These values come straight off the wire -- a
+    cookie or header carrying a byte above 0x7F, which Starlette decodes as latin-1, would
+    otherwise raise TypeError instead of simply failing to match, turning a rejection into a
+    500. backslashreplace so the encode cannot fail either: UTF-8 has no representation for a
+    lone surrogate, and what a body decoder hands back is not ours to depend on."""
+    return hmac.compare_digest(
+        presented.encode("utf-8", "backslashreplace"), expected.encode("utf-8", "backslashreplace")
+    )
+
+
 def credential_fingerprint() -> str:
     """Fingerprint of the current username/password. Stored with each session and
     compared on validation, so changing either credential invalidates all sessions."""
@@ -338,18 +352,23 @@ def hash_session_token(token: str) -> str:
     return hashlib.sha256(utob(token)).hexdigest()
 
 
-async def create_session(request: Request, response: Response, remember_me: bool = False):
-    """Create a new database-backed login session and set the session cookie on the response"""
+async def create_session(request: Request, response: Response, remember_me: bool = False) -> bool:
+    """Create a new database-backed login session and set the session cookie on the response.
+
+    Returns False when the session could not be stored, leaving the response untouched: a
+    cookie whose session does not exist authorizes nothing, so handing one out would only
+    send the client back to the login form on its next request."""
     token = secrets.token_urlsafe(32)
     now = int(time.time())
-    await sabnzbd.session_store.add_session(
+    if not await sabnzbd.session_store.add_session(
         token_hash=hash_session_token(token),
         created=now,
         expires=now + SESSION_DURATION,
         cred_fingerprint=credential_fingerprint(),
         last_ip=client_address(request).host,
         user_agent=request.headers.get("User-Agent"),
-    )
+    ):
+        return False
 
     # remember_me yields a persistent cookie; a plain login without remember_me yields a
     # browser-session cookie, while the row lives on server-side either way. The cookie is
@@ -367,6 +386,7 @@ async def create_session(request: Request, response: Response, remember_me: bool
         samesite="strict",
         max_age=max_age,
     )
+    return True
 
 
 def login_bypassed(request: Request) -> bool:
@@ -406,7 +426,7 @@ def validate_anonymous_session(request: Request) -> bool:
     set, and those page loads are issued an anonymous cookie that has to validate."""
     if not login_bypassed(request):
         return False
-    return hmac.compare_digest(request.cookies.get(SESSION_COOKIE, ""), anonymous_session_tag())
+    return constant_time_equals(request.cookies.get(SESSION_COOKIE, ""), anonymous_session_tag())
 
 
 def create_anonymous_session(request: Request, response: Response):
@@ -466,7 +486,7 @@ def presented_csrf_token(request: Request) -> str:
 
 def csrf_token_matches(request: Request) -> bool:
     """Whether the request echoes the CSRF token belonging to the cookie it sent"""
-    return hmac.compare_digest(presented_csrf_token(request), csrf_token_for(request.cookies.get(SESSION_COOKIE, "")))
+    return constant_time_equals(presented_csrf_token(request), csrf_token_for(request.cookies.get(SESSION_COOKIE, "")))
 
 
 async def validate_csrf(request: Request) -> bool:
@@ -1136,18 +1156,22 @@ async def login_index(request: Request):
             # Constant-time comparison of submitted credentials against the configured
             # username/password. Both fields are always compared (no short-circuit), so
             # neither the comparison time nor an early exit leaks which field matched.
-            username_ok = hmac.compare_digest(utob(username or ""), utob(cfg.username()))
-            password_ok = hmac.compare_digest(utob(password or ""), utob(cfg.password()))
+            username_ok = constant_time_equals(username or "", cfg.username())
+            password_ok = constant_time_equals(password or "", cfg.password())
             if username_ok and password_ok:
+                # Proved it knows the password
+                clear_login_failures(request)
                 # Create redirect response
                 response = base_redirect_response("/")
                 # Create a database-backed session and set the session cookie
-                await create_session(request, response, remember_me=remember_me)
-                # Proved it knows the password, so give it its attempts back
-                clear_login_failures(request)
-                # Log the success
-                logging.info("Successful login from %s", client_address_info(request))
-                return response
+                if await create_session(request, response, remember_me=remember_me):
+                    # Log the success
+                    logging.info("Successful login from %s", client_address_info(request))
+                    return response
+                # The session could not be stored
+                error = T("The login session could not be stored, see the log for details.")
+                status_code = 500
+                logging.warning("Login from %s failed: the session could not be stored", client_address_info(request))
             elif username or password:
                 error = T("Authentication failed, check username/password.")
                 record_login_failure(request)

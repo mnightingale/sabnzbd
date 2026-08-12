@@ -28,6 +28,7 @@ from typing import Optional
 import pytest
 from unittest.mock import Mock, patch
 from starlette.requests import Request
+from starlette.responses import RedirectResponse
 from starlette.datastructures import Headers, Address
 import uvicorn
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
@@ -598,6 +599,97 @@ def store_session(
             user_agent=user_agent,
         )
     )
+
+
+class TestHostileTokenValues:
+    """Every secret compared on the auth path arrives as text off the wire, and
+    hmac.compare_digest refuses str holding any non-ASCII character. Comparing those values
+    directly turned a rejection into a 500 that anyone could trigger with one request."""
+
+    # Starlette decodes headers and cookies as latin-1, so those channels carry any byte above
+    # 0x7F but nothing past U+00FF. A form body is UTF-8, so it can carry anything -- including
+    # the U+FFFD an invalid sequence decodes to, and in principle a lone surrogate, which UTF-8
+    # cannot encode back.
+    WIRE_HOSTILE = ["\xff\xfe", "\xe9" * 64, "caf\xe9"]
+    BODY_HOSTILE = [*WIRE_HOSTILE, "�", "\U0001f600", "\ud800"]
+
+    def test_compare_helper_rejects_instead_of_raising(self):
+        for value in self.BODY_HOSTILE:
+            assert interface.constant_time_equals(value, "a" * 64) is False
+            assert interface.constant_time_equals("a" * 64, value) is False
+        # ...and still matches what it should
+        assert interface.constant_time_equals("a" * 64, "a" * 64) is True
+
+    @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
+    def test_hostile_session_cookie_is_rejected(self, session_store):
+        """The worst of the three: this path runs on a plain page GET with no credentials
+        configured, so a 500 here needed no session and no authentication at all"""
+        for value in self.WIRE_HOSTILE:
+            assert interface.validate_anonymous_session(request_with_cookie(value)) is False
+            assert asyncio.run(interface.validate_any_session(request_with_cookie(value))) is False
+
+    @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
+    def test_hostile_csrf_token_in_header_is_rejected(self, session_store):
+        tag = interface.anonymous_session_tag()
+        for value in self.WIRE_HOSTILE:
+            assert interface.csrf_token_matches(request_with_cookie(tag, csrf=value)) is False
+            assert asyncio.run(config_save_middleware().denied_response(page_post(tag, csrf=value))) is not None
+
+    @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
+    def test_hostile_csrf_token_in_form_field_is_rejected(self, session_store):
+        tag = interface.anonymous_session_tag()
+        for value in self.BODY_HOSTILE:
+            request = request_with_cookie(tag, params={interface.CSRF_FIELD: value})
+            assert interface.csrf_token_matches(request) is False
+            assert asyncio.run(config_save_middleware().denied_response(page_post(tag, csrf_field=value))) is not None
+
+    @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 0})
+    def test_hostile_credentials_are_rejected(self, session_store):
+        """The login comparison already encoded both sides, but with a codec that raises on a
+        lone surrogate; the shared helper cannot fail on any string"""
+        for value in self.BODY_HOSTILE:
+            assert interface.constant_time_equals(value, "user") is False
+
+
+class TestSessionStoreFailure:
+    """A login whose session was never stored used to look like it worked, then send the user
+    back to the form on the next request -- for as long as the database stayed unwritable"""
+
+    @pytest.fixture
+    def failing_store(self, monkeypatch):
+        """A store whose writes fail the way a read-only or full admin_dir makes them fail"""
+        store = sessionstore.AsyncSessionStore(db_path="/nonexistent-directory/sessions.db")
+        monkeypatch.setattr(sabnzbd, "session_store", store)
+        return store
+
+    def test_add_session_reports_failure(self, failing_store):
+        stored = asyncio.run(failing_store.add_session("hash1", 0, int(time.time()) + 1000, "fp"))
+        assert stored is False
+
+    @pytest.mark.config({"username": "user", "password": "pass"})
+    def test_create_session_sets_no_cookie_when_it_cannot_store(self, failing_store):
+        request = request_with_cookie()
+        response = Mock()
+        assert asyncio.run(interface.create_session(request, response)) is False
+        # No cookie, because a cookie whose session does not exist authorizes nothing
+        response.set_cookie.assert_not_called()
+
+    @pytest.mark.config({"username": "user", "password": "pass"})
+    def test_login_reports_the_failure_instead_of_looping(self, failing_store, monkeypatch):
+        """Correct credentials, unwritable store: the response must not be the usual redirect
+        carrying a cookie, or the client is sent round the login loop with no way to know why"""
+        monkeypatch.setattr(sabnzbd, "WEB_DIR_CONFIG", "/nonexistent", raising=False)
+        request = login_post(username="user", password="pass")
+
+        with (
+            patch("sabnzbd.interface.build_header", return_value={}),
+            patch("sabnzbd.interface.template_filtered_response") as render,
+        ):
+            response = asyncio.run(interface.login_index(request))
+
+        assert render.call_args.kwargs["status_code"] == 500
+        assert "could not be stored" in render.call_args.kwargs["search_list"]["error"]
+        assert not isinstance(response, RedirectResponse)
 
 
 class TestSessionAuth:

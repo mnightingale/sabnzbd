@@ -181,8 +181,13 @@ class AsyncSessionStore:
         cred_fingerprint: str,
         last_ip: Optional[str] = None,
         user_agent: Optional[str] = None,
-    ):
-        """Store a new login session"""
+    ) -> bool:
+        """Store a new login session. Returns whether the row was written.
+
+        The one method that reports its outcome, because it is the one whose failure the user
+        would otherwise never hear about: every read fails closed to "no session", which just
+        asks for a login, but a login whose session was never stored looks like it worked and
+        then does not."""
         try:
             if connection := await self._connect():
                 await connection.execute(
@@ -190,8 +195,10 @@ class AsyncSessionStore:
                     "VALUES (?, ?, ?, ?, ?, ?)",
                     (token_hash, created, expires, cred_fingerprint, last_ip, user_agent),
                 )
+                return True
         except Exception as error:
             await self._handle_error(error)
+        return False
 
     async def touch_session(
         self,
