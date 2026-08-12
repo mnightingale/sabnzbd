@@ -93,6 +93,7 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         return
 
     except BadData as error:
+
         # Continue to the next one if we found new server
         if search_new_server(article):
             return
@@ -146,6 +147,7 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
             return
 
     if decoded_data:
+
         # If the data needs to be written to disk due to full cache, this will be slow
         # Causing the decoder-queue to fill up and delay the downloader
         sabnzbd.ArticleCache.save_article(article, decoded_data)
