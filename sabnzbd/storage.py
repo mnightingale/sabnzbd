@@ -63,6 +63,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import sabnzbd
+from sabnzbd.filesystem import same_device
 
 # Span the writes are scattered over. Preallocated as a hole, so it costs nothing to
 # create; large enough that offsets within it are a real seek on a spinning disk.
@@ -122,7 +123,11 @@ class DeviceProfile:
 
 
 _lock = threading.Lock()
-_profiles: dict[int, DeviceProfile] = {}
+# Keyed by path, not by st_dev. Two paths sharing a device share a profile, but whether
+# they share one is filesystem.same_device's question to answer: st_dev alone is not
+# reliable for network locations on Windows, where two different UNC shares can report
+# the same value and would otherwise be collapsed into one measurement.
+_profiles: dict[str, DeviceProfile] = {}
 
 
 def probe(path: str) -> DeviceProfile:
@@ -200,25 +205,27 @@ def _write_at(handle: int, data: bytes, offset: int):
 def profile_for(path: str) -> DeviceProfile:
     """Profile of the device behind a path, probing it the first time it is asked for.
 
-    Cached per device rather than per path, so a download and complete directory on
-    one disk cost one probe between them.
+    A path sharing a device with one already profiled reuses its answer, so a download
+    and complete directory on one disk cost one probe between them.
     """
-    try:
-        device = os.stat(path).st_dev
-    except OSError as err:
-        return DeviceProfile(device=0, path=path, error=str(err))
-
     with _lock:
-        if (cached := _profiles.get(device)) is not None:
+        if (cached := _profiles.get(path)) is not None:
             return cached
+        for known, profile in _profiles.items():
+            # Only a real measurement is shared. A failure says something about that
+            # path, not about the device: same_device resolves a missing path to its
+            # nearest existing parent, so a typo in one directory would otherwise mark
+            # every other directory on the same disk unmeasurable.
+            if profile.measured and same_device(path, known):
+                _profiles[path] = profile
+                return profile
 
-    # Probing outside the lock: it takes up to PROBE_TIME_BUDGET and there is no harm
-    # in two callers racing to measure the same device, only wasted work
-    profile = probe(path)
+    # Probing outside the lock: it takes up to PROBE_TIME_BUDGET, and two callers
+    # racing to measure one device costs only the duplicated work
+    measured = probe(path)
 
     with _lock:
-        # Keep whichever landed first, so every caller sees one answer per device
-        return _profiles.setdefault(device, profile)
+        return _profiles.setdefault(path, measured)
 
 
 def forget():
