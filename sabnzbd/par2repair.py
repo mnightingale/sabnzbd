@@ -340,10 +340,13 @@ def cancel(nzo: NzbObject):
 
     Called from PostProcessor.cancel_pp, where killing the par2 subprocess used to be.
     """
-    for setname, session in nzo.par2_sessions.items():
-        if session.repairer is not None:
+    # Iterate a snapshot and bind the repairer once: this runs on the interface
+    # thread while post-processing may be discarding the very same session, which
+    # pops from this dict and sets its repairer to None.
+    for setname, session in list(nzo.par2_sessions.items()):
+        if repairer := session.repairer:
             logging.info("Cancelling par2 repair of %s", setname)
-            session.repairer.cancel()
+            repairer.cancel()
 
 
 def article_backed_blocks(nzo: NzbObject, repairer: sabctools.Par2Repairer) -> dict[str, list[bool]]:
