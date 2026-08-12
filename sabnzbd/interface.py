@@ -1009,15 +1009,19 @@ async def api(request: Request):
     return await api_handler(request_params(request), request.state.api_call)
 
 
-@secured_expose(route="/log", methods=["GET"])
+@secured_expose(route="/log", methods=["POST"])
 def log(request: Request):
-    """Download the log plus a sanitized copy of the ini, for the Help window's log link.
+    """Download the log plus a sanitized copy of the ini, for the Help window's log button.
 
-    A page route rather than a link to the mode=showlog API-call: the interface offers it as
-    a plain <a target="_blank">, and a navigation cannot carry the CSRF header that a
-    cookie-authorized API call requires. Being a read-only GET it needs no token, and it is
-    still behind the login check like every other page. Automation keeps using
-    mode=showlog with an apikey."""
+    A page route rather than a link to the mode=showlog API-call because the interface reaches
+    it by navigating: a navigation cannot carry the CSRF header a cookie-authorized API call
+    requires, but a form can carry the token as a field, which page routes accept.
+
+    POST rather than GET, even though it changes nothing, so that the rule stays plain --
+    nothing sensitive is served without the token. This hands out the log and a copy of the
+    ini, and a GET would be reachable as a cross-site navigation: the response is not readable
+    cross-origin, but a victim could still be made to download their own log. Automation keeps
+    using mode=showlog with an apikey."""
     return build_log_response()
 
 

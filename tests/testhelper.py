@@ -23,6 +23,7 @@ import copy
 import io
 import os
 import shutil
+import re
 import socket
 import time
 import uuid
@@ -260,6 +261,33 @@ def get_url_result(url="", host=SAB_HOST, port=SAB_PORT):
     """Do basic request to web page"""
     arguments = {"apikey": SAB_APIKEY}
     return requests.get("http://%s:%s/%s/" % (host, port, url), params=arguments).text
+
+
+def get_page_session(host=SAB_HOST, port=SAB_PORT) -> tuple[requests.Session, str]:
+    """Load a page the way a browser would and return the session holding the cookie it was
+    issued, plus the CSRF token that page rendered.
+
+    A page POST needs both halves: the SameSite=Strict cookie, which says the request is not
+    cross-site, and the token, which a cross-site page could not have read. The apikey does
+    not open page routes, so these are the only way to drive one from a test."""
+    session = requests.Session()
+    page = session.get("http://%s:%s/config/general" % (host, port))
+    page.raise_for_status()
+
+    # Every skin renders it into a var for its ajax calls; the quoting differs between them
+    token = re.search(r"""var csrfToken = ['"]([a-f0-9]+)['"]""", page.text)
+    assert token, "no CSRF token in the page, so a page POST cannot be built"
+    return session, token.group(1)
+
+
+def post_url_result(url="", data=None, host=SAB_HOST, port=SAB_PORT) -> str:
+    """POST to a page route the way the interface does, with a session cookie and its token"""
+    session, csrf_token = get_page_session(host, port)
+    payload = {"csrf_token": csrf_token}
+    payload.update(data or {})
+    response = session.post("http://%s:%s/%s" % (host, port, url), data=payload)
+    response.raise_for_status()
+    return response.text
 
 
 def get_api_result(mode, host=SAB_HOST, port=SAB_PORT, extra_arguments={}):

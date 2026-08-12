@@ -1251,15 +1251,17 @@ class TestApiCsrf:
 
 
 class TestLogRoute:
-    """The log is served to the interface by /log, which is what let the CSRF exemption list
-    go away: a read-only GET page needs no token, where a cookie-authorized API call does."""
+    """The log is served to the interface by /log, which is what let the CSRF exemption list go
+    away: a page route can take the token as a form field, where an API call needs a header the
+    interface cannot send while navigating."""
 
     def _route(self):
         return next(route for route in interface.INTERFACE_ROUTES if getattr(route, "path", None) == "/log")
 
-    def test_registered_as_a_read_only_route(self):
-        # No POST: nothing here changes state, so nothing here needs a token
-        assert sorted(self._route().methods) == ["GET", "HEAD"]
+    def test_registered_as_a_guarded_post_route(self):
+        """POST-only, so the CSRF guard covers it: this hands out the log and a copy of the
+        ini, and a GET would be reachable as a cross-site navigation"""
+        assert sorted(self._route().methods) == ["POST"]
 
     @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 0})
     def test_behind_the_login_check(self, session_store):
@@ -1279,7 +1281,7 @@ class TestLogRoute:
 
         scope = {
             "type": "http",
-            "method": "GET",
+            "method": "POST",
             "path": "/log",
             "query_string": b"",
             "headers": [(b"host", b"127.0.0.1:8080")],

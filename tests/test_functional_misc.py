@@ -39,7 +39,7 @@ from tests.testhelper import (
     SABnzbdBaseTest,
     create_and_read_nzb_fp,
     get_api_result,
-    get_url_result,
+    post_url_result,
     wait_for,
 )
 
@@ -60,10 +60,10 @@ class TestShowLogging(SABnzbdBaseTest):
         self._assert_is_the_log(get_api_result("showlog"))
 
     def test_log_page_route(self):
-        """The interface links to /log rather than the mode=showlog API-call, because a
-        navigation cannot carry the CSRF header a cookie-authorized API call needs. Same
-        output, reached as an ordinary page."""
-        self._assert_is_the_log(get_url_result("log"))
+        """The interface reaches the log through /log rather than the mode=showlog API-call,
+        as a form POST: a navigation cannot carry the CSRF header a cookie-authorized API call
+        needs, but it can carry the token as a field. Same output, reached as a page."""
+        self._assert_is_the_log(post_url_result("log"))
 
 
 class TestQueueRepair(SABnzbdBaseTest):
