@@ -355,15 +355,23 @@ def clear_login_failures(request: Request):
     _login_attempts.pop(client_address(request).host, None)
 
 
-def constant_time_equals(presented: str, expected: str) -> bool:
-    """Constant-time comparison of two secrets that arrived as text.
+def constant_time_equals(presented: Any, expected: str) -> bool:
+    """Constant-time comparison of a secret that arrived off the wire against the one expected.
 
     Both sides are encoded rather than handed to hmac.compare_digest as str, which refuses
     any string holding a non-ASCII character. These values come straight off the wire -- a
     cookie or header carrying a byte above 0x7F, which Starlette decodes as latin-1, would
     otherwise raise TypeError instead of simply failing to match, turning a rejection into a
     500. backslashreplace so the encode cannot fail either: UTF-8 has no representation for a
-    lone surrogate, and what a body decoder hands back is not ours to depend on."""
+    lone surrogate, and what a body decoder hands back is not ours to depend on.
+
+    Anything that is not text counts as nothing presented. A multipart part carrying one of
+    these field names arrives as an UploadFile rather than a string, so an apikey, token or
+    password sent as a file would otherwise reach .encode() and 500 on the way to being
+    rejected. Compared against nothing rather than str()-ed, so no object's repr can ever
+    stand in for a secret."""
+    if not isinstance(presented, str):
+        presented = ""
     return hmac.compare_digest(
         presented.encode("utf-8", "backslashreplace"), expected.encode("utf-8", "backslashreplace")
     )
@@ -523,7 +531,9 @@ def presented_csrf_token(request: Request, header_only: bool = False) -> str:
     the header alone, which is what lets it rely on the CORS preflight."""
     if header_only:
         return request.headers.get(CSRF_HEADER) or ""
-    return request.headers.get(CSRF_HEADER) or request_params(request).get(CSRF_FIELD) or ""
+    presented = request.headers.get(CSRF_HEADER) or request_params(request).get(CSRF_FIELD) or ""
+    # A multipart part named csrf_token arrives as an UploadFile, which is not a token
+    return presented if isinstance(presented, str) else ""
 
 
 def csrf_token_matches(request: Request, header_only: bool = False) -> bool:

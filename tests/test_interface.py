@@ -21,6 +21,7 @@ tests.test_interface - Testing functions in interface.py
 
 import asyncio
 import inspect
+import io
 import logging
 import logging.config
 import sqlite3
@@ -30,7 +31,7 @@ import pytest
 from unittest.mock import Mock, patch
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse
-from starlette.datastructures import Headers, Address, State, QueryParams
+from starlette.datastructures import Headers, Address, QueryParams, State, UploadFile
 import uvicorn
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from uvicorn.lifespan import on as lifespan_on
@@ -648,6 +649,34 @@ class TestHostileTokenValues:
             request = request_with_cookie(tag, params={interface.CSRF_FIELD: value})
             assert interface.csrf_token_matches(request) is False
             assert asyncio.run(config_save_middleware().denied_response(page_post(tag, csrf_field=value))) is not None
+
+    @staticmethod
+    def _upload_part():
+        """What a multipart part named apikey/csrf_token/password parses into"""
+        return UploadFile(file=io.BytesIO(b"not-a-token"), filename="part.txt")
+
+    def test_a_file_part_is_not_a_secret(self):
+        """Sending one of these field names as a multipart file gives an UploadFile, not text.
+        It has no .encode(), so it used to reach the comparison and 500 on the way to being
+        rejected -- unauthenticated, on /api, on the login form and on any page POST."""
+        assert interface.constant_time_equals(self._upload_part(), "a" * 64) is False
+        # Compared against nothing rather than str()-ed, so no repr can stand in for a secret
+        assert interface.constant_time_equals(self._upload_part(), str(self._upload_part())) is False
+
+    @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
+    def test_csrf_token_sent_as_a_file_part_is_refused(self, session_store):
+        tag = interface.anonymous_session_tag()
+        request = request_with_cookie(tag, params={interface.CSRF_FIELD: self._upload_part()})
+        assert interface.presented_csrf_token(request) == ""
+        assert interface.csrf_token_matches(request) is False
+        denied = page_post(tag, csrf_field=self._upload_part())
+        assert asyncio.run(config_save_middleware().denied_response(denied)) is not None
+
+    @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
+    def test_apikey_sent_as_a_file_part_is_refused(self, session_store):
+        request = request_with_cookie(params={"mode": "queue", "name": "", "apikey": self._upload_part()})
+        response = asyncio.run(interface.check_apikey(request))
+        assert response is not None and response.status_code == 403
 
     @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 0})
     def test_hostile_credentials_are_rejected(self, session_store):
