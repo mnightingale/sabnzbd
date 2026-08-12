@@ -272,10 +272,16 @@ def use_secure_cookies(request: Request) -> bool:
     return request.scope.get("scheme") == "https" or bool(cfg.enable_https())
 
 
-# Sessions last 30 days; expiry slides forward on use (throttled by SESSION_REFRESH_THRESHOLD)
-SESSION_DURATION = 3600 * 24 * 30  # 30 days
-# Only extend a session's expiry once it has less than (duration - threshold) remaining,
-# so an active session triggers at most ~1 database write per day
+# How long a session survives without being used. Expiry slides forward on use, so this is
+# an idle timeout rather than a lifetime.
+SESSION_DURATION = 3600 * 24 * 14  # 14 days
+# The lifetime, counted from the session's created stamp. Sliding expiry alone means a
+# session that keeps being used never ends, so a stolen cookie would stay good indefinitely;
+# past this deadline the session is refused and deleted however active it was, and the user
+# logs in again. Expiry is clamped to it too, so the ordinary purge collects the row.
+SESSION_MAX_AGE = 3600 * 24 * 90  # 90 days
+# Only extend a session's expiry when doing so buys it more than this much extra time, so an
+# active session triggers at most ~1 database write per day instead of one per request
 SESSION_REFRESH_THRESHOLD = 3600 * 24  # 1 day
 
 
@@ -303,9 +309,13 @@ async def create_session(request: Request, response: Response, remember_me: bool
         user_agent=request.headers.get("User-Agent"),
     )
 
-    # remember_me yields a persistent cookie; a plain login without remember_me
-    # yields a browser-session cookie, while the row still lives 30 days
-    max_age = SESSION_DURATION if remember_me else None
+    # remember_me yields a persistent cookie; a plain login without remember_me yields a
+    # browser-session cookie, while the row lives on server-side either way. The cookie is
+    # given the absolute deadline rather than the idle timeout, because the idle timeout
+    # slides and the server is the one enforcing it: a cookie capped at SESSION_DURATION
+    # would log an active user out after 14 days for no reason, and one that outlived
+    # SESSION_MAX_AGE could never be honoured anyway.
+    max_age = SESSION_MAX_AGE if remember_me else None
     response.set_cookie(
         SESSION_COOKIE,
         token,
@@ -440,9 +450,10 @@ async def clear_session(request: Request, response: Response):
 
 
 async def validate_session(request: Request) -> bool:
-    """Return True when the request carries a valid, non-expired session cookie whose
-    credential fingerprint still matches the configured username/password. Expired or
-    stale sessions are deleted, and a still-valid session slides its expiry forward."""
+    """Return True when the request carries a session cookie that is not past either of its
+    two deadlines -- the sliding idle timeout and the absolute SESSION_MAX_AGE -- and whose
+    credential fingerprint still matches the configured username/password. Sessions failing
+    any of those are deleted, and a still-valid one slides its expiry forward."""
     token = request.cookies.get(SESSION_COOKIE)
     if not token:
         return False
@@ -453,14 +464,24 @@ async def validate_session(request: Request) -> bool:
     if not session:
         return False
 
-    # Reject (and clean up) expired sessions or sessions from before a credential change
-    if session["expires"] < now or session["cred_fingerprint"] != credential_fingerprint():
+    # Reject (and clean up) sessions that are idle-expired, past their absolute deadline, or
+    # from before a credential change. The absolute check is not redundant with the clamp
+    # below: it also covers rows written before this cap existed, or by an older version.
+    if (
+        session["expires"] < now
+        or session["created"] + SESSION_MAX_AGE < now
+        or session["cred_fingerprint"] != credential_fingerprint()
+    ):
         await sabnzbd.session_store.delete_session(token_hash)
         return False
 
-    # Sliding expiry, throttled to roughly one write per day per session
-    if session["expires"] - now < SESSION_DURATION - SESSION_REFRESH_THRESHOLD:
-        await sabnzbd.session_store.touch_session(token_hash, now + SESSION_DURATION)
+    # Slide the idle timeout forward, never past the absolute deadline. Writing only when
+    # this actually gains time keeps it to roughly one write per day per session, and stops
+    # writing altogether once the expiry is pinned to the deadline -- otherwise every single
+    # request in the session's last SESSION_DURATION would rewrite the same value.
+    new_expires = min(now + SESSION_DURATION, session["created"] + SESSION_MAX_AGE)
+    if new_expires > session["expires"] + SESSION_REFRESH_THRESHOLD:
+        await sabnzbd.session_store.touch_session(token_hash, new_expires)
 
     return True
 

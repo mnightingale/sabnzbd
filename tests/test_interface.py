@@ -26,7 +26,7 @@ import logging.config
 import time
 from typing import Optional
 import pytest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from starlette.requests import Request
 from starlette.datastructures import Headers, Address
 import uvicorn
@@ -573,13 +573,19 @@ def session_store(tmp_path, monkeypatch):
     asyncio.run(store.close())
 
 
-def store_session(store, token: str, expires_offset: int = interface.SESSION_DURATION):
-    """Add a login session for token, valid for the credentials configured right now"""
+def store_session(
+    store,
+    token: str,
+    expires_offset: int = interface.SESSION_DURATION,
+    created_offset: int = 0,
+):
+    """Add a login session for token, valid for the credentials configured right now.
+    created_offset ages the session, for the absolute-deadline cases."""
     now = int(time.time())
     asyncio.run(
         store.add_session(
             interface.hash_session_token(token),
-            now,
+            now + created_offset,
             now + expires_offset,
             interface.credential_fingerprint(),
         )
@@ -623,6 +629,82 @@ class TestSessionAuth:
         assert asyncio.run(interface.validate_session(request_with_cookie("tok"))) is True
         after = asyncio.run(session_store.get_session(token_hash))["expires"]
         assert after > before
+
+    @pytest.mark.config({"username": "user", "password": "pass"})
+    def test_recently_used_session_is_not_rewritten(self, session_store):
+        """The slide is throttled: a session touched moments ago gains nothing from another
+        write, so an active browser does not put one UPDATE behind every request"""
+        store_session(session_store, "tok")
+        token_hash = interface.hash_session_token("tok")
+        before = asyncio.run(session_store.get_session(token_hash))["expires"]
+        assert asyncio.run(interface.validate_session(request_with_cookie("tok"))) is True
+        assert asyncio.run(session_store.get_session(token_hash))["expires"] == before
+
+
+class TestSessionAbsoluteDeadline:
+    """Sliding expiry on its own means a session that keeps being used never ends, so a
+    stolen cookie would stay good forever. SESSION_MAX_AGE, counted from the created stamp,
+    is the backstop: past it the session is refused however active it has been."""
+
+    @pytest.mark.config({"username": "user", "password": "pass"})
+    def test_session_past_its_deadline_is_rejected_and_deleted(self, session_store):
+        # Idle timeout still in the future, so only the absolute deadline can refuse this
+        store_session(
+            session_store,
+            "old-tok",
+            created_offset=-(interface.SESSION_MAX_AGE + 60),
+            expires_offset=interface.SESSION_DURATION,
+        )
+        assert asyncio.run(interface.validate_session(request_with_cookie("old-tok"))) is False
+        assert asyncio.run(session_store.get_session(interface.hash_session_token("old-tok"))) is None
+
+    @pytest.mark.config({"username": "user", "password": "pass"})
+    def test_session_just_inside_its_deadline_still_works(self, session_store):
+        store_session(
+            session_store,
+            "tok",
+            created_offset=-(interface.SESSION_MAX_AGE - 3600),
+            expires_offset=interface.SESSION_REFRESH_THRESHOLD,
+        )
+        assert asyncio.run(interface.validate_session(request_with_cookie("tok"))) is True
+
+    @pytest.mark.config({"username": "user", "password": "pass"})
+    def test_slide_is_clamped_to_the_deadline(self, session_store):
+        """Near the end of its life a session may only be extended up to created +
+        SESSION_MAX_AGE, so using it cannot push the deadline out"""
+        # Deadline half a window away, and idle-expiry close enough that the slide fires
+        created_offset = -(interface.SESSION_MAX_AGE - interface.SESSION_DURATION // 2)
+        store_session(session_store, "tok", created_offset=created_offset, expires_offset=3600)
+        token_hash = interface.hash_session_token("tok")
+        deadline = asyncio.run(session_store.get_session(token_hash))["created"] + interface.SESSION_MAX_AGE
+
+        assert asyncio.run(interface.validate_session(request_with_cookie("tok"))) is True
+        expires = asyncio.run(session_store.get_session(token_hash))["expires"]
+        assert expires == deadline
+        # ...and it really was clamped, not just left alone
+        assert expires < int(time.time()) + interface.SESSION_DURATION
+
+    @pytest.mark.config({"username": "user", "password": "pass"})
+    def test_pinned_session_stops_being_rewritten(self, session_store):
+        """A session whose expiry already sits on its deadline, with little time left, is the
+        case an unclamped slide gets wrong twice over: it would push the expiry past the
+        deadline, and it would rewrite it on every single request until then. There is
+        nothing to gain from a write here, so there must not be one."""
+        # created so that the deadline is an hour away, with expires already pinned to it
+        store_session(
+            session_store,
+            "tok",
+            created_offset=-(interface.SESSION_MAX_AGE - 3600),
+            expires_offset=3600,
+        )
+        token_hash = interface.hash_session_token("tok")
+        session = asyncio.run(session_store.get_session(token_hash))
+        assert session["expires"] == session["created"] + interface.SESSION_MAX_AGE
+
+        with patch.object(sabnzbd.session_store, "touch_session") as touch:
+            assert asyncio.run(interface.validate_session(request_with_cookie("tok"))) is True
+        touch.assert_not_called()
+        assert asyncio.run(session_store.get_session(token_hash))["expires"] == session["expires"]
 
     @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 0})
     def test_check_apikey_accepts_session_without_key(self, session_store):
