@@ -641,6 +641,120 @@ class TestSessionAuth:
         assert asyncio.run(session_store.get_session(token_hash))["expires"] == before
 
 
+def login_post(username: str = "", password: str = "", remote_ip: str = "127.0.0.1"):
+    """A POST of the login form"""
+    request = request_with_cookie(params={"username": username, "password": password}, remote_ip=remote_ip)
+    request.method = "POST"
+    return request
+
+
+class TestLoginRateLimiting:
+    """Guessing the password over the network has to get expensive. Failures are counted per
+    client address, and once the allowance is gone the client waits out a cooldown."""
+
+    @pytest.fixture(autouse=True)
+    def no_recorded_failures(self, monkeypatch):
+        """The tracker is module state, so start and leave each test with it empty. The web
+        dir is unset outside a running SABnzbd, and login_index builds a template path."""
+        monkeypatch.setattr(sabnzbd, "WEB_DIR_CONFIG", "/nonexistent", raising=False)
+        interface._login_attempts.clear()
+        yield
+        interface._login_attempts.clear()
+
+    def test_allowance_before_lockout(self):
+        request = login_post()
+        for _ in range(interface.LOGIN_MAX_ATTEMPTS - 1):
+            interface.record_login_failure(request)
+            assert interface.login_locked_out(request) is False
+        # The one that uses up the allowance
+        interface.record_login_failure(request)
+        assert interface.login_locked_out(request) is True
+
+    def test_cooldown_expires(self):
+        request = login_post()
+        for _ in range(interface.LOGIN_MAX_ATTEMPTS):
+            interface.record_login_failure(request)
+        assert interface.login_locked_out(request) is True
+
+        # Rewind the cooldown rather than sleeping through it
+        failures, cooldown_expiry = interface._login_attempts["127.0.0.1"]
+        interface._login_attempts["127.0.0.1"] = (failures, cooldown_expiry - interface.LOGIN_LOCKOUT_TIME - 1)
+        assert interface.login_locked_out(request) is False
+
+    def test_success_restores_the_allowance(self):
+        request = login_post()
+        for _ in range(interface.LOGIN_MAX_ATTEMPTS):
+            interface.record_login_failure(request)
+        assert interface.login_locked_out(request) is True
+        interface.clear_login_failures(request)
+        assert interface.login_locked_out(request) is False
+        assert "127.0.0.1" not in interface._login_attempts
+
+    def test_lockout_is_per_client(self):
+        """Keyed on the address, so guessing from one host must not lock anyone else out --
+        and keyed on the address rather than the username, so it cannot be used to lock a
+        known account out of its own instance"""
+        attacker = login_post(remote_ip="10.11.12.13")
+        for _ in range(interface.LOGIN_MAX_ATTEMPTS):
+            interface.record_login_failure(attacker)
+        assert interface.login_locked_out(attacker) is True
+        assert interface.login_locked_out(login_post(remote_ip="127.0.0.1")) is False
+
+    def test_stale_entries_are_dropped(self):
+        """A distributed attempt must not grow the tracker past the clients that failed
+        inside the window, and a client whose cooldown passed starts over with a full
+        allowance rather than one attempt short of a lockout"""
+        old = login_post(remote_ip="10.11.12.13")
+        for _ in range(interface.LOGIN_MAX_ATTEMPTS):
+            interface.record_login_failure(old)
+        failures, cooldown_expiry = interface._login_attempts["10.11.12.13"]
+        interface._login_attempts["10.11.12.13"] = (failures, cooldown_expiry - interface.LOGIN_LOCKOUT_TIME - 1)
+
+        interface.record_login_failure(login_post(remote_ip="127.0.0.1"))
+        assert "10.11.12.13" not in interface._login_attempts
+
+        # And that address is back to a clean slate, not still one away from a lockout
+        interface.record_login_failure(old)
+        assert interface._login_attempts["10.11.12.13"][0] == 1
+
+    @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 0})
+    def test_correct_credentials_are_refused_while_locked_out(self, session_store):
+        """The point of the cooldown is to deny another guess, so the credentials must not be
+        looked at while it is running -- otherwise a client willing to be told no keeps
+        testing passwords. Answers 429 so the refusal is legible to a log watcher too."""
+        request = login_post(username="user", password="pass")
+        for _ in range(interface.LOGIN_MAX_ATTEMPTS):
+            interface.record_login_failure(request)
+
+        with (
+            patch("sabnzbd.interface.build_header", return_value={}),
+            patch("sabnzbd.interface.template_filtered_response") as render,
+            patch("sabnzbd.interface.create_session") as create_session,
+        ):
+            asyncio.run(interface.login_index(request))
+
+        # No session handed out, despite the credentials being exactly right
+        create_session.assert_not_called()
+        assert render.call_args.kwargs["status_code"] == 429
+        assert "Too many" in render.call_args.kwargs["search_list"]["error"]
+
+    @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 0})
+    def test_failed_login_is_counted_and_success_clears_it(self, session_store):
+        """Through the handler rather than the helpers, so the wiring is covered too"""
+        wrong = login_post(username="user", password="nope")
+        with (
+            patch("sabnzbd.interface.build_header", return_value={}),
+            patch("sabnzbd.interface.template_filtered_response") as render,
+        ):
+            asyncio.run(interface.login_index(wrong))
+        assert render.call_args.kwargs["status_code"] == 200
+        assert interface._login_attempts["127.0.0.1"][0] == 1
+
+        right = login_post(username="user", password="pass")
+        asyncio.run(interface.login_index(right))
+        assert "127.0.0.1" not in interface._login_attempts
+
+
 class TestSessionAbsoluteDeadline:
     """Sliding expiry on its own means a session that keeps being used never ends, so a
     stolen cookie would stay good forever. SESSION_MAX_AGE, counted from the created stamp,

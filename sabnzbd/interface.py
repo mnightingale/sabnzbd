@@ -284,6 +284,48 @@ SESSION_MAX_AGE = 3600 * 24 * 90  # 90 days
 # active session triggers at most ~1 database write per day instead of one per request
 SESSION_REFRESH_THRESHOLD = 3600 * 24  # 1 day
 
+# Login rate limiting. A client gets LOGIN_MAX_ATTEMPTS failures, then has to sit out
+# LOGIN_LOCKOUT_TIME before it may try again, which leaves an online guesser about a dozen
+# attempts an hour while costing someone who mistypes their password one short wait.
+LOGIN_MAX_ATTEMPTS = 5
+LOGIN_LOCKOUT_TIME = 300  # 5 minutes
+
+# Failed attempts per client address, as {host: (failures, cooldown_expiry)}.
+#
+# Deliberately in memory rather than in the sessions database: it is short-lived per-process
+# state, and persisting it would mean a schema change -- which logs every remembered browser
+# out -- to inconvenience an attacker who can already restart SABnzbd. Only ever touched from
+# the event loop, so it needs no locking.
+#
+# Keyed on the address rather than the username, so that guessing at one account cannot lock
+# its owner out. Note that behind a reverse proxy without verify_xff_header every client
+# shares the proxy's address, and so shares one allowance.
+_login_attempts: dict[str, tuple[int, float]] = {}
+
+
+def login_locked_out(request: Request) -> bool:
+    """Whether this client has used up its login attempts and is still in the cooldown"""
+    failures, cooldown_expiry = _login_attempts.get(client_address(request).host, (0, 0.0))
+    return failures >= LOGIN_MAX_ATTEMPTS and time.time() < cooldown_expiry
+
+
+def record_login_failure(request: Request):
+    """Count a failed login against this client. Clients whose cooldown has run out are
+    dropped on the way past, both to reset their allowance and to keep a distributed
+    attempt from growing the table beyond the addresses that failed within the window."""
+    now = time.time()
+    for host in [host for host, (_, cooldown_expiry) in _login_attempts.items() if cooldown_expiry <= now]:
+        del _login_attempts[host]
+
+    host = client_address(request).host
+    failures = _login_attempts.get(host, (0, 0.0))[0]
+    _login_attempts[host] = (failures + 1, now + LOGIN_LOCKOUT_TIME)
+
+
+def clear_login_failures(request: Request):
+    """Give a client its full allowance back, once it has proved it knows the password"""
+    _login_attempts.pop(client_address(request).host, None)
+
 
 def credential_fingerprint() -> str:
     """Fingerprint of the current username/password. Stored with each session and
@@ -570,14 +612,15 @@ async def check_apikey(request: Request) -> Optional[Response]:
     return forbidden(_MSG_APIKEY_REQUIRED)
 
 
-def template_filtered_response(file: str, search_list: dict[str, Any]):
+def template_filtered_response(file: str, search_list: dict[str, Any], status_code: int = 200):
     """Wrapper for Cheetah response"""
     # We need a copy, because otherwise source-dicts might be modified
     search_list_copy = copy.deepcopy(search_list)
     # 'filters' is excluded because the RSS-filters are listed twice
     recursive_html_escape(search_list_copy, exclude_items=("webdir", "filters"))
     return HTMLResponse(
-        Template(file=file, searchList=[search_list_copy], compilerSettings=CHEETAH_DIRECTIVES).respond()
+        Template(file=file, searchList=[search_list_copy], compilerSettings=CHEETAH_DIRECTIVES).respond(),
+        status_code=status_code,
     )
 
 
@@ -1059,28 +1102,37 @@ async def login_index(request: Request):
 
     # Check login info
     error = None
+    status_code = 200
     if request.method == "POST":
-        username = request_params(request).get("username")
-        password = request_params(request).get("password")
-        remember_me = bool(request_params(request).get("remember_me", False))
+        if login_locked_out(request):
+            error = T("Too many failed login attempts, try again later.")
+            status_code = 429
+            logging.warning(T("Login attempt refused, too many failures from %s"), client_address_info(request))
+        else:
+            username = request_params(request).get("username")
+            password = request_params(request).get("password")
+            remember_me = bool(request_params(request).get("remember_me", False))
 
-        # Constant-time comparison of submitted credentials against the configured
-        # username/password. Both fields are always compared (no short-circuit), so
-        # neither the comparison time nor an early exit leaks which field matched.
-        username_ok = hmac.compare_digest(utob(username or ""), utob(cfg.username()))
-        password_ok = hmac.compare_digest(utob(password or ""), utob(cfg.password()))
-        if username_ok and password_ok:
-            # Create redirect response
-            response = base_redirect_response("/")
-            # Create a database-backed session and set the session cookie
-            await create_session(request, response, remember_me=remember_me)
-            # Log the success
-            logging.info("Successful login from %s", client_address_info(request))
-            return response
-        elif username or password:
-            error = T("Authentication failed, check username/password.")
-            # Warn about the potential security problem
-            logging.warning(T("Unsuccessful login attempt from %s"), client_address_info(request))
+            # Constant-time comparison of submitted credentials against the configured
+            # username/password. Both fields are always compared (no short-circuit), so
+            # neither the comparison time nor an early exit leaks which field matched.
+            username_ok = hmac.compare_digest(utob(username or ""), utob(cfg.username()))
+            password_ok = hmac.compare_digest(utob(password or ""), utob(cfg.password()))
+            if username_ok and password_ok:
+                # Create redirect response
+                response = base_redirect_response("/")
+                # Create a database-backed session and set the session cookie
+                await create_session(request, response, remember_me=remember_me)
+                # Proved it knows the password, so give it its attempts back
+                clear_login_failures(request)
+                # Log the success
+                logging.info("Successful login from %s", client_address_info(request))
+                return response
+            elif username or password:
+                error = T("Authentication failed, check username/password.")
+                record_login_failure(request)
+                # Warn about the potential security problem
+                logging.warning(T("Unsuccessful login attempt from %s"), client_address_info(request))
 
     # Show login. Building the header and rendering the Cheetah template are
     # blocking work, so keep them off the event loop.
@@ -1090,6 +1142,7 @@ async def login_index(request: Request):
         return template_filtered_response(
             file=os.path.join(sabnzbd.WEB_DIR_CONFIG, "login", "main.tmpl"),
             search_list=info,
+            status_code=status_code,
         )
 
     return await run_in_threadpool(render_login_page)
