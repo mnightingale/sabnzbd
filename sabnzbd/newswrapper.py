@@ -189,8 +189,17 @@ class NewsWrapper:
         decode_yenc uses the data to derive md5of16k and to rename the file, and the
         file has no path to write to yet. Those articles take the cache path exactly as
         before, so the in-memory route stays live in every configuration.
+
+        It is also refused when the destination cannot absorb scattered writes. The
+        setting is permission, not instruction: the measurement decides whether the
+        permission is used, so turning it on for a spinning disk changes nothing.
         """
         if not article or not sabnzbd.cfg.direct_decode() or not sabnzbd.cfg.direct_write():
+            return None
+
+        # Measured, and never measured here: probing takes up to half a second and this
+        # runs with a connection waiting. Unknown reads as no.
+        if not sabnzbd.storage.download_dir_supports_random_writes():
             return None
 
         nzf = article.nzf

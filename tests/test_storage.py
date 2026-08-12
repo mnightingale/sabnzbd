@@ -23,7 +23,6 @@ import os
 
 import pytest
 
-import sabnzbd
 import sabnzbd.storage as storage
 
 
@@ -177,3 +176,38 @@ class TestReporting:
         assert "scattered writes" in str(fast)
         assert "sequential writes" in str(slow)
         assert "unmeasured" in str(storage.DeviceProfile(device=1, path="/x", error="boom"))
+
+
+class TestHotPathAccessor:
+    """article_sink() consults this while a connection waits, so it must never be the
+    thing that runs a probe"""
+
+    def test_cached_profile_does_not_probe(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(storage, "probe", lambda path: pytest.fail("probed on the hot path"))
+        assert storage.cached_profile(str(tmp_path)) is None
+
+    def test_cached_profile_returns_a_measured_one(self, tmp_path):
+        measured = storage.profile_for(str(tmp_path))
+        assert storage.cached_profile(str(tmp_path)) is measured
+
+    def test_unknown_reads_as_no(self, monkeypatch):
+        """Before the startup profile lands, the answer has to be the safe one"""
+        monkeypatch.setattr(storage, "cached_profile", lambda path: None)
+        assert storage.download_dir_supports_random_writes() is False
+
+    def test_follows_the_measurement(self, monkeypatch):
+        for iops, expected in ((90, False), (8000, True)):
+            monkeypatch.setattr(
+                storage,
+                "cached_profile",
+                lambda path, iops=iops: storage.DeviceProfile(
+                    device=1, path="/x", iops=iops, ops=storage.PROBE_MAX_OPS, seconds=1.0
+                ),
+            )
+            assert storage.download_dir_supports_random_writes() is expected
+
+    def test_an_unmeasurable_device_reads_as_no(self, monkeypatch):
+        monkeypatch.setattr(
+            storage, "cached_profile", lambda path: storage.DeviceProfile(device=1, path="/x", error="boom")
+        )
+        assert storage.download_dir_supports_random_writes() is False
