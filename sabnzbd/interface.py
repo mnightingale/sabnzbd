@@ -474,19 +474,29 @@ def csrf_token_for(cookie_value: str) -> str:
     return hmac.new(_CSRF_KEY, utob(cookie_value), hashlib.sha256).hexdigest()
 
 
-def presented_csrf_token(request: Request) -> str:
-    """The CSRF token this request offers, from the header or a form field. The header
-    covers every XHR (one $.ajaxSetup per skin) and cannot be set cross-site at all; the
-    field serves the handful of native form navigations, which cannot send headers.
+def presented_csrf_token(request: Request, header_only: bool = False) -> str:
+    """The CSRF token this request offers, from the header or a form field.
 
-    Read from request_params, never the query string: a page POST's params are the form
-    body only, so a ?csrf_token= is invisible here by design."""
+    The header covers every XHR (one $.ajaxSetup per skin) and cannot be set cross-site at
+    all. The field additionally serves the handful of native form navigations, which cannot
+    send headers, and on a page route it really is a field: those params are the form body
+    only, so a ?csrf_token= is invisible here by design.
+
+    header_only is for /api, the one route whose params are merged with the query string.
+    Accepting a field there would accept a token from a URL, which puts it in access logs and
+    Referer headers and drops it onto a channel an <img> can reach -- so the API takes it from
+    the header alone, which is what lets it rely on the CORS preflight."""
+    if header_only:
+        return request.headers.get(CSRF_HEADER) or ""
     return request.headers.get(CSRF_HEADER) or request_params(request).get(CSRF_FIELD) or ""
 
 
-def csrf_token_matches(request: Request) -> bool:
+def csrf_token_matches(request: Request, header_only: bool = False) -> bool:
     """Whether the request echoes the CSRF token belonging to the cookie it sent"""
-    return constant_time_equals(presented_csrf_token(request), csrf_token_for(request.cookies.get(SESSION_COOKIE, "")))
+    return constant_time_equals(
+        presented_csrf_token(request, header_only=header_only),
+        csrf_token_for(request.cookies.get(SESSION_COOKIE, "")),
+    )
 
 
 async def validate_csrf(request: Request) -> bool:
@@ -515,7 +525,21 @@ async def validate_session(request: Request) -> bool:
     """Return True when the request carries a session cookie that is not past either of its
     two deadlines -- the sliding idle timeout and the absolute SESSION_MAX_AGE -- and whose
     credential fingerprint still matches the configured username/password. Sessions failing
-    any of those are deleted, and a still-valid one slides its expiry forward."""
+    any of those are deleted, and a still-valid one slides its expiry forward.
+
+    Answered once per request and then remembered: a single page POST asks through both the
+    login check and the CSRF guard, and a POST whose login is bypassed asks a third time when
+    SecurityMiddleware decides whether to issue an anonymous cookie. The answer cannot change
+    while a request is in flight, so the repeats would only re-run the row lookup and the
+    expiry and activity writes underneath it."""
+    if (cached := getattr(request.state, "session_valid", None)) is None:
+        cached = await _validate_session(request)
+        request.state.session_valid = cached
+    return cached
+
+
+async def _validate_session(request: Request) -> bool:
+    """The lookup behind validate_session. Call that instead, so a request pays for this once."""
     token = request.cookies.get(SESSION_COOKIE)
     if not token:
         return False
@@ -612,13 +636,15 @@ async def check_apikey(request: Request) -> Optional[Response]:
     # also echoes that session's CSRF token in the header, which no cross-site page can set.
     # That header is what protects the API: unlike the cookie it is neither sent automatically
     # nor settable by a form, an image or a navigation, and a cross-origin fetch that sets it
-    # is preflighted, which SABnzbd answers with a bare 405.
+    # is preflighted, which SABnzbd answers with a bare 405. Header only, so that stays true:
+    # this route merges the query string into its params, so honouring the field as well would
+    # accept a token from a URL.
     cookie_ok = await validate_any_session(request)
-    if cookie_ok and csrf_token_matches(request):
+    if cookie_ok and csrf_token_matches(request, header_only=True):
         return None
 
-    # Deliberately no early return above: a request carrying both a cookie and a valid apikey
-    # (the config pages still do) has to stay authorized here.
+    # Deliberately no early return above: a request that carries both a cookie and a valid
+    # apikey has to stay authorized here.
     key = request_params(request).get("apikey")
     if key:
         if req_access == 1 and key == cfg.nzb_key():
@@ -641,7 +667,7 @@ async def check_apikey(request: Request) -> Optional[Response]:
         # the anonymous key, the login session expired, credentials changed), or a token from
         # before a restart rotated _CSRF_KEY. A valid session sending no token at all is not
         # something a reload repairs, so it gets a 403 instead of an endless reload loop.
-        if not cookie_ok or presented_csrf_token(request):
+        if not cookie_ok or presented_csrf_token(request, header_only=True):
             return PlainTextResponse(_MSG_SESSION_EXPIRED, status_code=401)
         return forbidden(_MSG_MISSING_SESSION)
 

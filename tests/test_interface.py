@@ -29,7 +29,7 @@ import pytest
 from unittest.mock import Mock, patch
 from starlette.requests import Request
 from starlette.responses import RedirectResponse
-from starlette.datastructures import Headers, Address
+from starlette.datastructures import Headers, Address, State
 import uvicorn
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from uvicorn.lifespan import on as lifespan_on
@@ -48,6 +48,10 @@ def create_mock_request(remote_ip: str = "127.0.0.1", headers: dict | None = Non
     mock_request = Mock(spec=Request)
     mock_request.client = Address(remote_ip, remote_port)
     mock_request.headers = Headers(headers or {})
+    # A real State, not the Mock's auto-created attributes: code under test asks state for
+    # values that may be absent (getattr(..., default)), and a Mock answers every such
+    # question with a truthy Mock instead of raising, which hides what the real object does
+    mock_request.state = State({})
     return mock_request
 
 
@@ -1112,6 +1116,21 @@ class TestApiCsrf:
         assert self._status(api_request(interface.anonymous_session_tag(), mode="showlog")) is None
 
     @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
+    def test_token_outside_the_header_is_not_accepted(self, session_store):
+        """This route merges the query string into its params, so honouring a token parameter
+        would accept one straight out of a URL -- which puts it in access logs and Referer
+        headers and onto a channel an <img> can reach, losing the preflight guarantee that
+        makes the header a CSRF defence in the first place. Page routes still take the field,
+        because their params are the form body and a native form cannot send a header."""
+        tag = interface.anonymous_session_tag()
+        token = interface.csrf_token_for(tag)
+
+        as_parameter = request_with_cookie(tag, params={"mode": "queue", "name": "", interface.CSRF_FIELD: token})
+        assert self._status(as_parameter) == 403
+        # The same token in the header is what the frontend sends, and it is accepted
+        assert self._status(api_request(tag)) is None
+
+    @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
     def test_keyless_and_cookieless_still_reports_missing_key(self, session_store):
         assert self._status(request_with_cookie(params={"mode": "queue", "name": ""})) == 403
 
@@ -1299,6 +1318,18 @@ class TestPagePostCsrf:
         tag = interface.anonymous_session_tag()
         request = page_post(tag, remote_ip="9.8.7.6", csrf=interface.csrf_token_for(tag))
         assert asyncio.run(config_save_middleware().denied_response(request)) is not None
+
+    @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 0})
+    def test_session_is_looked_up_once_per_request(self, session_store):
+        """The login check and the CSRF guard both need to know whether the session is good,
+        and under inet_exposure 5 the cookie-issuing decision asks a third time. Repeating the
+        lookup would repeat the row read and the expiry and activity writes under it."""
+        store_session(session_store, "login-token")
+        request = page_post("login-token", csrf=interface.csrf_token_for("login-token"))
+
+        with patch.object(sabnzbd.session_store, "get_session", wraps=sabnzbd.session_store.get_session) as get_session:
+            assert asyncio.run(config_save_middleware().denied_response(request)) is None
+        assert get_session.call_count == 1
 
     @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
     def test_get_is_not_guarded(self, session_store):
