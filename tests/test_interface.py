@@ -1140,6 +1140,50 @@ class TestAnonymousSession:
         assert response.set_cookie.call_args.args[0] == interface.SESSION_COOKIE
 
 
+class TestStaleTokenIsNotAWarning:
+    """Every page open across a restart holds a token minted under the previous run's key, so
+    the refusals that follow are expected and self-healing. They must not be warnings: those
+    reach the interface's warning panel and fire a notification, so restarting from the
+    interface would report a refused connection against the user's own address."""
+
+    def _levels(self, caplog, run) -> set:
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=""):
+            run()
+        return {record.levelname for record in caplog.records}
+
+    @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0, "api_warnings": True})
+    def test_api_call_with_a_stale_token_is_only_info(self, session_store, caplog):
+        request = request_with_cookie(
+            interface.anonymous_session_tag(), params={"mode": "queue", "name": ""}, csrf="f0" * 32
+        )
+        levels = self._levels(caplog, lambda: asyncio.run(interface.check_apikey(request)))
+        assert "WARNING" not in levels
+        assert "INFO" in levels
+
+    @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0, "api_warnings": True})
+    def test_api_call_with_no_token_still_warns(self, session_store, caplog):
+        """No token at all is what a scanner or a keyless 3rd-party program looks like, and our
+        own frontend always sends one, so this keeps its warning"""
+        request = api_request(interface.anonymous_session_tag(), with_token=False)
+        levels = self._levels(caplog, lambda: asyncio.run(interface.check_apikey(request)))
+        assert "WARNING" in levels
+
+    @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0, "api_warnings": True})
+    def test_page_post_with_a_stale_token_is_only_info(self, session_store, caplog):
+        request = page_post(interface.anonymous_session_tag(), csrf="f0" * 32)
+        levels = self._levels(caplog, lambda: asyncio.run(config_save_middleware().denied_response(request)))
+        assert "WARNING" not in levels
+        assert "INFO" in levels
+
+    @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0, "api_warnings": True})
+    def test_cross_site_page_post_still_warns(self, session_store, caplog):
+        """A cross-site form cannot read a token, so the case this guard exists for is exactly
+        the one that keeps warning"""
+        levels = self._levels(caplog, lambda: asyncio.run(config_save_middleware().denied_response(page_post())))
+        assert "WARNING" in levels
+
+
 class TestApiCsrf:
     """A cookie-authorized API call must echo its session's CSRF token in a header. The
     header is what makes this a defence: it cannot be attached by a form, an image or a

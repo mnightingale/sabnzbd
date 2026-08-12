@@ -687,17 +687,20 @@ async def check_apikey(request: Request) -> Optional[Response]:
         return forbidden(_MSG_APIKEY_INCORRECT)
 
     if SESSION_COOKIE in request.cookies:
-        # A cookie was presented, so this is a browser rather than a keyless 3rd-party
-        # program and the apikey advice below would only mislead. It is still warned about:
-        # staying silent whenever a cookie is present let anyone suppress the warning, and
-        # any log-watching it feeds, by sending along a junk cookie.
-        log_warning_and_ip(request, T("Refused connection from:"))
+        # A cookie was presented, so this is a browser
+        stale_token = presented_csrf_token(request, header_only=True)
+        if stale_token:
+            logging.info(
+                "Stale session token from %s, the page will reload for a fresh one", client_address_info(request)
+            )
+        else:
+            log_warning_and_ip(request, T("Refused connection from:"))
         # 401 only where reloading the page genuinely fixes it, because that is how the
         # frontend answers a 401: a session that no longer validates (a restart regenerated
         # the anonymous key, the login session expired, credentials changed), or a token from
         # before a restart rotated _CSRF_KEY. A valid session sending no token at all is not
         # something a reload repairs, so it gets a 403 instead of an endless reload loop.
-        if not cookie_ok or presented_csrf_token(request, header_only=True):
+        if not cookie_ok or stale_token:
             return PlainTextResponse(_MSG_SESSION_EXPIRED, status_code=401)
         return forbidden(_MSG_MISSING_SESSION)
 
@@ -915,7 +918,13 @@ class SecurityMiddleware:
         # is relying on SameSite=Strict, which is not origin-scoped — a page served from
         # another port on the same host is same-site and its forms do send the cookie.
         if self.check_csrf and request.method == "POST" and not await validate_csrf(request):
-            log_warning_and_ip(request, T("Refused connection from:"))
+            # A token that simply does not match is a page left open across a restart
+            if presented_csrf_token(request) and not offered_apikey:
+                logging.info(
+                    "Stale session token from %s, the page will reload for a fresh one", client_address_info(request)
+                )
+            else:
+                log_warning_and_ip(request, T("Refused connection from:"))
             return forbidden(_MSG_APIKEY_NOT_ON_PAGES if offered_apikey else _MSG_MISSING_SESSION)
 
         # The /api route: session cookie or apikey (see check_apikey), which returns
