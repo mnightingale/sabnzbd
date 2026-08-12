@@ -31,14 +31,15 @@ $.ajaxSetup({
     headers: { "X-SABnzbd-CSRF": csrfToken }
 });
 
-// Basic API-call
+// Basic API-call. POST, so the parameters travel in the body: the bulk queue and history
+// actions pass a comma-joined list of job ids, which outgrows what a URL can carry once enough
+// jobs are selected -- sooner still behind a reverse proxy, where 8k header limits are typical.
 function callAPI(data, timeout = 10000) {
     // Fill basis var's
     data.output = "json";
     var ajaxQuery = $.ajax({
         url: "./api",
-        type: "GET",
-        cache: false,
+        type: "POST",
         data: data,
         timeout: timeout
     });
