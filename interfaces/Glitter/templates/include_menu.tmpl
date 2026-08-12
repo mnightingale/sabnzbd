@@ -108,7 +108,11 @@
                             <button type="submit">$T('shutdownSab')</button>
                         </form>
                     </li>
-                    <li><a href="#" data-bind="click: restartSAB">$T('Glitter-restartSab')</a></li>
+                    <li>
+                        <form data-bind="submit: restartSAB">
+                            <button type="submit">$T('Glitter-restartSab')</button>
+                        </form>
+                    </li>
                     <li class="divider"></li>
                     <li class="dropdown-header"><span class="glyphicon glyphicon-off"></span> $T('Glitter-onFinish'):</li>
                     <li>
