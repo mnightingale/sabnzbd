@@ -23,6 +23,7 @@ import asyncio
 import inspect
 import logging
 import logging.config
+import sqlite3
 import time
 from typing import Optional
 import pytest
@@ -661,9 +662,24 @@ class TestSessionStoreFailure:
     back to the form on the next request -- for as long as the database stayed unwritable"""
 
     @pytest.fixture
-    def failing_store(self, monkeypatch):
-        """A store whose writes fail the way a read-only or full admin_dir makes them fail"""
-        store = sessionstore.AsyncSessionStore(db_path="/nonexistent-directory/sessions.db")
+    def failing_store(self, monkeypatch, tmp_path):
+        """A store whose database cannot be opened, the way a read-only or full admin_dir makes
+        it fail.
+
+        The failure is injected at the connect call rather than by pointing the store at an
+        unopenable path, because aiosqlite fails a connect *after* starting its worker thread:
+        its cleanup enqueues a stop future that it then discards without awaiting (core.py's
+        `except BaseException: self.stop()`). Under asyncio.run the loop can close before that
+        thread delivers, and its two attempts to resolve the future both raise "Event loop is
+        closed" -- the second from inside the first's handler, so it escapes the worker and
+        pytest reports an unhandled thread exception against whatever test is running by then.
+        Raising before any thread exists keeps that path unreachable."""
+        store = sessionstore.AsyncSessionStore(db_path=str(tmp_path / "sessions.db"))
+        monkeypatch.setattr(
+            sessionstore.aiosqlite,
+            "connect",
+            Mock(side_effect=sqlite3.OperationalError("unable to open database file")),
+        )
         monkeypatch.setattr(sabnzbd, "session_store", store)
         return store
 
