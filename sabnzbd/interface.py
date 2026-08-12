@@ -324,8 +324,9 @@ def _prune_login_attempts(now: float):
 
 
 def login_cooldown_remaining(request: Request) -> int:
-    """Whole seconds this client must sit out before another login attempt is considered,
-    or 0 when it may try now"""
+    """Whole seconds this client must sit out before another login attempt is considered, or 0
+    when it may try now. Seconds rather than a plain yes/no because the refusal reports them
+    back as Retry-After."""
     _prune_login_attempts(time.monotonic())
     failures, cooldown_expiry = _login_attempts.get(client_address(request).host, (0, 0.0))
     remaining = cooldown_expiry - time.monotonic()
@@ -333,11 +334,6 @@ def login_cooldown_remaining(request: Request) -> int:
         return 0
     # Rounded up, because a Retry-After of 0 would invite a retry that is still too early
     return int(remaining) + 1
-
-
-def login_locked_out(request: Request) -> bool:
-    """Whether this client has used up its login attempts and is still in the cooldown"""
-    return login_cooldown_remaining(request) > 0
 
 
 def record_login_failure(request: Request):

@@ -798,6 +798,12 @@ def login_post(username: str = "", password: str = "", remote_ip: str = "127.0.0
     return request
 
 
+def locked_out(request) -> bool:
+    """Whether the cooldown is running for this client. Production asks for the remaining
+    seconds instead, because the refusal reports them as Retry-After."""
+    return interface.login_cooldown_remaining(request) > 0
+
+
 class TestLoginRateLimiting:
     """Guessing the password over the network has to get expensive. Failures are counted per
     client address, and once the allowance is gone the client waits out a cooldown."""
@@ -815,29 +821,29 @@ class TestLoginRateLimiting:
         request = login_post()
         for _ in range(interface.LOGIN_MAX_ATTEMPTS - 1):
             interface.record_login_failure(request)
-            assert interface.login_locked_out(request) is False
+            assert locked_out(request) is False
         # The one that uses up the allowance
         interface.record_login_failure(request)
-        assert interface.login_locked_out(request) is True
+        assert locked_out(request) is True
 
     def test_cooldown_expires(self):
         request = login_post()
         for _ in range(interface.LOGIN_MAX_ATTEMPTS):
             interface.record_login_failure(request)
-        assert interface.login_locked_out(request) is True
+        assert locked_out(request) is True
 
         # Rewind the cooldown rather than sleeping through it
         failures, cooldown_expiry = interface._login_attempts["127.0.0.1"]
         interface._login_attempts["127.0.0.1"] = (failures, cooldown_expiry - interface.LOGIN_LOCKOUT_TIME - 1)
-        assert interface.login_locked_out(request) is False
+        assert locked_out(request) is False
 
     def test_success_restores_the_allowance(self):
         request = login_post()
         for _ in range(interface.LOGIN_MAX_ATTEMPTS):
             interface.record_login_failure(request)
-        assert interface.login_locked_out(request) is True
+        assert locked_out(request) is True
         interface.clear_login_failures(request)
-        assert interface.login_locked_out(request) is False
+        assert locked_out(request) is False
         assert "127.0.0.1" not in interface._login_attempts
 
     def test_lockout_is_per_client(self):
@@ -847,8 +853,8 @@ class TestLoginRateLimiting:
         attacker = login_post(remote_ip="10.11.12.13")
         for _ in range(interface.LOGIN_MAX_ATTEMPTS):
             interface.record_login_failure(attacker)
-        assert interface.login_locked_out(attacker) is True
-        assert interface.login_locked_out(login_post(remote_ip="127.0.0.1")) is False
+        assert locked_out(attacker) is True
+        assert locked_out(login_post(remote_ip="127.0.0.1")) is False
 
     def test_stale_entries_are_dropped(self):
         """A distributed attempt must not grow the tracker past the clients that failed
@@ -925,12 +931,12 @@ class TestLoginRateLimiting:
         request = login_post()
         for _ in range(interface.LOGIN_MAX_ATTEMPTS):
             interface.record_login_failure(request)
-        assert interface.login_locked_out(request) is True
+        assert locked_out(request) is True
 
         # Jump the wall clock a year forward from where it really is; the cooldown is unmoved
         real_time = time.time
         monkeypatch.setattr(time, "time", lambda: real_time() + 3600 * 24 * 365)
-        assert interface.login_locked_out(request) is True
+        assert locked_out(request) is True
 
     def test_stale_entries_are_dropped_on_a_read(self):
         """Pruning on reads as well as writes means a client that stopped failing is forgotten
@@ -942,7 +948,7 @@ class TestLoginRateLimiting:
         interface._login_attempts["10.11.12.13"] = (failures, cooldown_expiry - interface.LOGIN_LOCKOUT_TIME - 1)
 
         # A read on behalf of some other client is enough
-        assert interface.login_locked_out(login_post(remote_ip="127.0.0.1")) is False
+        assert locked_out(login_post(remote_ip="127.0.0.1")) is False
         assert "10.11.12.13" not in interface._login_attempts
 
     @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 0})
