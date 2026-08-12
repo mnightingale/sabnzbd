@@ -578,9 +578,15 @@ def store_session(
     token: str,
     expires_offset: int = interface.SESSION_DURATION,
     created_offset: int = 0,
+    last_ip: str = "127.0.0.1",
+    user_agent: Optional[str] = None,
 ):
     """Add a login session for token, valid for the credentials configured right now.
-    created_offset ages the session, for the absolute-deadline cases."""
+    created_offset ages the session, for the absolute-deadline cases.
+
+    last_ip defaults to the address request_with_cookie uses, because create_session always
+    records one: a row with no address looks like a client that has moved, which would make
+    every validation rewrite it."""
     now = int(time.time())
     asyncio.run(
         store.add_session(
@@ -588,6 +594,8 @@ def store_session(
             now + created_offset,
             now + expires_offset,
             interface.credential_fingerprint(),
+            last_ip=last_ip,
+            user_agent=user_agent,
         )
     )
 
@@ -757,40 +765,72 @@ class TestLoginRateLimiting:
 
 class TestSessionActivityDetails:
     """The row is meant to describe the session as it is, not only as it was created, so that
-    a future list of active sessions can say where each one is being used from"""
+    a future list of active sessions can say where each one is being used from. Waiting for
+    the daily expiry slide would leave that up to a day out of date, so a client that moves
+    is written through immediately."""
+
+    def _details(self, store, token: str = "tok") -> tuple:
+        session = asyncio.run(store.get_session(interface.hash_session_token(token)))
+        return session["last_ip"], session["user_agent"]
+
+    def _validate_from(self, remote_ip: str, user_agent: Optional[str] = None, token: str = "tok") -> bool:
+        request = request_with_cookie(token, remote_ip=remote_ip)
+        if user_agent:
+            request.headers = Headers({"User-Agent": user_agent})
+        return asyncio.run(interface.validate_session(request))
 
     @pytest.mark.config({"username": "user", "password": "pass"})
-    def test_slide_refreshes_where_the_session_is_used(self, session_store):
-        store_session(session_store, "tok", expires_offset=interface.SESSION_REFRESH_THRESHOLD)
-        token_hash = interface.hash_session_token("tok")
-        assert asyncio.run(session_store.get_session(token_hash))["last_ip"] is None
+    def test_moving_address_is_written_through_immediately(self, session_store):
+        """No waiting for the slide: the expiry here was just set, so the throttle would
+        otherwise skip the write and leave the old address on show"""
+        store_session(session_store, "tok", last_ip="10.11.12.13", user_agent="some-browser")
+        assert self._validate_from("192.168.1.5", "some-browser") is True
+        assert self._details(session_store) == ("192.168.1.5", "some-browser")
 
-        request = request_with_cookie("tok", remote_ip="10.11.12.13")
-        request.headers = Headers({"User-Agent": "some-browser"})
-        assert asyncio.run(interface.validate_session(request)) is True
+    @pytest.mark.config({"username": "user", "password": "pass"})
+    def test_changed_user_agent_is_written_through_immediately(self, session_store):
+        store_session(session_store, "tok", last_ip="10.11.12.13", user_agent="some-browser")
+        assert self._validate_from("10.11.12.13", "another-browser") is True
+        assert self._details(session_store) == ("10.11.12.13", "another-browser")
 
-        session = asyncio.run(session_store.get_session(token_hash))
-        assert session["last_ip"] == "10.11.12.13"
-        assert session["user_agent"] == "some-browser"
+    @pytest.mark.config({"username": "user", "password": "pass"})
+    def test_unchanged_client_is_not_rewritten(self, session_store):
+        """The whole point of the throttle: a client that has not moved must not put a write
+        behind every request it makes"""
+        store_session(session_store, "tok", last_ip="10.11.12.13", user_agent="some-browser")
+        with patch.object(sabnzbd.session_store, "touch_session") as touch:
+            assert self._validate_from("10.11.12.13", "some-browser") is True
+        touch.assert_not_called()
+
+    @pytest.mark.config({"username": "user", "password": "pass"})
+    def test_missing_user_agent_is_not_a_change(self, session_store):
+        """touch_session keeps the stored value when passed None, so a request with no
+        User-Agent must not read as 'moved' -- that would rewrite the row on every request
+        for the rest of the session's life"""
+        store_session(session_store, "tok", last_ip="10.11.12.13", user_agent="some-browser")
+        with patch.object(sabnzbd.session_store, "touch_session") as touch:
+            assert self._validate_from("10.11.12.13") is True
+        touch.assert_not_called()
 
     @pytest.mark.config({"username": "user", "password": "pass"})
     def test_details_survive_a_request_without_them(self, session_store):
-        """Validation only writes about once a day, so a request that carries no User-Agent
-        must not wipe the one already recorded"""
-        store_session(session_store, "tok", expires_offset=interface.SESSION_REFRESH_THRESHOLD)
+        """A request that carries no User-Agent must not wipe the one already recorded, even
+        when it does write because the address changed"""
+        store_session(session_store, "tok", last_ip="10.11.12.13", user_agent="some-browser")
+        assert self._validate_from("127.0.0.1") is True
+        assert self._details(session_store) == ("127.0.0.1", "some-browser")
+
+    @pytest.mark.config({"username": "user", "password": "pass"})
+    def test_activity_write_never_shortens_the_expiry(self, session_store):
+        """A row written before the window shrank to SESSION_DURATION carries a longer expiry
+        than today's slide would grant, and moving must not claw that back"""
+        long_expiry = interface.SESSION_DURATION * 2
+        store_session(session_store, "tok", expires_offset=long_expiry, last_ip="10.11.12.13")
         token_hash = interface.hash_session_token("tok")
+        before = asyncio.run(session_store.get_session(token_hash))["expires"]
 
-        first = request_with_cookie("tok", remote_ip="10.11.12.13")
-        first.headers = Headers({"User-Agent": "some-browser"})
-        assert asyncio.run(interface.validate_session(first)) is True
-
-        # Wind the expiry back so the next validation writes again, this time with no UA
-        asyncio.run(session_store.touch_session(token_hash, int(time.time()) + interface.SESSION_REFRESH_THRESHOLD))
-        assert asyncio.run(interface.validate_session(request_with_cookie("tok", remote_ip="127.0.0.1"))) is True
-
-        session = asyncio.run(session_store.get_session(token_hash))
-        assert session["last_ip"] == "127.0.0.1"
-        assert session["user_agent"] == "some-browser"
+        assert self._validate_from("192.168.1.5") is True
+        assert asyncio.run(session_store.get_session(token_hash))["expires"] == before
 
 
 class TestSessionAbsoluteDeadline:

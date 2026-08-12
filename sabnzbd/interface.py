@@ -517,19 +517,31 @@ async def validate_session(request: Request) -> bool:
         await sabnzbd.session_store.delete_session(token_hash)
         return False
 
-    # Slide the idle timeout forward, never past the absolute deadline. Writing only when
-    # this actually gains time keeps it to roughly one write per day per session, and stops
-    # writing altogether once the expiry is pinned to the deadline -- otherwise every single
-    # request in the session's last SESSION_DURATION would rewrite the same value.
-    new_expires = min(now + SESSION_DURATION, session["created"] + SESSION_MAX_AGE)
-    if new_expires > session["expires"] + SESSION_REFRESH_THRESHOLD:
-        # Refresh where the session was last used while writing anyway, so the row keeps
-        # describing the session as it is rather than only as it was created
+    # Slide the idle timeout forward, never past the absolute deadline, and never backwards:
+    # a row written by an older version can carry a longer expiry than today's window, and
+    # using a session should not shorten it.
+    new_expires = max(session["expires"], min(now + SESSION_DURATION, session["created"] + SESSION_MAX_AGE))
+
+    # Write when the slide gains real time, or when the client's address or browser changed.
+    # The first keeps an idle-timeout refresh down to roughly one write a day per session --
+    # and stops entirely once the expiry is pinned to the deadline, where sliding can gain
+    # nothing. The second keeps the row describing where the session is actually being used
+    # rather than lagging a day behind, which is what makes it worth showing to the user.
+    #
+    # Only a value we actually have counts as a change: touch_session keeps the stored one
+    # when passed None, so treating a missing User-Agent as different would write on every
+    # single request forever. A client whose address genuinely changes per request (a rotating
+    # proxy pool in front of a trusted verify_xff_header) does pay a write per request.
+    last_ip = client_address(request).host
+    user_agent = request.headers.get("User-Agent")
+    moved = (last_ip and session["last_ip"] != last_ip) or (user_agent and session["user_agent"] != user_agent)
+
+    if moved or new_expires > session["expires"] + SESSION_REFRESH_THRESHOLD:
         await sabnzbd.session_store.touch_session(
             token_hash,
             new_expires,
-            last_ip=client_address(request).host,
-            user_agent=request.headers.get("User-Agent"),
+            last_ip=last_ip,
+            user_agent=user_agent,
         )
 
     return True
