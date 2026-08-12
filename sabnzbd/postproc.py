@@ -692,15 +692,18 @@ def process_job(nzo: NzbObject) -> bool:
                 0,
             )
 
+    finally:
+        # Release the par2 repairer whatever happened above. It holds par2's buffers
+        # and open file handles, nothing past this point needs it, and the tail of this
+        # function does unguarded filesystem work that can still raise.
+        sabnzbd.par2repair.discard(nzo)
+
     workdir_notifcation_action = workdir_complete
     if all_ok:
         # If the folder only contains one file OR folder, have that as the path
         # Be aware that series/generic/date sorting may move a single file into a folder containing other files
         workdir_complete = one_file_or_folder(workdir_complete)
         workdir_complete = os.path.normpath(workdir_complete)
-
-    # Release any par2 repairer still held for this job
-    sabnzbd.par2repair.discard(nzo)
 
     # Clean up the NZO data
     try:
