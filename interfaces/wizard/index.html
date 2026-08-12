@@ -1,5 +1,6 @@
 <!--#include $webdir + "/inc_top.tmpl"#-->
 <form action="$url('wizard/one')" method="post">
+<input type="hidden" name="csrf_token" value="$csrf_token" />
     <div class="container">
         <div id="inner">
             <div id="content" class="bigger">
@@ -39,5 +40,5 @@
         </div>
     </div>
 </form>
-<form id="shutdown-form" method="post" action="$url('shutdown')"></form>
+<form id="shutdown-form" method="post" action="$url('shutdown')"><input type="hidden" name="csrf_token" value="$csrf_token" /></form>
 <!--#include $webdir + "/inc_bottom.tmpl"#-->

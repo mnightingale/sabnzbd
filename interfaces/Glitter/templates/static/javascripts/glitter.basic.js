@@ -23,6 +23,14 @@ if(isMobile) {
     });
 }
 
+// Every API-call and page POST has to echo the session's CSRF token. Sending it as a header
+// covers all of them at once, including the FormData uploads that bypass callAPI, and a header
+// is something a cross-site page cannot set at all. The two forms that navigate rather than
+// use ajax (logout, shutdown) carry it as a hidden field instead.
+$.ajaxSetup({
+    headers: { "X-SABnzbd-CSRF": csrfToken }
+});
+
 // Basic API-call
 function callAPI(data, timeout = 10000) {
     // Fill basis var's

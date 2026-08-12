@@ -542,12 +542,26 @@ class TestUseSecureCookies:
         assert run("8.7.6.5") is False
 
 
-def request_with_cookie(token: Optional[str] = None, params: Optional[dict] = None, remote_ip: str = "127.0.0.1"):
-    """Mock request carrying an optional session cookie and merged API params"""
-    request = create_mock_request(remote_ip=remote_ip)
+def request_with_cookie(
+    token: Optional[str] = None,
+    params: Optional[dict] = None,
+    remote_ip: str = "127.0.0.1",
+    csrf: Optional[str] = None,
+):
+    """Mock request carrying an optional session cookie and merged API params. csrf sets the
+    CSRF header; pass csrf="" for a request that presents no token at all."""
+    headers = {} if csrf is None else {interface.CSRF_HEADER: csrf}
+    request = create_mock_request(remote_ip=remote_ip, headers=headers)
     request.cookies = {interface.SESSION_COOKIE: token} if token else {}
     request.state.params = params or {}
     return request
+
+
+def api_request(token: Optional[str] = None, mode: str = "queue", with_token: bool = True, **kwargs):
+    """Mock /api request authorized by session cookie, echoing that session's CSRF token
+    in the header unless with_token is False"""
+    csrf = interface.csrf_token_for(token or "") if with_token else None
+    return request_with_cookie(token, params={"mode": mode, "name": "", **kwargs}, csrf=csrf)
 
 
 @pytest.fixture
@@ -613,9 +627,8 @@ class TestSessionAuth:
     @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 0})
     def test_check_apikey_accepts_session_without_key(self, session_store):
         store_session(session_store, "browser-token")
-        # A local browser call with a valid session and no apikey is authorized
-        request = request_with_cookie("browser-token", params={"mode": "queue", "name": ""})
-        assert asyncio.run(interface.check_apikey(request)) is None
+        # A local browser call with a valid session and its CSRF token, but no apikey
+        assert asyncio.run(interface.check_apikey(api_request("browser-token"))) is None
 
     @pytest.mark.config({"username": "user", "password": "pass"})
     def test_auth_functions_are_async(self):
@@ -661,8 +674,7 @@ class TestAnonymousSession:
 
     @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
     def test_check_apikey_accepts_anonymous_without_key(self):
-        request = request_with_cookie(interface.anonymous_session_tag(), params={"mode": "queue", "name": ""})
-        assert asyncio.run(interface.check_apikey(request)) is None
+        assert asyncio.run(interface.check_apikey(api_request(interface.anonymous_session_tag()))) is None
 
     @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 5})
     def test_check_apikey_accepts_anonymous_when_login_waived(self, session_store):
@@ -670,8 +682,7 @@ class TestAnonymousSession:
         waived by inet_exposure 5 has only its anonymous cookie to authorize API calls.
         Rejecting it answers the frontend with a 401, which it handles by reloading the
         page — which authorizes nothing either, so it reloads again."""
-        request = request_with_cookie(interface.anonymous_session_tag(), params={"mode": "queue", "name": ""})
-        assert asyncio.run(interface.check_apikey(request)) is None
+        assert asyncio.run(interface.check_apikey(api_request(interface.anonymous_session_tag()))) is None
 
     @pytest.mark.config({"username": "", "password": ""})
     def test_create_sets_matching_cookie(self):
@@ -682,11 +693,78 @@ class TestAnonymousSession:
         assert response.set_cookie.call_args.args[0] == interface.SESSION_COOKIE
 
 
-def page_post(cookie: Optional[str] = None, remote_ip: str = "127.0.0.1"):
-    """A page POST carrying an optional session cookie. A cross-site POST is modelled as
-    carrying no cookie at all, because SameSite=Strict makes the browser withhold
-    SABnzbd's cookies on any request originating from another site."""
-    request = request_with_cookie(cookie, remote_ip=remote_ip)
+class TestApiCsrf:
+    """A cookie-authorized API call must echo its session's CSRF token in a header. The
+    header is what makes this a defence: it cannot be attached by a form, an image or a
+    navigation, and a cross-origin fetch that sets it is preflighted, which SABnzbd
+    answers with a bare 405. An apikey-authorized call is deliberately untouched."""
+
+    def _status(self, request) -> Optional[int]:
+        response = asyncio.run(interface.check_apikey(request))
+        return response.status_code if response else None
+
+    @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
+    def test_cookie_with_token_authorizes(self, session_store):
+        assert self._status(api_request(interface.anonymous_session_tag())) is None
+
+    @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
+    def test_cookie_without_token_is_forbidden(self, session_store):
+        """403, not 401: the frontend reloads on a 401, and a reload cannot conjure up a
+        header it never sends, so answering 401 here would loop forever"""
+        assert self._status(api_request(interface.anonymous_session_tag(), with_token=False)) == 403
+
+    @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
+    def test_stale_token_asks_for_a_reload(self, session_store):
+        """401, because a reload does fix this one: the page was rendered before a restart
+        rotated the key. A login session survives that restart, so its cookie still
+        validates while the token it holds no longer does."""
+        request = request_with_cookie(
+            interface.anonymous_session_tag(), params={"mode": "queue", "name": ""}, csrf="f0" * 32
+        )
+        assert self._status(request) == 401
+
+    @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
+    def test_apikey_still_works_alongside_a_cookie(self, session_store):
+        """The compatibility guarantee. Every functional test and the test-suite teardown
+        authenticate with the apikey over GET and send no token, and the config pages send
+        both a cookie and a key — so the cookie check must fall through to the key, never
+        reject on its own."""
+        request = request_with_cookie(
+            interface.anonymous_session_tag(),
+            params={"mode": "queue", "name": "", "apikey": cfg.api_key()},
+        )
+        assert self._status(request) is None
+        # ...and with no cookie at all, which is how 3rd-party clients call it
+        assert self._status(request_with_cookie(params={"mode": "queue", "name": "", "apikey": cfg.api_key()})) is None
+
+    @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
+    def test_exempt_mode_needs_no_token(self, session_store):
+        """showlog is read-only and the interface reaches it as an <a target="_blank">
+        navigation, which cannot carry a header"""
+        assert self._status(api_request(interface.anonymous_session_tag(), mode="showlog", with_token=False)) is None
+
+    @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
+    def test_keyless_and_cookieless_still_reports_missing_key(self, session_store):
+        assert self._status(request_with_cookie(params={"mode": "queue", "name": ""})) == 403
+
+    @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
+    def test_version_and_auth_skip_the_check(self, session_store):
+        for mode in ("version", "auth"):
+            assert self._status(request_with_cookie(params={"mode": mode, "name": ""})) is None
+
+
+def page_post(
+    cookie: Optional[str] = None,
+    remote_ip: str = "127.0.0.1",
+    csrf: Optional[str] = None,
+    csrf_field: Optional[str] = None,
+):
+    """A page POST carrying an optional session cookie and CSRF token. A cross-site POST is
+    modelled as carrying neither: SameSite=Strict makes the browser withhold SABnzbd's
+    cookies on a request originating from another site, and a cross-site page can read
+    neither the token out of a page (CORS) nor the httponly cookie."""
+    params = {interface.CSRF_FIELD: csrf_field} if csrf_field is not None else None
+    request = request_with_cookie(cookie, params=params, remote_ip=remote_ip, csrf=csrf)
     request.method = "POST"
     return request
 
@@ -719,31 +797,52 @@ def cookie_of_kind(kind: str, store) -> Optional[str]:
     return "login-token"
 
 
+# The CSRF token a page POST can arrive with, relative to the cookie it sends
+TOKEN_NONE = "none"
+TOKEN_MATCHING = "matching"
+TOKEN_WRONG = "wrong"
+
+
+def token_of_kind(kind: str, cookie_value: Optional[str]) -> Optional[str]:
+    if kind == TOKEN_NONE:
+        return None
+    if kind == TOKEN_WRONG:
+        return "f0" * 32
+    return interface.csrf_token_for(cookie_value or "")
+
+
 class TestPagePostCsrf:
-    """Every state-changing page POST has to present a SameSite=Strict session cookie.
-    check_login alone does not achieve that: it passes with no cookie whenever the login
-    is bypassed, which is both of login_bypassed's cases, not just the credential-less
-    one. Missing the inet_exposure 5 waiver left every config *_save route (and
-    /shutdown) open to a blind cross-site POST once they stopped requiring the apikey."""
+    """Every state-changing page POST has to echo the CSRF token belonging to its session.
+    A session cookie on its own is not enough, in either of login_bypassed's cases: where
+    the login is waived the request carries no proof of origin at all, and where it is
+    enforced the cookie only proves SameSite=Strict let it through — and SameSite is not
+    origin-scoped, so a page served from another port on the same host is same-site and
+    its forms do send the cookie. Only a value the attacker cannot read closes that."""
 
     @pytest.mark.parametrize(
-        "credentials, inet_exposure, cookie, allowed",
+        "credentials, inet_exposure, cookie, token, allowed",
         [
-            # No credentials at all: check_login always passes, so the cookie is all there is
-            (("", ""), 0, COOKIE_NONE, False),
-            (("", ""), 0, COOKIE_ANONYMOUS, True),
-            (("", ""), 0, COOKIE_FORGED, False),
-            (("", ""), 5, COOKIE_NONE, False),
-            # Credentials with the login enforced: check_login already demands the session
-            (("user", "pass"), 0, COOKIE_NONE, False),
-            (("user", "pass"), 0, COOKIE_LOGIN, True),
+            # No credentials at all: check_login always passes, so this guard is all there is
+            (("", ""), 0, COOKIE_NONE, TOKEN_NONE, False),
+            (("", ""), 0, COOKIE_ANONYMOUS, TOKEN_MATCHING, True),
+            (("", ""), 0, COOKIE_ANONYMOUS, TOKEN_NONE, False),
+            (("", ""), 0, COOKIE_ANONYMOUS, TOKEN_WRONG, False),
+            (("", ""), 0, COOKIE_FORGED, TOKEN_MATCHING, False),
+            (("", ""), 5, COOKIE_NONE, TOKEN_NONE, False),
+            # A token with no cookie must not pass: csrf_token_for("") is computable by anyone
+            (("", ""), 0, COOKIE_NONE, TOKEN_MATCHING, False),
+            # Credentials with the login enforced
+            (("user", "pass"), 0, COOKIE_NONE, TOKEN_NONE, False),
+            (("user", "pass"), 0, COOKIE_LOGIN, TOKEN_MATCHING, True),
+            (("user", "pass"), 0, COOKIE_LOGIN, TOKEN_NONE, False),
             # Credentials with inet_exposure 5: the login is waived for a local client, so
             # check_login passes with no cookie and this guard carries the whole weight
-            (("user", "pass"), 5, COOKIE_NONE, False),
-            (("user", "pass"), 5, COOKIE_FORGED, False),
-            (("user", "pass"), 5, COOKIE_ANONYMOUS, True),
+            (("user", "pass"), 5, COOKIE_NONE, TOKEN_NONE, False),
+            (("user", "pass"), 5, COOKIE_FORGED, TOKEN_MATCHING, False),
+            (("user", "pass"), 5, COOKIE_ANONYMOUS, TOKEN_MATCHING, True),
+            (("user", "pass"), 5, COOKIE_ANONYMOUS, TOKEN_NONE, False),
             # ...without locking out a local client who does hold a real login session
-            (("user", "pass"), 5, COOKIE_LOGIN, True),
+            (("user", "pass"), 5, COOKIE_LOGIN, TOKEN_MATCHING, True),
         ],
     )
     @pytest.mark.config(
@@ -753,24 +852,64 @@ class TestPagePostCsrf:
             "inet_exposure": params["inet_exposure"],
         }
     )
-    def test_config_save_post(self, session_store, credentials, inet_exposure, cookie, allowed):
-        request = page_post(cookie_of_kind(cookie, session_store))
+    def test_config_save_post(self, session_store, credentials, inet_exposure, cookie, token, allowed):
+        cookie_value = cookie_of_kind(cookie, session_store)
+        request = page_post(cookie_value, csrf=token_of_kind(token, cookie_value))
         response = asyncio.run(config_save_middleware().denied_response(request))
         assert (response is None) is allowed
+
+    @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
+    def test_token_accepted_as_form_field(self, session_store):
+        """The header covers every ajax call, but a form that navigates cannot set one, so
+        the token is accepted from the body too (never from the query string, which a page
+        POST discards outright — see get_request_params)"""
+        tag = interface.anonymous_session_tag()
+        allowed = page_post(tag, csrf_field=interface.csrf_token_for(tag))
+        assert asyncio.run(config_save_middleware().denied_response(allowed)) is None
+        denied = page_post(tag, csrf_field="f0" * 32)
+        assert asyncio.run(config_save_middleware().denied_response(denied)) is not None
+
+    @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 5})
+    def test_token_is_bound_to_its_own_session(self, session_store):
+        """A token minted for another session grants nothing, in either direction. This is
+        what a shared or global token would fail, and why it is derived per cookie."""
+        cookie_of_kind(COOKIE_LOGIN, session_store)
+        anonymous_tag = interface.anonymous_session_tag()
+
+        login_with_anonymous_token = page_post("login-token", csrf=interface.csrf_token_for(anonymous_tag))
+        assert asyncio.run(config_save_middleware().denied_response(login_with_anonymous_token)) is not None
+
+        anonymous_with_login_token = page_post(anonymous_tag, csrf=interface.csrf_token_for("login-token"))
+        assert asyncio.run(config_save_middleware().denied_response(anonymous_with_login_token)) is not None
 
     @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 5})
     def test_external_client_still_needs_login(self, session_store):
         """The waiver is local-only: an external POST gets no help from the anonymous tag"""
-        request = page_post(interface.anonymous_session_tag(), remote_ip="9.8.7.6")
+        tag = interface.anonymous_session_tag()
+        request = page_post(tag, remote_ip="9.8.7.6", csrf=interface.csrf_token_for(tag))
         assert asyncio.run(config_save_middleware().denied_response(request)) is not None
 
+    @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
+    def test_get_is_not_guarded(self, session_store):
+        """Only state-changing requests need a token; rendering a page must not require one,
+        or a first visit could never obtain it"""
+        request = request_with_cookie()
+        request.method = "GET"
+        assert asyncio.run(config_save_middleware().denied_response(request)) is None
 
-def issued_session_cookies(cookie: Optional[str] = None, remote_ip: str = "127.0.0.1") -> list[str]:
+
+def run_page_request(cookie: Optional[str] = None, remote_ip: str = "127.0.0.1") -> tuple[list[str], str]:
     """Drive a UI page route's SecurityMiddleware over a real ASGI scope (it builds its own
-    Request from the scope, so a mock will not do) and return the Set-Cookie values it
-    injected into the response start"""
+    Request from the scope, so a mock will not do) and return both the Set-Cookie values it
+    injected into the response start and the CSRF token it published for the handler to
+    render, which is what build_header reads."""
+
+    rendered_token = ""
 
     async def asgi_app(scope, receive, send):
+        # Stand in for a page handler: build_header reads the token off request.state here
+        nonlocal rendered_token
+        rendered_token = scope.get("state", {}).get("csrf_token", "")
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b"ok"})
 
@@ -796,7 +935,11 @@ def issued_session_cookies(cookie: Optional[str] = None, remote_ip: str = "127.0
             captured.extend(Headers(raw=message["headers"]).getlist("set-cookie"))
 
     asyncio.run(middleware(scope, None, send))
-    return captured
+    return captured, rendered_token
+
+
+def issued_session_cookies(cookie: Optional[str] = None, remote_ip: str = "127.0.0.1") -> list[str]:
+    return run_page_request(cookie=cookie, remote_ip=remote_ip)[0]
 
 
 class TestAnonymousSessionIssuing:
@@ -827,6 +970,65 @@ class TestAnonymousSessionIssuing:
         local network) must not have it replaced by the anonymous tag"""
         store_session(session_store, "login-token")
         assert self._issued(cookie="login-token") is False
+
+
+def session_cookie_value(set_cookie_headers: list[str], fallback: Optional[str]) -> str:
+    """The session cookie the client is left holding after a response: the one it was just
+    issued, or the one it already had if none was set"""
+    for value in set_cookie_headers:
+        if value.startswith(interface.SESSION_COOKIE + "="):
+            return value.split("=", 1)[1].split(";", 1)[0]
+    return fallback or ""
+
+
+class TestRenderedTokenMatchesCookie:
+    """The token a page renders must belong to the cookie its client ends up holding,
+    otherwise the very next POST from that page is refused.
+
+    This is easy to get subtly wrong: the anonymous cookie is injected into the response
+    start by SecurityMiddleware *after* the handler has already rendered the page, so a
+    token derived from request.cookies is right in the steady state and wrong on every
+    first load — where the cookie is absent or stale. That failure hits hardest exactly
+    where there is no ajax to paper over it: the wizard, a fresh install's first screen."""
+
+    def _assert_token_matches(self, cookie: Optional[str]):
+        set_cookies, rendered_token = run_page_request(cookie=cookie)
+        held = session_cookie_value(set_cookies, cookie)
+        assert rendered_token == interface.csrf_token_for(held)
+        assert rendered_token, "a page rendered no usable token at all"
+
+    @pytest.mark.config({"username": "", "password": ""})
+    def test_first_load_with_no_cookie(self, session_store):
+        self._assert_token_matches(None)
+
+    @pytest.mark.config({"username": "", "password": ""})
+    def test_load_with_stale_cookie(self, session_store):
+        # A tag from before a restart rotated the key: a fresh cookie is issued, and the
+        # token has to match that one rather than the dead value we were sent
+        self._assert_token_matches("f0" * 32)
+
+    @pytest.mark.config({"username": "", "password": ""})
+    def test_steady_state_anonymous(self, session_store):
+        self._assert_token_matches(interface.anonymous_session_tag())
+
+    @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 0})
+    def test_login_session(self, session_store):
+        store_session(session_store, "login-token")
+        self._assert_token_matches("login-token")
+
+    @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 5})
+    def test_login_session_while_login_waived(self, session_store):
+        store_session(session_store, "login-token")
+        self._assert_token_matches("login-token")
+
+    @pytest.mark.config({"username": "", "password": ""})
+    def test_rendered_token_authorizes_the_next_post(self, session_store):
+        """End to end: take the token a page published and the cookie it was issued, and
+        confirm the POST that page would make is actually allowed"""
+        set_cookies, rendered_token = run_page_request()
+        held = session_cookie_value(set_cookies, None)
+        request = page_post(held, csrf=rendered_token)
+        assert asyncio.run(config_save_middleware().denied_response(request)) is None
 
 
 def run_xframe_middleware() -> Headers:

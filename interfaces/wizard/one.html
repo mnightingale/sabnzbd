@@ -1,5 +1,6 @@
 <!--#include $webdir + "/inc_top.tmpl"#-->
 <form action="$url('wizard/two')" method="post" autocomplete="off">
+<input type="hidden" name="csrf_token" value="$csrf_token" />
     <div class="container">
         <div id="inner">
             <div id="content" class="bigger">

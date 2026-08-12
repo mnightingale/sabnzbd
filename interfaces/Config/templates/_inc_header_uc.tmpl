@@ -41,6 +41,7 @@
         var formWasSubmitted = false;
 
         // Information we need
+        var csrfToken = '$csrf_token';
         var rootURL = '$url()'
         var urlBase = '${url_base}'
         var folderBrowseUrl = "$url('api', mode='browse', output='json')";

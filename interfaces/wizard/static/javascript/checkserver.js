@@ -45,7 +45,10 @@ $(document).ready(function() {
         $('#serverResponse').html(txtChecking);
         $.getJSON(
             "../api?mode=config&name=test_server&output=json",
-            $("form").serialize(),
+            // Exclude the CSRF token: this is a GET, so anything serialized here lands in the
+            // query string. The token travels as a header instead (see inc_top.tmpl); the
+            // field on this form is only there for its POST to wizard/two.
+            $("form :input:not([name='csrf_token'])").serialize(),
             function(result) {
                 if (result.value.result) {
                     r = '<span class="success"><span class="glyphicon glyphicon-ok" aria-hidden="true"></span> ' + result.value.message + '</span>';

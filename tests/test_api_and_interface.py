@@ -255,6 +255,14 @@ class TestGetRequestParams:
         assert params.get("field") == "value"
         assert params.get("smuggled") is None
 
+    def test_csrf_token_cannot_come_from_the_query_string(self):
+        """The CSRF guard reads the token out of these params, so the body-only rule above is
+        what stops a cross-site form from putting one in the URL instead"""
+        params = run_get_request_params(
+            "POST", "csrf_token=smuggled", body=b"field=value", content_type=FORM, merge_query=False
+        )
+        assert params.get("csrf_token") is None
+
 
 class TestOrphanPathTraversal:
     """Orphaned-job handlers must not allow deleting/adding paths outside the download folder"""
@@ -727,3 +735,47 @@ class TestHistory:
 
             # Make sure the job was not added to the list, a completed entry already exists
             assert total_items == len(jobs)
+
+
+@pytest.fixture
+def renderable_header(monkeypatch):
+    """Stand in for the runtime singletons build_header reads, so it can be called outside
+    a running SABnzbd"""
+    for name in ("Scheduler", "Downloader", "GUIHANDLER", "BPSMeter", "ArticleCache", "NzbQueue"):
+        monkeypatch.setattr(sabnzbd, name, Mock(), raising=False)
+    monkeypatch.setattr(sabnzbd.BPSMeter, "quota", 0.0, raising=False)
+    monkeypatch.setattr(sabnzbd.BPSMeter, "left", 0.0, raising=False)
+    monkeypatch.setattr(sabnzbd.Downloader, "bandwidth_perc", 0, raising=False)
+    monkeypatch.setattr(sabnzbd.Downloader, "bandwidth_limit", 0, raising=False)
+    disk = Mock(free=1.0, size=2.0)
+    with patch("sabnzbd.api.diskspace", return_value=(disk, disk)):
+        yield
+
+
+class TestBuildHeaderCsrfToken:
+    """build_header hands the page its CSRF token, but only when it has a request.
+
+    That condition is load-bearing, not tidiness: build_status() also renders the
+    for_template block and mode=fullstatus returns the whole dict through report(), which
+    sets Access-Control-Allow-Origin: *. A token added unconditionally would be readable
+    by exactly the same-site-different-port origin the token exists to shut out."""
+
+    @pytest.mark.config({"username": "", "password": ""})
+    def test_present_for_a_page_request(self, renderable_header):
+        request = Mock(spec=Request)
+        request.state.csrf_token = "a-token"
+        assert api.build_header(request=request)["csrf_token"] == "a-token"
+
+    @pytest.mark.config({"username": "", "password": ""})
+    def test_absent_without_a_request(self, renderable_header):
+        # The signature build_status() uses, and the one that reaches an API payload
+        assert "csrf_token" not in api.build_header(trans_functions=False)
+        assert "csrf_token" not in api.build_header()
+
+    @pytest.mark.config({"username": "", "password": ""})
+    def test_empty_when_no_middleware_published_one(self, renderable_header):
+        """Routes that render without SecurityMiddleware having set it (/login) get an empty
+        string rather than an AttributeError"""
+        request = Mock(spec=Request)
+        request.state = State({})
+        assert api.build_header(request=request)["csrf_token"] == ""

@@ -117,7 +117,7 @@ _MSG_ACCESS_DENIED_HOSTNAME = "Access denied - Hostname verification failed: htt
 _MSG_MISSING_AUTH = "Missing authentication"
 _MSG_APIKEY_REQUIRED = "API Key Required"
 _MSG_APIKEY_INCORRECT = "API Key Incorrect"
-_MSG_MISSING_SESSION = "Access denied - Missing session cookie, reload the page and try again"
+_MSG_MISSING_SESSION = "Access denied - Missing or invalid session token, reload the page and try again"
 _MSG_SESSION_EXPIRED = "Session expired, reload the page"
 
 RE_HOST_PORT = re.compile(":[0-9]+$")
@@ -131,6 +131,7 @@ def secured_expose(
     check_configlock: bool = False,
     check_for_login: bool = True,
     check_api_key: bool = False,
+    check_csrf: bool = True,
     access_type: int = 4,
     methods: Collection = ("GET", "POST"),
 ) -> Callable:
@@ -142,6 +143,7 @@ def secured_expose(
             check_configlock=check_configlock,
             check_for_login=check_for_login,
             check_api_key=check_api_key,
+            check_csrf=check_csrf,
             access_type=access_type,
             methods=methods,
         )
@@ -159,6 +161,7 @@ def secured_expose(
                         check_configlock=check_configlock,
                         check_for_login=check_for_login,
                         check_api_key=check_api_key,
+                        check_csrf=check_csrf,
                         access_type=access_type,
                     ),
                 ],
@@ -366,6 +369,66 @@ def create_anonymous_session(request: Request, response: Response):
     )
 
 
+# CSRF tokens are derived from the session cookie rather than stored: a session's token
+# is hmac(_CSRF_KEY, cookie_value), so it is bound to that session, dies with it, and
+# needs neither a column in the sessions database nor a lookup to compute. The key is
+# regenerated each run like _ANONYMOUS_SESSION_KEY, so a page left open across a restart
+# holds a stale token; check_apikey answers those with a 401 so the frontend reloads.
+#
+# Unlike the cookie, the token is NOT sent automatically by the browser: it is rendered
+# into the page ($csrf_token) and echoed back in a form field or the header below. That
+# is what makes it a CSRF defence, because a cross-site page can read neither the page
+# (CORS) nor the httponly cookie. SameSite=Strict on its own cannot do this job: it is
+# not origin-scoped, so a page served from another port on the same host counts as
+# same-site and its forms do carry the session cookie.
+#
+# Login sessions get a token each; all anonymous clients share one, since anonymous
+# sessions deliberately have no database row to hang a per-client value on. That is
+# sound: reading the shared token means fetching a page from this instance, and anyone
+# who can do that can make the request directly anyway.
+_CSRF_KEY = secrets.token_bytes(32)
+CSRF_HEADER = "X-SABnzbd-CSRF"
+CSRF_FIELD = "csrf_token"
+
+
+def csrf_token_for(cookie_value: str) -> str:
+    """The CSRF token belonging to a session cookie value.
+
+    Hex on purpose: recursive_html_escape escapes quotes and ampersands, and entities are
+    not decoded inside a <script> block, so a token containing one would silently corrupt
+    the JavaScript it is rendered into. Hex also matches api.LOG_HASH_RE, so the token is
+    redacted from the log that mode=showlog serves."""
+    return hmac.new(_CSRF_KEY, utob(cookie_value), hashlib.sha256).hexdigest()
+
+
+def presented_csrf_token(request: Request) -> str:
+    """The CSRF token this request offers, from the header or a form field. The header
+    covers every XHR (one $.ajaxSetup per skin) and cannot be set cross-site at all; the
+    field serves the handful of native form navigations, which cannot send headers.
+
+    Read from request_params, never the query string: a page POST's params are the form
+    body only, so a ?csrf_token= is invisible here by design."""
+    return request.headers.get(CSRF_HEADER) or request_params(request).get(CSRF_FIELD) or ""
+
+
+def csrf_token_matches(request: Request) -> bool:
+    """Whether the request echoes the CSRF token belonging to the cookie it sent"""
+    return hmac.compare_digest(presented_csrf_token(request), csrf_token_for(request.cookies.get(SESSION_COOKIE, "")))
+
+
+async def validate_csrf(request: Request) -> bool:
+    """Return True when the request carries a valid session and the CSRF token belonging
+    to it. Both halves are required: the token alone would let a client with no cookie
+    present csrf_token_for(""), and the session alone is what this replaces."""
+    return await validate_any_session(request) and csrf_token_matches(request)
+
+
+# API modes exempt from the CSRF token, which has to stay a very short list. showlog is
+# read-only and the interface reaches it as a plain <a target="_blank"> navigation, which
+# cannot carry a header. version and auth never reach this check at all (see check_apikey).
+CSRF_EXEMPT_API_MODES = frozenset({"showlog"})
+
+
 async def clear_session(request: Request, response: Response):
     """Delete the request's session (if any) and clear the session cookie"""
     if token := request.cookies.get(SESSION_COOKIE):
@@ -447,34 +510,48 @@ async def check_apikey(request: Request) -> Optional[Response]:
     if mode in ("version", "auth"):
         return None
 
-    # A valid browser session (login or anonymous cookie) authorizes API calls without
-    # the apikey, so the frontend no longer needs the key embedded in the page
-    if await validate_any_session(request):
+    # A valid browser session (login or anonymous cookie) authorizes API calls without the
+    # apikey, so the frontend no longer needs the key embedded in the page — but only when it
+    # also echoes that session's CSRF token in the header, which no cross-site page can set.
+    # That header is what protects the API: unlike the cookie it is neither sent automatically
+    # nor settable by a form, an image or a navigation, and a cross-origin fetch that sets it
+    # is preflighted, which SABnzbd answers with a bare 405.
+    cookie_ok = await validate_any_session(request)
+    if cookie_ok and (mode in CSRF_EXEMPT_API_MODES or csrf_token_matches(request)):
         return None
 
-    # First check API-key, if OK that's sufficient
+    # Deliberately no early return above: a request carrying both a cookie and a valid apikey
+    # (the config pages still do) has to stay authorized here.
     key = request_params(request).get("apikey")
-    if not key:
-        # A session cookie was presented but did not validate above: this is the
-        # bundled frontend with a stale session (a restart regenerated the anonymous
-        # key, the login session expired, or credentials changed), not a keyless
-        # 3rd-party program. Answer 401 so the frontend reloads the page for a fresh
-        # session, and skip the misleading apikey warning.
-        if SESSION_COOKIE in request.cookies:
-            return PlainTextResponse(_MSG_SESSION_EXPIRED, status_code=401)
-        log_warning_and_ip(
-            request, T("API Key missing, please enter the api key from Config->General into your 3rd party program:")
-        )
-        return forbidden(_MSG_APIKEY_REQUIRED)
-    elif req_access == 1 and key == cfg.nzb_key():
-        return None
-    elif key == cfg.api_key():
-        return None
-    else:
+    if key:
+        if req_access == 1 and key == cfg.nzb_key():
+            return None
+        if key == cfg.api_key():
+            return None
         log_warning_and_ip(
             request, T("API Key incorrect, Use the api key from Config->General in your 3rd party program:")
         )
         return forbidden(_MSG_APIKEY_INCORRECT)
+
+    if SESSION_COOKIE in request.cookies:
+        # A cookie was presented, so this is a browser rather than a keyless 3rd-party
+        # program and the apikey advice below would only mislead. It is still warned about:
+        # staying silent whenever a cookie is present let anyone suppress the warning, and
+        # any log-watching it feeds, by sending along a junk cookie.
+        log_warning_and_ip(request, T("Refused connection from:"))
+        # 401 only where reloading the page genuinely fixes it, because that is how the
+        # frontend answers a 401: a session that no longer validates (a restart regenerated
+        # the anonymous key, the login session expired, credentials changed), or a token from
+        # before a restart rotated _CSRF_KEY. A valid session sending no token at all is not
+        # something a reload repairs, so it gets a 403 instead of an endless reload loop.
+        if not cookie_ok or presented_csrf_token(request):
+            return PlainTextResponse(_MSG_SESSION_EXPIRED, status_code=401)
+        return forbidden(_MSG_MISSING_SESSION)
+
+    log_warning_and_ip(
+        request, T("API Key missing, please enter the api key from Config->General into your 3rd party program:")
+    )
+    return forbidden(_MSG_APIKEY_REQUIRED)
 
 
 def template_filtered_response(file: str, search_list: dict[str, Any]):
@@ -608,12 +685,14 @@ class SecurityMiddleware:
         check_configlock: bool = False,
         check_for_login: bool = True,
         check_api_key: bool = False,
+        check_csrf: bool = True,
         access_type: int = 4,
     ):
         self.app = app
         self.check_configlock = check_configlock
         self.check_for_login = check_for_login
         self.check_api_key = check_api_key
+        self.check_csrf = check_csrf
         self.access_type = access_type
 
     async def __call__(self, scope, receive, send):
@@ -638,6 +717,13 @@ class SecurityMiddleware:
                 and not await validate_any_session(request)
             ):
                 send = _anonymous_session_sender(request, send)
+                # The handler renders the page before that Set-Cookie reaches the client, so
+                # the token it embeds has to belong to the cookie we are about to issue, not
+                # to the absent or stale one this request arrived with. Getting this wrong
+                # ships a token matching nothing on every first page load.
+                request.state.csrf_token = csrf_token_for(anonymous_session_tag())
+            else:
+                request.state.csrf_token = csrf_token_for(request.cookies.get(SESSION_COOKIE, ""))
         await self.app(scope, receive, send)
 
     async def denied_response(self, request: Request) -> Optional[Response]:
@@ -654,20 +740,14 @@ class SecurityMiddleware:
         if self.check_for_login and not self.check_api_key and not await check_login(request):
             return base_redirect_response("/login")
 
-        # CSRF guard for state-changing requests. Wherever the login is bypassed (see
-        # login_bypassed) the check_login above passes with no cookie at all, so a cross-site
-        # form could otherwise POST config changes: require a SameSite=Strict session cookie,
-        # which cross-site requests never carry and which every UI page load issues. Where the
-        # login is not bypassed, check_login already required the login session cookie, and
-        # that does the same job. Keyed on login_bypassed rather than on the credentials
-        # alone, so the inet_exposure 5 waiver cannot leave a page POST unguarded.
-        if (
-            self.check_for_login
-            and not self.check_api_key
-            and request.method == "POST"
-            and login_bypassed(request)
-            and not await validate_any_session(request)
-        ):
+        # CSRF guard for state-changing requests: a page POST has to echo the token belonging
+        # to its session, which only a page served by this instance could have read. Applies to
+        # every such route unconditionally, rather than only where login_bypassed() holds:
+        # check_login is not a CSRF defence in either case. Where it passes with no cookie the
+        # request carries no proof of origin at all, and where it requires the login cookie it
+        # is relying on SameSite=Strict, which is not origin-scoped — a page served from
+        # another port on the same host is same-site and its forms do send the cookie.
+        if self.check_csrf and request.method == "POST" and not await validate_csrf(request):
             log_warning_and_ip(request, T("Refused connection from:"))
             return forbidden(_MSG_MISSING_SESSION)
 
@@ -753,7 +833,10 @@ async def shutdown(request: Request):
     return PlainTextResponse(T("SABnzbd shutdown finished"))
 
 
-@secured_expose(route="/api", check_api_key=True, access_type=1)
+# check_csrf=False: the API has its own rule, enforced in check_apikey, because only that
+# function knows whether the cookie or the apikey authorized the call. Applying the page
+# guard here as well would reject 3rd-party clients that send a valid key.
+@secured_expose(route="/api", check_api_key=True, check_csrf=False, access_type=1)
 async def api(request: Request):
     """Redirect to API-handler, we check the access_type in the API-handler"""
     return await api_handler(request_params(request), request.state.api_call)
@@ -937,7 +1020,10 @@ def get_access_info(request: Optional[Request] = None) -> list[str]:
 ##############################################################################
 
 
-@secured_expose(route="/login", check_for_login=False)
+# check_csrf=False: a login POST is the one state-changing request that can legitimately
+# arrive from a client that has never held a session, so demanding a token would make
+# logging in impossible. Login CSRF only lets an attacker log the victim in as themselves.
+@secured_expose(route="/login", check_for_login=False, check_csrf=False)
 async def login_index(request: Request):
     # Already logged in, or no username/password set at all
     if await check_login(request):
