@@ -67,6 +67,7 @@ NzbFileSaver = (
     "import_finished",
     "crc32",
     "assembled",
+    "direct_written",
     "md5of16k",
 )
 
@@ -109,6 +110,10 @@ class NzbFile(TryList):
 
         self.crc32: Optional[int] = None
         self.assembled: bool = False
+        # Cleared by the assembler as soon as it packs an article at a running
+        # offset instead of the article's own data_begin. Quick verify needs to
+        # know the file really is laid out the way its articles describe.
+        self.direct_written: bool = True
         self.md5of16k: Optional[bytes] = None
         self.assembler_next_index: int = 0
 
