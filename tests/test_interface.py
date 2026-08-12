@@ -738,10 +738,12 @@ class TestApiCsrf:
         assert self._status(request_with_cookie(params={"mode": "queue", "name": "", "apikey": cfg.api_key()})) is None
 
     @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
-    def test_exempt_mode_needs_no_token(self, session_store):
-        """showlog is read-only and the interface reaches it as an <a target="_blank">
-        navigation, which cannot carry a header"""
-        assert self._status(api_request(interface.anonymous_session_tag(), mode="showlog", with_token=False)) is None
+    def test_no_mode_is_exempt(self, session_store):
+        """There is no carve-out list. The one mode that needed it, showlog, is served to the
+        interface by the /log page route instead, so every cookie-authorized API call has to
+        present a token — including showlog itself."""
+        assert self._status(api_request(interface.anonymous_session_tag(), mode="showlog", with_token=False)) == 403
+        assert self._status(api_request(interface.anonymous_session_tag(), mode="showlog")) is None
 
     @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
     def test_keyless_and_cookieless_still_reports_missing_key(self, session_store):
@@ -751,6 +753,49 @@ class TestApiCsrf:
     def test_version_and_auth_skip_the_check(self, session_store):
         for mode in ("version", "auth"):
             assert self._status(request_with_cookie(params={"mode": mode, "name": ""})) is None
+
+
+class TestLogRoute:
+    """The log is served to the interface by /log, which is what let the CSRF exemption list
+    go away: a read-only GET page needs no token, where a cookie-authorized API call does."""
+
+    def _route(self):
+        return next(route for route in interface.INTERFACE_ROUTES if getattr(route, "path", None) == "/log")
+
+    def test_registered_as_a_read_only_route(self):
+        # No POST: nothing here changes state, so nothing here needs a token
+        assert sorted(self._route().methods) == ["GET", "HEAD"]
+
+    @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 0})
+    def test_behind_the_login_check(self, session_store):
+        """It hands out the log plus a copy of the ini, so it must not be reachable without
+        the login when one is configured. Driven through the route as it is actually
+        registered, so weakening the decorator fails here rather than passing quietly."""
+        route = self._route()
+        captured = {}
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                captured["status"] = message["status"]
+                captured["headers"] = Headers(raw=message["headers"])
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/log",
+            "query_string": b"",
+            "headers": [(b"host", b"127.0.0.1:8080")],
+            "client": ("127.0.0.1", 12345),
+            "server": ("127.0.0.1", 8080),
+            "scheme": "http",
+        }
+        asyncio.run(route.app(scope, receive, send))
+        # Redirected to the login form, and the handler never ran to stream any of the log
+        assert captured["status"] == 302
+        assert captured["headers"]["location"].endswith("/login")
 
 
 def page_post(

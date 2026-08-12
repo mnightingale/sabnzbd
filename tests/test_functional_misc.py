@@ -39,16 +39,13 @@ from tests.testhelper import (
     SABnzbdBaseTest,
     create_and_read_nzb_fp,
     get_api_result,
+    get_url_result,
     wait_for,
 )
 
 
 class TestShowLogging(SABnzbdBaseTest):
-    def test_showlog(self):
-        """Test the output of the filtered-log button"""
-        # Basic URL-fetching, easier than Selenium file download
-        log_result = get_api_result("showlog")
-
+    def _assert_is_the_log(self, log_result: str):
         # Make sure it has basic log stuff
         assert "The log" in log_result
         assert "Full executable path" in log_result
@@ -56,6 +53,17 @@ class TestShowLogging(SABnzbdBaseTest):
         # Make sure sabnzbd.ini was appended
         assert "__encoding__ = utf-8" in log_result
         assert "[misc]" in log_result
+
+    def test_showlog(self):
+        """Test the output of the filtered-log button"""
+        # Basic URL-fetching, easier than Selenium file download
+        self._assert_is_the_log(get_api_result("showlog"))
+
+    def test_log_page_route(self):
+        """The interface links to /log rather than the mode=showlog API-call, because a
+        navigation cannot carry the CSRF header a cookie-authorized API call needs. Same
+        output, reached as an ordinary page."""
+        self._assert_is_the_log(get_url_result("log"))
 
 
 class TestQueueRepair(SABnzbdBaseTest):

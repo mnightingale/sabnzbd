@@ -786,8 +786,9 @@ def sanitize_line(line: bytes, cur_user_bytes: Optional[bytes] = None) -> bytes:
     return line
 
 
-def _api_showlog(name: str, kwargs: QueryParams) -> StreamingResponse:
-    """Fetch the INI and the log-data and add a message at the top"""
+def build_log_response() -> StreamingResponse:
+    """Fetch the INI and the log-data and add a message at the top. Shared by the /log page
+    route, which is what the interface links to, and the mode=showlog API-call."""
 
     def _generate_log():
         # Build header with version and environment info
@@ -827,6 +828,10 @@ def _api_showlog(name: str, kwargs: QueryParams) -> StreamingResponse:
         media_type="application/x-download;charset=utf-8",
         headers={"Content-Disposition": 'attachment;filename="sabnzbd.log"', "Cache-Control": "no-store"},
     )
+
+
+def _api_showlog(name: str, kwargs: QueryParams) -> StreamingResponse:
+    return build_log_response()
 
 
 def _api_get_cats(name: str, kwargs: QueryParams) -> Response:

@@ -101,6 +101,7 @@ from sabnzbd.api import (
     api_handler,
     halt_and_shutdown,
     build_header,
+    build_log_response,
     url_for,
     url_netloc,
     Ttemplate,
@@ -397,7 +398,7 @@ def csrf_token_for(cookie_value: str) -> str:
     Hex on purpose: recursive_html_escape escapes quotes and ampersands, and entities are
     not decoded inside a <script> block, so a token containing one would silently corrupt
     the JavaScript it is rendered into. Hex also matches api.LOG_HASH_RE, so the token is
-    redacted from the log that mode=showlog serves."""
+    redacted from the log that /log hands out for users to post publicly."""
     return hmac.new(_CSRF_KEY, utob(cookie_value), hashlib.sha256).hexdigest()
 
 
@@ -421,12 +422,6 @@ async def validate_csrf(request: Request) -> bool:
     to it. Both halves are required: the token alone would let a client with no cookie
     present csrf_token_for(""), and the session alone is what this replaces."""
     return await validate_any_session(request) and csrf_token_matches(request)
-
-
-# API modes exempt from the CSRF token, which has to stay a very short list. showlog is
-# read-only and the interface reaches it as a plain <a target="_blank"> navigation, which
-# cannot carry a header. version and auth never reach this check at all (see check_apikey).
-CSRF_EXEMPT_API_MODES = frozenset({"showlog"})
 
 
 async def clear_session(request: Request, response: Response):
@@ -517,7 +512,7 @@ async def check_apikey(request: Request) -> Optional[Response]:
     # nor settable by a form, an image or a navigation, and a cross-origin fetch that sets it
     # is preflighted, which SABnzbd answers with a bare 405.
     cookie_ok = await validate_any_session(request)
-    if cookie_ok and (mode in CSRF_EXEMPT_API_MODES or csrf_token_matches(request)):
+    if cookie_ok and csrf_token_matches(request):
         return None
 
     # Deliberately no early return above: a request carrying both a cookie and a valid apikey
@@ -840,6 +835,18 @@ async def shutdown(request: Request):
 async def api(request: Request):
     """Redirect to API-handler, we check the access_type in the API-handler"""
     return await api_handler(request_params(request), request.state.api_call)
+
+
+@secured_expose(route="/log", methods=["GET"])
+def log(request: Request):
+    """Download the log plus a sanitized copy of the ini, for the Help window's log link.
+
+    A page route rather than a link to the mode=showlog API-call: the interface offers it as
+    a plain <a target="_blank">, and a navigation cannot carry the CSRF header that a
+    cookie-authorized API call requires. Being a read-only GET it needs no token, and it is
+    still behind the login check like every other page. Automation keeps using
+    mode=showlog with an apikey."""
+    return build_log_response()
 
 
 @secured_expose(route="/scriptlog", methods=["GET"])
