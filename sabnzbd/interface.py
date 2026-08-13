@@ -214,8 +214,11 @@ def check_hostname(request: Request) -> bool:
     # Not to be confused with IPv6 colons (within square brackets)
     host = re.sub(":[0123456789]+$", "", host).lower()
 
-    # Fine if localhost or IP
-    if host == "localhost" or is_ipv4_addr(host) or is_ipv6_addr(host):
+    # Fine if localhost or IP. RFC 7230 requires an IPv6 literal in a Host header to be
+    # bracketed, so brackets are required here too: without them there is no telling
+    # where the address ends and the port begins, and a bare "1234:5678::1:8080" would
+    # otherwise pass as an address after the port-stripping above took a guess at it.
+    if host == "localhost" or is_ipv4_addr(host) or (host.startswith("[") and is_ipv6_addr(host)):
         return True
 
     # Check on the whitelist
