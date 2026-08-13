@@ -117,6 +117,8 @@ _MSG_MISSING_AUTH = "Missing authentication"
 _MSG_APIKEY_REQUIRED = "API Key Required"
 _MSG_APIKEY_INCORRECT = "API Key Incorrect"
 
+RE_HOST_PORT = re.compile(":[0-9]+$")
+
 INTERFACE_ROUTES: list[Route | Mount] = []
 
 
@@ -224,7 +226,7 @@ def check_hostname(request: Request) -> bool:
 
     # Remove the port-part (like ':8080'), if it is there, always on the right hand side.
     # Not to be confused with IPv6 colons (within square brackets)
-    host = re.sub(":[0123456789]+$", "", host).lower()
+    host = RE_HOST_PORT.sub("", host).lower()
 
     # Fine if localhost or IP. RFC 7230 requires an IPv6 literal in a Host header to be
     # bracketed, so brackets are required here too: without them there is no telling
