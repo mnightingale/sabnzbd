@@ -21,6 +21,7 @@ tests.test_api - Tests for API functions
 
 import asyncio
 import os
+import urllib.parse
 from functools import cached_property
 import pytest
 from random import choice, randint
@@ -363,6 +364,67 @@ class TestRetryJobFuturetype:
             assert api.retry_job(nzo_id) is None
 
         assert history_db.get_other(nzo_id) == stored_settings
+
+
+class TestUrlOrigin:
+    """url_origin must always return a netloc that can be parsed back out, whatever
+    the client put in the Host header and whatever address we are listening on."""
+
+    @staticmethod
+    def make_request(host: str | None, server=("127.0.0.1", 8080), scheme: str = "http") -> Request:
+        headers = [(b"host", host.encode())] if host is not None else []
+        return Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/",
+                "query_string": b"",
+                "scheme": scheme,
+                "headers": headers,
+                "client": ("127.0.0.1", 12345),
+                "server": server,
+            }
+        )
+
+    @pytest.mark.parametrize(
+        "host, server, expected",
+        [
+            # Well-formed requests are unaffected
+            ("127.0.0.1:8080", ("127.0.0.1", 8080), "http://127.0.0.1:8080"),
+            ("[1234:5678::1]:8080", ("127.0.0.1", 8080), "http://[1234:5678::1]:8080"),
+            ("example.com", ("127.0.0.1", 80), "http://example.com"),
+            # No Host header at all (e.g. HTTP/1.0): Starlette falls back to the address
+            # being listened on, which is where an unbracketed IPv6 address comes from
+            (None, ("127.0.0.1", 8080), "http://127.0.0.1:8080"),
+            (None, ("::1", 8080), "http://[::1]:8080"),
+            # Dual-stack listener: an IPv4 client is reported as an IPv4-mapped IPv6 address
+            (None, ("::ffff:127.0.0.1", 8080), "http://[::ffff:127.0.0.1]:8080"),
+            # Malformed Host headers make Starlette fall back to the same address
+            ("1234:5678::1:8080", ("::ffff:127.0.0.1", 8080), "http://[::ffff:127.0.0.1]:8080"),
+            ("bla:bla:1234", ("::1", 8080), "http://[::1]:8080"),
+        ],
+    )
+    def test_url_origin_netloc(self, host, server, expected):
+        assert api.url_origin(self.make_request(host, server)) == expected
+
+    def test_url_origin_survives_unparseable_url(self):
+        """The crash of #3561: with no usable Host header Starlette builds the URL from
+        an unbracketed IPv6 server address, and reading the port off it raises."""
+        request = self.make_request(None, server=("::ffff:127.0.0.1", 8080))
+        # Confirm the underlying URL really is the unparseable one, so this keeps
+        # testing the actual failure and not a Starlette that started bracketing
+        assert str(request.url).startswith("http://::ffff:127.0.0.1:8080")
+        with pytest.raises(ValueError):
+            _ = request.url.port
+
+        # url_origin must not propagate that, and must produce a parseable netloc
+        origin = api.url_origin(request)
+        assert urllib.parse.urlsplit(origin).port == 8080
+
+    def test_url_for_absolute_survives_unparseable_url(self):
+        """url_for builds on url_origin, and is what the templates call"""
+        request = self.make_request(None, server=("::1", 8080))
+        assert api.url_for("config/general", request=request) == "http://[::1]:8080/config/general"
 
 
 class TestSecuredExpose:

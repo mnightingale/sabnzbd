@@ -1973,7 +1973,20 @@ def url_origin(request: Optional[Request] = None) -> str:
     a request there is nothing to observe, so fall back to the configured scheme and
     port on localhost."""
     if request:
-        return "%s://%s" % (request.url.scheme, url_netloc(request.url.hostname, request.url.scheme, request.url.port))
+        # Starlette only takes the netloc from the Host header when that header is
+        # well-formed (RFC 7230 wants an IPv6 literal bracketed) and otherwise builds
+        # the URL from the address being listened on, without bracketing it. An IPv6
+        # address there produces a netloc like ::1:8080, which cannot be parsed back
+        # out: reading the port raises instead. Fall back to the scope in that case,
+        # where the host and port are still separate and url_netloc can bracket them.
+        scheme = request.scope.get("scheme", "http")
+        try:
+            hostname, port = request.url.hostname, request.url.port
+        except ValueError:
+            hostname, port = None, None
+        if hostname is None:
+            hostname, port = request.scope.get("server") or (None, None)
+        return "%s://%s" % (scheme, url_netloc(hostname, scheme, port))
 
     scheme = "https" if cfg.enable_https() else "http"
     port = cfg.https_port() if cfg.enable_https() else cfg.web_port()
