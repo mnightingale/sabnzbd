@@ -19,6 +19,8 @@
 tests.test_filesystem - Testing functions in filesystem.py
 """
 
+import ctypes
+import errno
 import stat
 import sys
 import os
@@ -27,6 +29,7 @@ import unicodedata
 from pathlib import Path
 import tempfile
 from random import choice, randint
+from typing import Optional
 from unittest import mock
 
 import pytest
@@ -38,7 +41,7 @@ import sabnzbd
 import sabnzbd.cfg
 from sabnzbd import cfg
 import sabnzbd.filesystem as filesystem
-from sabnzbd.constants import DEF_FOLDER_MAX, DEF_FILE_MAX
+from sabnzbd.constants import DEF_FOLDER_MAX, DEF_FILE_MAX, GIGI
 
 # Set the global uid for fake filesystems to a non-root user;
 # by default this depends on the user running pytest.
@@ -478,6 +481,160 @@ class TestSameDevice:
         """Fall back on separate devices, so the caller keeps reserving space for a copy"""
         with mock.patch("os.stat", side_effect=OSError):
             assert filesystem.same_device(str(tmp_path / "a"), str(tmp_path / "b")) is False
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="Non-Windows tests")
+class TestQuotactlFd:
+    """The syscall number is not looked up but hardcoded, so only known architectures work"""
+
+    @pytest.fixture(autouse=True)
+    def clear_cache(self):
+        filesystem.quotactl_fd.cache_clear()
+        yield
+        filesystem.quotactl_fd.cache_clear()
+
+    def test_supported_architecture(self):
+        with mock.patch.object(sabnzbd, "LIBC", mock.MagicMock()), mock.patch("sys.platform", "linux"):
+            with mock.patch("platform.machine", return_value="x86_64"):
+                assert callable(filesystem.quotactl_fd())
+
+    def test_unsupported_architecture(self):
+        """The mips and alpha families number their syscalls differently"""
+        with mock.patch.object(sabnzbd, "LIBC", mock.MagicMock()), mock.patch("sys.platform", "linux"):
+            with mock.patch("platform.machine", return_value="mips64"):
+                assert filesystem.quotactl_fd() is None
+
+    def test_no_glibc(self):
+        """No libc.so.6 on for example musl based systems, so no way to make the call"""
+        with mock.patch.object(sabnzbd, "LIBC", None), mock.patch("sys.platform", "linux"):
+            with mock.patch("platform.machine", return_value="x86_64"):
+                assert filesystem.quotactl_fd() is None
+
+    def test_not_linux(self):
+        """quotactl_fd is a Linux syscall, the number means something else elsewhere"""
+        with mock.patch.object(sabnzbd, "LIBC", mock.MagicMock()), mock.patch("sys.platform", "freebsd14"):
+            with mock.patch("platform.machine", return_value="amd64"):
+                assert filesystem.quotactl_fd() is None
+
+    def test_result_is_cached(self):
+        with mock.patch.object(sabnzbd, "LIBC", mock.MagicMock()), mock.patch("sys.platform", "linux"):
+            with mock.patch("platform.machine", return_value="x86_64") as mock_machine:
+                assert callable(filesystem.quotactl_fd())
+                assert callable(filesystem.quotactl_fd())
+                assert mock_machine.call_count == 1
+
+    def test_syscall_arguments(self, tmp_path):
+        """The syscall number and all arguments have to be passed as explicit ctypes"""
+        mock_libc = mock.MagicMock()
+        mock_libc.syscall.return_value = 0
+        with mock.patch.object(sabnzbd, "LIBC", mock_libc), mock.patch("sys.platform", "linux"):
+            with mock.patch("platform.machine", return_value="x86_64"):
+                assert filesystem.user_quota(str(tmp_path)) is None
+
+        syscall_nr, fd, cmd, quota_id, _addr = mock_libc.syscall.call_args.args
+        assert (syscall_nr.value, cmd.value, quota_id.value) == (443, filesystem.QCMD_GETQUOTA_USER, os.getuid())
+        assert isinstance(fd.value, int)
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="Non-Windows tests")
+class TestUserQuota:
+    @staticmethod
+    def fake_quotactl(soft: int = 0, hard: int = 0, used: int = 0, result: int = 0, call_errno: int = 0):
+        """Stand in for the syscall, filling the struct the caller passed in"""
+
+        def call_quotactl_fd(fd, cmd, quota_id, addr):
+            dqblk = ctypes.cast(addr, ctypes.POINTER(filesystem.Dqblk)).contents
+            dqblk.dqb_bsoftlimit = soft
+            dqblk.dqb_bhardlimit = hard
+            dqblk.dqb_curspace = used
+            ctypes.set_errno(call_errno)
+            return result
+
+        return call_quotactl_fd
+
+    def test_no_syscall_available(self, tmp_path):
+        with mock.patch.object(filesystem, "quotactl_fd", return_value=None):
+            assert filesystem.user_quota(str(tmp_path)) is None
+
+    def test_no_quota_set(self, tmp_path):
+        """Both limits are zero when the user has no quota on this filesystem"""
+        with mock.patch.object(filesystem, "quotactl_fd", return_value=self.fake_quotactl()):
+            assert filesystem.user_quota(str(tmp_path)) is None
+
+    def test_call_failed(self, tmp_path):
+        with mock.patch.object(
+            filesystem, "quotactl_fd", return_value=self.fake_quotactl(soft=1024, result=-1, call_errno=errno.ESRCH)
+        ):
+            assert filesystem.user_quota(str(tmp_path)) is None
+
+    def test_soft_limit(self, tmp_path):
+        """Limits are in 1K blocks, the usage in bytes"""
+        with mock.patch.object(
+            filesystem, "quotactl_fd", return_value=self.fake_quotactl(soft=8 * 1024, used=2 * 1024 * 1024)
+        ):
+            assert filesystem.user_quota(str(tmp_path)) == (8 * 1024 * 1024, 6 * 1024 * 1024)
+
+    def test_hard_limit_only(self, tmp_path):
+        with mock.patch.object(filesystem, "quotactl_fd", return_value=self.fake_quotactl(hard=8 * 1024)):
+            assert filesystem.user_quota(str(tmp_path)) == (8 * 1024 * 1024, 8 * 1024 * 1024)
+
+    def test_soft_limit_takes_precedence(self, tmp_path):
+        """Exceeding the soft limit is only allowed until the grace period runs out"""
+        with mock.patch.object(
+            filesystem, "quotactl_fd", return_value=self.fake_quotactl(soft=4 * 1024, hard=8 * 1024)
+        ):
+            assert filesystem.user_quota(str(tmp_path)) == (4 * 1024 * 1024, 4 * 1024 * 1024)
+
+    def test_limit_already_exceeded(self, tmp_path):
+        """Usage can be past the soft limit, but there is no such thing as negative free space"""
+        with mock.patch.object(
+            filesystem,
+            "quotactl_fd",
+            return_value=self.fake_quotactl(soft=4 * 1024, hard=8 * 1024, used=6 * 1024 * 1024),
+        ):
+            assert filesystem.user_quota(str(tmp_path)) == (4 * 1024 * 1024, 0.0)
+
+    def test_path_cannot_be_opened(self, tmp_path):
+        with mock.patch.object(filesystem, "quotactl_fd", return_value=self.fake_quotactl(soft=8 * 1024)):
+            assert filesystem.user_quota(str(tmp_path / "does_not_exist")) is None
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="Non-Windows tests")
+class TestDiskspaceBase:
+    class FakeStatvfs:
+        """Filesystem of 4 GB with 2 GB available"""
+
+        f_frsize = 4096
+        f_blocks = 1024 * 1024
+        f_bavail = 512 * 1024
+
+    def diskspace_with_quota(self, path: str, quota: Optional[tuple[float, float]]) -> filesystem.Diskspace:
+        with mock.patch("os.statvfs", return_value=self.FakeStatvfs()):
+            with mock.patch.object(filesystem, "user_quota", return_value=quota):
+                return filesystem.diskspace_base(path)
+
+    def test_without_quota(self, tmp_path):
+        assert self.diskspace_with_quota(str(tmp_path), None) == filesystem.Diskspace(str(tmp_path), 4.0, 2.0)
+
+    def test_quota_smaller_than_filesystem(self, tmp_path):
+        assert self.diskspace_with_quota(str(tmp_path), (GIGI, GIGI / 2)) == filesystem.Diskspace(
+            str(tmp_path), 1.0, 0.5
+        )
+
+    def test_quota_larger_than_filesystem(self, tmp_path):
+        """The filesystem can run out of space before the quota does"""
+        assert self.diskspace_with_quota(str(tmp_path), (8 * GIGI, 8 * GIGI)) == filesystem.Diskspace(
+            str(tmp_path), 4.0, 2.0
+        )
+
+    def test_quota_free_smaller_than_filesystem_free(self, tmp_path):
+        assert self.diskspace_with_quota(str(tmp_path), (8 * GIGI, GIGI)) == filesystem.Diskspace(
+            str(tmp_path), 4.0, 1.0
+        )
+
+    def test_statvfs_failure(self, tmp_path):
+        with mock.patch("os.statvfs", side_effect=OSError):
+            assert filesystem.diskspace_base(str(tmp_path)) == filesystem.Diskspace(str(tmp_path))
 
 
 class TestClipLongPath:

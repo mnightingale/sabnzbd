@@ -19,9 +19,11 @@
 sabnzbd.misc - filesystem operations
 """
 
+import errno
 import gzip
 import os
 import pickle
+import platform
 import sys
 import logging
 import logging.handlers
@@ -35,8 +37,8 @@ import stat
 import ctypes
 import random
 from dataclasses import dataclass
-from functools import lru_cache
-from typing import Any, Optional, BinaryIO
+from functools import cache, lru_cache
+from typing import Any, Callable, Optional, BinaryIO
 
 try:
     import win32api
@@ -1042,6 +1044,93 @@ def first_existing_path(path: str) -> str:
     return path
 
 
+# QCMD(Q_GETQUOTA, USRQUOTA) and QIF_DQBLKSIZE from linux/quota.h, the block limits are
+# expressed in 1K blocks while the usage is in bytes
+QCMD_GETQUOTA_USER = 0x800007 << 8
+QIF_DQBLKSIZE = 1024
+# There simply is no quota, rather than something being broken. ESRCH is overloaded to mean
+# "no quota for this user" and containers tend to block the syscall with EPERM.
+NO_QUOTA_ERRORS = (errno.ESRCH, errno.ENOSYS, errno.EPERM, errno.EACCES, errno.EINVAL, errno.ENOTSUP)
+# Architectures that have quotactl_fd all use the same syscall number, apart from the mips
+# family that adds an ABI specific offset and alpha that uses 553
+NR_QUOTACTL_FD = dict.fromkeys(
+    ("x86_64", "i386", "i686", "aarch64", "armv6l", "armv7l", "riscv64", "ppc64le", "s390x", "loongarch64"), 443
+)
+
+
+class Dqblk(ctypes.Structure):
+    """struct if_dqblk from linux/quota.h"""
+
+    _fields_ = [
+        ("dqb_bhardlimit", ctypes.c_uint64),
+        ("dqb_bsoftlimit", ctypes.c_uint64),
+        ("dqb_curspace", ctypes.c_uint64),
+        ("dqb_ihardlimit", ctypes.c_uint64),
+        ("dqb_isoftlimit", ctypes.c_uint64),
+        ("dqb_curinodes", ctypes.c_uint64),
+        ("dqb_btime", ctypes.c_uint64),
+        ("dqb_itime", ctypes.c_uint64),
+        ("dqb_valid", ctypes.c_uint32),
+    ]
+
+
+@cache
+def quotactl_fd() -> Optional[Callable[[int, int, int, Any], int]]:
+    """Return a callable performing the quotactl_fd(2) syscall, or None if it is unavailable.
+    There is no glibc wrapper for it, so the syscall has to be made directly."""
+    if not sabnzbd.LIBC or not sys.platform.startswith("linux"):
+        return None
+
+    if not (syscall_nr := NR_QUOTACTL_FD.get(platform.machine())):
+        logging.debug("No quotactl_fd on %s, no disk quota information available", platform.machine())
+        return None
+
+    sabnzbd.LIBC.syscall.restype = ctypes.c_long
+
+    def call_quotactl_fd(fd: int, cmd: int, quota_id: int, addr: Any) -> int:
+        # syscall() is variadic, so all arguments have to be typed explicitly. They are unsigned,
+        # the command in particular would end up negative as a signed int.
+        return sabnzbd.LIBC.syscall(
+            ctypes.c_long(syscall_nr), ctypes.c_uint(fd), ctypes.c_uint(cmd), ctypes.c_uint(quota_id), addr
+        )
+
+    return call_quotactl_fd
+
+
+def user_quota(dir_to_check: str) -> Optional[tuple[float, float]]:
+    """Return the size and free bytes of the disk quota of the current user for the
+    filesystem holding dir_to_check, or None if there is no quota"""
+    if not (quotactl := quotactl_fd()):
+        return None
+
+    dqblk = Dqblk()
+    try:
+        fd = os.open(dir_to_check, os.O_RDONLY)
+        try:
+            ctypes.set_errno(0)
+            # No root required, users are always allowed to request their own quota
+            result = quotactl(fd, QCMD_GETQUOTA_USER, os.getuid(), ctypes.byref(dqblk))
+        finally:
+            os.close(fd)
+    except Exception:
+        # Never let this get in the way of reporting the diskspace of the filesystem itself
+        logging.debug("Could not request quota for %s", dir_to_check, exc_info=True)
+        return None
+
+    if result != 0:
+        if (call_errno := ctypes.get_errno()) not in NO_QUOTA_ERRORS:
+            logging.debug("Failed to get quota for %s: %s", dir_to_check, os.strerror(call_errno))
+        return None
+
+    # The soft limit can only be exceeded until the grace period runs out, so that is our
+    # effective limit. Both are 0 when the user has unlimited space.
+    if not (limit := dqblk.dqb_bsoftlimit or dqblk.dqb_bhardlimit):
+        return None
+
+    limit = float(limit) * QIF_DQBLKSIZE
+    return limit, max(limit - dqblk.dqb_curspace, 0.0)
+
+
 def diskspace_base(dir_to_check: str) -> Diskspace:
     """Return amount of free and used diskspace in GBytes"""
     # Find first folder level that exists in the path
@@ -1066,6 +1155,13 @@ def diskspace_base(dir_to_check: str) -> Diskspace:
                 available = float(sys.maxsize) * float(s.f_frsize)
             else:
                 available = float(s.f_bavail) * float(s.f_frsize)
+
+            # A disk quota can limit us to less than what the filesystem itself has on offer
+            if quota := user_quota(dir_to_check):
+                quota_size, quota_available = quota
+                disk_size = min(disk_size, quota_size)
+                available = min(available, quota_available)
+
             return Diskspace(path=dir_to_check, size=disk_size / GIGI, free=available / GIGI)
         except Exception:
             return Diskspace(path=dir_to_check)

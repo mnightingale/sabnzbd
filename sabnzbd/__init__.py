@@ -56,7 +56,7 @@ elif os.name == "posix":
 
     # See if we have the GNU glibc malloc_trim() memory release function
     try:
-        LIBC = ctypes.CDLL("libc.so.6")
+        LIBC = ctypes.CDLL("libc.so.6", use_errno=True)
         LIBC.malloc_trim(0)  # try the malloc_trim() call, which is a GNU extension
     except Exception:
         # No malloc_trim(), probably because no glibc
