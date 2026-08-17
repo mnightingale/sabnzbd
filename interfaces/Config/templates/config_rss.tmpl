@@ -95,6 +95,12 @@
                         <span class="config narrow">&nbsp;&nbsp;$T('rss-nextscan'): $rss_next</span>
                         <span class="desc narrow">$T('explain-rss_rate')</span>
                     </div>
+                    <div class="field-pair">
+                        <label class="config narrow" for="rss_retention">$T('opt-rss_retention')</label>
+                        <input type="number" name="rss_retention" id="rss_retention" value="$rss_retention" min="1" max="365" />
+                        <button type="submit" class="btn btn-default"><span class="glyphicon glyphicon-ok"></span> $T('button-save')</button>
+                        <span class="desc narrow">$T('explain-rss_retention')</span>
+                    </div>
                 </fieldset>
             </div>
             <!-- /col1 -->

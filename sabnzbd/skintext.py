@@ -299,6 +299,10 @@ SKIN_TEXT = {
     "tuning": TT("Tuning"),
     "opt-rss_rate": TT("RSS Checking Interval"),
     "explain-rss_rate": TT("Checking interval (in minutes, at least 15). Not active when you use the Scheduler!"),
+    "opt-rss_retention": TT("RSS Retention"),
+    "explain-rss_retention": TT(
+        "Number of days items are kept after they disappeared from the feed or their feed was removed."
+    ),
     "opt-bandwidth_max": TT("Maximum line speed"),
     "opt-bandwidth_perc": TT("Percentage of line speed"),
     "explain-bandwidth_perc": TT("Which percentage of the linespeed should SABnzbd use, e.g. 50"),

@@ -1410,6 +1410,7 @@ def config_rss_index(request: Request):
     pick_cat = conf["categories"] != []
 
     conf["rss_rate"] = cfg.rss_rate()
+    conf["rss_retention"] = cfg.rss_retention()
 
     rss = {}
     feeds = config.get_rss()
@@ -1454,8 +1455,10 @@ def config_rss_index(request: Request):
 
 @secured_expose(route="/config/rss/save_rss_rate", check_api_key=True, check_configlock=True, methods=["POST"])
 def config_rss_save_rss_rate(request: Request):
-    """Save changed RSS automatic readout rate"""
-    cfg.rss_rate.set(request_params(request).get("rss_rate"))
+    """Save changed RSS automatic readout rate and retention"""
+    params = request_params(request)
+    cfg.rss_rate.set(params.get("rss_rate"))
+    cfg.rss_retention.set(params.get("rss_retention"))
     config.save_config()
     sabnzbd.Scheduler.restart()
     return base_redirect_response(_RSS_ROOT)

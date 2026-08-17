@@ -492,6 +492,7 @@ date_categories = OptionList("misc", "date_categories", ["tv"], public=False)
 ##############################################################################
 schedules = OptionList("misc", "schedlines")
 rss_rate = OptionNumber("misc", "rss_rate", 60, minval=15, maxval=24 * 60)
+rss_retention = OptionNumber("misc", "rss_retention", 7, minval=1, maxval=365)
 
 ##############################################################################
 # Config - Specials

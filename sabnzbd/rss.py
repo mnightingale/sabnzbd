@@ -621,10 +621,9 @@ class RSSRepository:
         """
         Expire G/B links that are not in new_jobs (mark them 'X')
 
-        Expired links older than 3 days are removed
+        Expired links not seen within the retention period are removed
         """
-        now = datetime.datetime.now(datetime.timezone.utc)
-        limit = int((now - datetime.timedelta(days=3)).timestamp())
+        limit = retention_limit()
 
         if new_urls:
             # Create temporary table for all new URLs
@@ -848,12 +847,13 @@ class RSSRepository:
         return bool(self.db.cursor.fetchone()["found"])
 
     def purge_removed_feeds(self):
-        """Remove all records of feeds that are no longer configured"""
+        """Remove records of feeds that are no longer configured and outside the retention period"""
+        limit = retention_limit()
         configured = set(config.get_rss())
         for feed in self.get_feeds():
             if feed not in configured:
                 logging.debug("Purging records of removed feed %s", feed)
-                self.clear_feed(feed)
+                self.db.execute("DELETE FROM rss WHERE feed = ? AND seen_at < ?", (feed, limit))
 
     def import_rss_records(self):
         """Migrate old RSS database"""
@@ -1270,8 +1270,14 @@ def special_rss_site(url: str) -> bool:
     return bool(cfg.rss_filenames() or match_str(url, cfg.rss_odd_titles()))
 
 
+def retention_limit() -> int:
+    """Timestamp before which records are no longer retained"""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return int((now - datetime.timedelta(days=cfg.rss_retention())).timestamp())
+
+
 def purge_removed_feeds():
-    """Purge records of feeds that are no longer configured"""
+    """Purge old records of feeds that are no longer configured"""
     with rss_repository() as repo:
         repo.purge_removed_feeds()
 

@@ -30,6 +30,7 @@ from werkzeug import Response
 from xml.etree.ElementTree import Element, SubElement, tostring
 
 import sabnzbd.rss as rss
+import sabnzbd.cfg
 import sabnzbd.config
 from sabnzbd.constants import DEFAULT_PRIORITY, LOW_PRIORITY, HIGH_PRIORITY, FORCE_PRIORITY, PAUSED_PRIORITY
 from sabnzbd.database import HistoryDB
@@ -777,7 +778,7 @@ class TestRSS:
 
         now = datetime.datetime.now(datetime.timezone.utc)
         age = now - datetime.timedelta(weeks=52)
-        old_seen_at = now - datetime.timedelta(days=4)
+        old_seen_at = now - datetime.timedelta(days=sabnzbd.cfg.rss_retention() + 1)
         new_seen_at = now - datetime.timedelta(days=1)
 
         # Old good item that should be kept because it is part of the new_urls set
@@ -1043,16 +1044,21 @@ class TestRSS:
         assert links == {shared_link, a_only_link, b_only_link}
 
     def test_purge_removed_feeds_only_drops_unconfigured_feeds(self, tmp_rss):
-        """Records should only be dropped for feeds that are no longer configured."""
+        """Records should only be dropped for unconfigured feeds outside the retention period."""
         repo, _reader = tmp_rss
         configured_feed = "ConfiguredFeed"
         removed_feed = "RemovedFeed"
+        recently_removed_feed = "RecentlyRemovedFeed"
 
         self.setup_rss(configured_feed, "http://example.test/rss.xml")
 
-        age = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(weeks=52)
-        old_seen_at = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=30)
-        for feed in (configured_feed, removed_feed):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        age = now - datetime.timedelta(weeks=52)
+        for feed, seen_at in (
+            (configured_feed, now - datetime.timedelta(days=30)),
+            (removed_feed, now - datetime.timedelta(days=sabnzbd.cfg.rss_retention() + 1)),
+            (recently_removed_feed, now - datetime.timedelta(days=sabnzbd.cfg.rss_retention() - 1)),
+        ):
             repo.upsert(
                 ResolvedEntry(
                     feed=feed,
@@ -1061,7 +1067,7 @@ class TestRSS:
                     infourl=None,
                     size=10,
                     age=age,
-                    seen_at=old_seen_at,
+                    seen_at=seen_at,
                     season=1,
                     episode=1,
                     category=None,
@@ -1071,7 +1077,7 @@ class TestRSS:
 
         repo.purge_removed_feeds()
 
-        assert set(repo.get_feeds()) == {configured_feed}
+        assert set(repo.get_feeds()) == {configured_feed, recently_removed_feed}
 
     def test_process_feed_without_readout_keeps_stored_jobs(self, httpserver: HTTPServer, tmp_rss):
         """Replaying stored jobs (readout=False) must not expire or purge anything."""
@@ -1104,7 +1110,7 @@ class TestRSS:
                 infourl=None,
                 size=10,
                 age=now - datetime.timedelta(weeks=52),
-                seen_at=now - datetime.timedelta(days=4),
+                seen_at=now - datetime.timedelta(days=sabnzbd.cfg.rss_retention() + 1),
                 season=1,
                 episode=1,
                 category=None,
