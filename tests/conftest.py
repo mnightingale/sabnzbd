@@ -218,10 +218,6 @@ def run_sabnews_and_selenium(request):
         driver_options.add_argument("--headless")
         driver_options.add_argument("--no-sandbox")
 
-        # Useful for stability on Linux/macOS, doesn't work on Windows
-        if not sys.platform.startswith("win"):
-            driver_options.add_argument("--single-process")
-
     # Start the driver and pass it on to all the classes
     driver = webdriver.Chrome(options=driver_options)
 
