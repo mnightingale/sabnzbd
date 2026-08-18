@@ -22,6 +22,8 @@ tests.test_functional_config - Basic testing if Config pages work
 from selenium.common.exceptions import NoSuchElementException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 from pytest_httpserver import HTTPServer
 
 
@@ -68,12 +70,13 @@ class TestBasicPages(SABnzbdBaseTest):
                 raise NoSuchElementException
 
             # Click the right button
-            submit_btn.click()
+            self.answer_confirm(accept=False)
+            self.click_element(submit_btn)
 
             # Saving here may or may not raise a restart-request (depends on whether
             # an option actually changed against the test ini), so dismiss it only
-            # if it appears. Cancel = no restart, so the process keeps serving.
-            self.dismiss_alert_if_present()
+            # if it appears. Declining = no restart, so the process keeps serving.
+            self.wait_for_save()
 
             # For Specials page we get redirected after save, so check for no crash
             if "special" in test_url:
@@ -100,8 +103,9 @@ class TestConfigLogin(SABnzbdBaseTest):
         pass_inp.clear()
         pass_inp.send_keys("test_password")
 
-        # Submit and dismiss the restart-request (cancel, so no restart happens)
-        self.selenium_wrapper(self.driver.find_element, By.CLASS_NAME, "saveButton").click()
+        # Submit and decline the restart-request (so no restart happens)
+        self.answer_confirm(accept=False)
+        self.click_element(self.selenium_wrapper(self.driver.find_element, By.CLASS_NAME, "saveButton"))
         self.dismiss_restart_prompt()
 
         # Open any page and check if we get redirected
@@ -115,7 +119,7 @@ class TestConfigLogin(SABnzbdBaseTest):
         pass_login = self.selenium_wrapper(self.driver.find_element, By.CSS_SELECTOR, "input[name='password']")
         pass_login.clear()
         pass_login.send_keys("nonsense")
-        self.driver.find_element(By.TAG_NAME, "button").click()
+        self.click_and_wait_for_page(self.driver.find_element(By.TAG_NAME, "button"))
 
         # Check if we were denied
         assert (
@@ -130,7 +134,7 @@ class TestConfigLogin(SABnzbdBaseTest):
         pass_login = self.selenium_wrapper(self.driver.find_element, By.CSS_SELECTOR, "input[name='password']")
         pass_login.clear()
         pass_login.send_keys("test_password")
-        self.driver.find_element(By.TAG_NAME, "button").click()
+        self.click_and_wait_for_page(self.driver.find_element(By.TAG_NAME, "button"))
 
         # Can we now go to the page and empty the settings again?
         self.open_page("http://%s:%s/config/general" % (SAB_HOST, SAB_PORT))
@@ -142,8 +146,9 @@ class TestConfigLogin(SABnzbdBaseTest):
         pass_inp = self.selenium_wrapper(self.driver.find_element, By.CSS_SELECTOR, "input[data-hide='password']")
         pass_inp.clear()
 
-        # Submit and dismiss the restart-request (cancel, so no restart happens)
-        self.selenium_wrapper(self.driver.find_element, By.CLASS_NAME, "saveButton").click()
+        # Submit and decline the restart-request (so no restart happens)
+        self.answer_confirm(accept=False)
+        self.click_element(self.selenium_wrapper(self.driver.find_element, By.CLASS_NAME, "saveButton"))
         self.dismiss_restart_prompt()
 
         # Open any page and check we are NOT redirected to login (no credentials set)
@@ -160,9 +165,11 @@ class TestConfigCategories(SABnzbdBaseTest):
 
         # Add new category
         self.driver.find_elements(By.NAME, "newname")[1].send_keys("testCat")
-        self.selenium_wrapper(
-            self.driver.find_element, By.XPATH, "//button/text()[normalize-space(.)='Add']/parent::*"
-        ).click()
+        self.click_element(
+            self.selenium_wrapper(
+                self.driver.find_element, By.XPATH, "//button/text()[normalize-space(.)='Add']/parent::*"
+            )
+        )
         self.no_page_crash()
         assert self.category_name not in self.driver.page_source
 
@@ -187,9 +194,11 @@ class TestConfigRSS(SABnzbdBaseTest):
         self.open_page("http://%s:%s/config/rss" % (SAB_HOST, SAB_PORT))
 
         # Uncheck enabled-checkbox for new feeds
-        self.selenium_wrapper(
-            self.driver.find_element, By.XPATH, '//form[@data-form="add-rss-feed"]//input[@name="enable"]'
-        ).click()
+        self.click_element(
+            self.selenium_wrapper(
+                self.driver.find_element, By.XPATH, '//form[@data-form="add-rss-feed"]//input[@name="enable"]'
+            )
+        )
         input_name = self.selenium_wrapper(
             self.driver.find_element, By.XPATH, '//form[@data-form="add-rss-feed"]//input[@name="feed"]'
         )
@@ -198,7 +207,9 @@ class TestConfigRSS(SABnzbdBaseTest):
         self.selenium_wrapper(
             self.driver.find_element, By.XPATH, '//form[@data-form="add-rss-feed"]//input[@name="uri"]'
         ).send_keys(rss_url)
-        self.selenium_wrapper(self.driver.find_element, By.XPATH, '//form[@data-form="add-rss-feed"]//button').click()
+        self.click_and_wait_for_page(
+            self.selenium_wrapper(self.driver.find_element, By.XPATH, '//form[@data-form="add-rss-feed"]//button')
+        )
 
         # Check if we have results
         tab_results = int(
@@ -217,7 +228,7 @@ class TestConfigRSS(SABnzbdBaseTest):
         download_btn = self.selenium_wrapper(
             self.driver.find_element, By.XPATH, '//div[@id="rss-tab-matched"]/table/tbody//button'
         )
-        download_btn.click()
+        self.click_element(download_btn)
 
         # Does the page think it's a success?
         wait_for(
@@ -252,12 +263,14 @@ class TestConfigServers(SABnzbdBaseTest):
         # Show advanced options
         advanced_btn = self.selenium_wrapper(self.driver.find_element, By.NAME, "advanced-settings-button")
         if not advanced_btn.get_attribute("checked"):
-            advanced_btn.click()
+            self.click_element(advanced_btn)
 
     def add_test_server(self):
         # Add server
-        self.selenium_wrapper(self.driver.find_element, By.ID, "addServerButton").click()
-        host_inp = self.selenium_wrapper(self.driver.find_element, By.NAME, "host")
+        self.click_element(self.selenium_wrapper(self.driver.find_element, By.ID, "addServerButton"))
+
+        # The panel slides open, so its inputs only become interactable once it settles
+        host_inp = WebDriverWait(self.driver, 15).until(EC.element_to_be_clickable((By.NAME, "host")))
         host_inp.clear()
         host_inp.send_keys(SAB_NEWSSERVER_HOST)
 
@@ -267,11 +280,13 @@ class TestConfigServers(SABnzbdBaseTest):
         port_inp.send_keys(SAB_NEWSSERVER_PORT)
 
         # Disable SSL for testing
-        self.selenium_wrapper(self.driver.find_element, By.NAME, "ssl").click()
+        self.click_element(self.selenium_wrapper(self.driver.find_element, By.NAME, "ssl"))
 
         # Test server-check
         result_box = self.selenium_wrapper(self.driver.find_element, By.CSS_SELECTOR, "#addServerContent .result-box")
-        self.selenium_wrapper(self.driver.find_element, By.CSS_SELECTOR, "#addServerContent .testServer").click()
+        self.click_element(
+            self.selenium_wrapper(self.driver.find_element, By.CSS_SELECTOR, "#addServerContent .testServer")
+        )
         wait_for(
             lambda: "Connection Successful" in result_box.text,
             timeout=5,
@@ -288,14 +303,13 @@ class TestConfigServers(SABnzbdBaseTest):
             timeout=2,
             err_msg="The Add Server interface did not close",
         )
-        self.selenium_wrapper(self.driver.find_element, By.CLASS_NAME, "showserver").click()
+        self.click_element(self.selenium_wrapper(self.driver.find_element, By.CLASS_NAME, "showserver"))
 
     def remove_server(self):
-        # Remove the first server and accept the confirmation. The confirm() is
-        # opened synchronously by the click handler, but Selenium's click() can
-        # return before it is registered, so wait for it rather than racing.
-        self.selenium_wrapper(self.driver.find_element, By.CLASS_NAME, "delServer").click()
-        self.wait_for_alert().accept()
+        # Remove the first server, accepting the confirmation the click handler raises
+        self.answer_confirm(accept=True)
+        self.click_element(self.selenium_wrapper(self.driver.find_element, By.CLASS_NAME, "delServer"))
+        self.wait_for_confirm()
 
         # Check that it's gone
         wait_for(

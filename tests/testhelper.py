@@ -490,6 +490,43 @@ class SABnzbdBaseTest:
         # Open a page and test for crash
         self.driver.get(url)
         self.no_page_crash()
+        # A page can raise a restart-request the test is not expecting, and a native
+        # dialog left open blocks every later interaction, so take confirm() over on
+        # every page rather than only where a dialog is anticipated.
+        self.answer_confirm()
+
+    def click_element(self, element):
+        """Click an element, making sure the click actually arrives.
+
+        Chrome drives a synthetic mouse press at the element's centre, so it only
+        scrolls the element just far enough into view, which parks it underneath the
+        fixed navbar and lets the header take the click. Under load it also
+        intermittently reports a successful click without dispatching one at all,
+        leaving the form unsubmitted and the test waiting on a response that never
+        comes. Centre the element and watch for the event, falling back to
+        dispatching it directly when Chrome drops it. The marker is gone rather than
+        unset when the click navigated, which is a click that plainly arrived."""
+        self.driver.execute_script(
+            "arguments[0].scrollIntoView({block: 'center'});"
+            "window.__clicked = false;"
+            "arguments[0].addEventListener('click', function () { window.__clicked = true; }, {once: true});",
+            element,
+        )
+        self.selenium_wrapper(element.click)
+        if self.driver.execute_script("return window.__clicked") is False:
+            self.driver.execute_script("arguments[0].focus(); arguments[0].click();", element)
+
+    def click_and_wait_for_page(self, element, timeout=15):
+        """Click an element that submits a plain (non-AJAX) form and wait for the result.
+
+        click() only starts the navigation, so whatever the test does next races the
+        in-flight request: the new document may not have rendered yet, or a late
+        response may replace a page the test has already moved on to. The clicked
+        element belongs to the old document, so waiting for it to go stale is a
+        reliable signal that the replacement is in place."""
+        self.click_element(element)
+        WebDriverWait(self.driver, timeout).until(EC.staleness_of(element))
+        self.no_page_crash()
 
     def scroll_to_top(self):
         self.driver.find_element(By.TAG_NAME, "body").send_keys(Keys.CONTROL + Keys.HOME)
@@ -499,39 +536,46 @@ class SABnzbdBaseTest:
         except RemoteDisconnected:
             pass
 
-    def wait_for_alert(self, timeout=15):
-        """Wait for a JS confirm()/alert dialog and return it.
+    def answer_confirm(self, accept=False):
+        """Take over the next confirm() dialog from inside the page.
 
-        Selenium's click() can return before a dialog opened synchronously in the
-        click handler is registered, and a confirm() raised from an AJAX success
-        callback only appears once the request settles. Waiting explicitly avoids
-        both races. Use this only where a dialog is guaranteed."""
-        WebDriverWait(self.driver, timeout).until(EC.alert_is_present())
-        return self.driver.switch_to.alert
+        Headless Chrome answers a JS dialog on its own if it opens while the driver
+        is busy, so a test that waits for the native dialog loses that race under
+        load: the page carries on with an answer nobody chose and the wait times out.
+        Replacing confirm() before triggering it keeps the answer ours and records
+        that the question was asked, which is what these tests actually check. Call
+        it after the page is loaded, as a navigation restores the original."""
+        self.driver.execute_script(
+            "window.__confirmed = false;"
+            "var answer = arguments[0];"
+            "window.confirm = function () { window.__confirmed = true; return answer; };",
+            accept,
+        )
+
+    def wait_for_confirm(self, timeout=15):
+        """Wait until the page raised the confirm() taken over by answer_confirm()."""
+        WebDriverWait(self.driver, timeout).until(lambda driver: driver.execute_script("return window.__confirmed"))
 
     def dismiss_restart_prompt(self, timeout=15):
-        """Dismiss the "restart required" confirmation raised after saving.
+        """Wait for the "restart required" confirmation raised after saving.
 
-        Changing username/password (and other guarded options) sets RESTART_REQ,
-        so the save callback always pops a confirm() dialog. Cancel it (= no
-        restart). The alert is guaranteed here, so wait for it deterministically."""
-        self.wait_for_alert(timeout).dismiss()
+        Changing username/password (and other guarded options) sets RESTART_REQ, so
+        the save callback always asks whether to restart. answer_confirm() has
+        already declined it, so the process keeps serving; this only confirms the
+        save got far enough to ask."""
+        self.wait_for_confirm(timeout)
 
-    def dismiss_alert_if_present(self, timeout=15):
-        """Wait until a submitted save settles, dismissing a restart-request
-        confirm() only if one is raised.
+    def wait_for_save(self, timeout=15):
+        """Wait until a submitted save settles, whether or not it asks to restart.
 
-        Use where the dialog is conditional (a save that may or may not change a
-        guarded option), so its absence must not fail the test. The alert, if any,
-        is popped in the same JS turn that completes the request, so poll for either
-        terminal state and return as soon as one is reached."""
+        Use where the restart question is conditional (a save that may or may not
+        change a guarded option), so its absence must not fail the test. The answer
+        is recorded in the same JS turn that completes the request, so poll for
+        either terminal state and return as soon as one is reached."""
         deadline = time.time() + timeout
         while time.time() < deadline:
-            if EC.alert_is_present()(self.driver):
-                self.driver.switch_to.alert.dismiss()
-                return
             try:
-                if self.driver.execute_script("return jQuery.active") == 0:
+                if self.driver.execute_script("return window.__confirmed || jQuery.active === 0"):
                     return
             except (RemoteDisconnected, ProtocolError):
                 return
@@ -574,8 +618,8 @@ class DownloadFlowBasics(SABnzbdBaseTest):
     def start_wizard(self):
         # Language-selection
         self.open_page("http://%s:%s/wizard/" % (SAB_HOST, SAB_PORT))
-        self.selenium_wrapper(self.driver.find_element, By.ID, "en").click()
-        self.selenium_wrapper(self.driver.find_element, By.CSS_SELECTOR, "button.btn.btn-default").click()
+        self.click_element(self.selenium_wrapper(self.driver.find_element, By.ID, "en"))
+        self.click_element(self.selenium_wrapper(self.driver.find_element, By.CSS_SELECTOR, "button.btn.btn-default"))
 
         # Fill server-info
         self.no_page_crash()
@@ -584,10 +628,10 @@ class DownloadFlowBasics(SABnzbdBaseTest):
         host_inp.send_keys(SAB_NEWSSERVER_HOST)
 
         # Disable SSL for testing
-        self.selenium_wrapper(self.driver.find_element, By.NAME, "ssl").click()
+        self.click_element(self.selenium_wrapper(self.driver.find_element, By.NAME, "ssl"))
 
         # This will fail if the translations failed to compile!
-        self.selenium_wrapper(self.driver.find_element, By.PARTIAL_LINK_TEXT, "Advanced Settings").click()
+        self.click_element(self.selenium_wrapper(self.driver.find_element, By.PARTIAL_LINK_TEXT, "Advanced Settings"))
 
         # Change port
         port_inp = self.selenium_wrapper(self.driver.find_element, By.NAME, "port")
@@ -596,7 +640,7 @@ class DownloadFlowBasics(SABnzbdBaseTest):
 
         # Test server-check
         server_response = self.selenium_wrapper(self.driver.find_element, By.ID, "serverResponse")
-        self.selenium_wrapper(self.driver.find_element, By.ID, "serverTest").click()
+        self.click_element(self.selenium_wrapper(self.driver.find_element, By.ID, "serverTest"))
         wait_for(
             lambda: "Connection Successful" in server_response.text,
             timeout=5,
@@ -604,13 +648,13 @@ class DownloadFlowBasics(SABnzbdBaseTest):
         )
 
         # Final page done
-        self.selenium_wrapper(self.driver.find_element, By.ID, "next-button").click()
+        self.click_element(self.selenium_wrapper(self.driver.find_element, By.ID, "next-button"))
         self.no_page_crash()
         check_result = self.selenium_wrapper(self.driver.find_element, By.CLASS_NAME, "quoteBlock").text
         assert "http://%s:%s" % (SAB_HOST, SAB_PORT) in check_result
 
         # Go to SAB!
-        self.selenium_wrapper(self.driver.find_element, By.CSS_SELECTOR, ".btn.btn-success").click()
+        self.click_element(self.selenium_wrapper(self.driver.find_element, By.CSS_SELECTOR, ".btn.btn-success"))
         self.no_page_crash()
 
     def download_nzb(self, nzb_dir: str, file_output: list[str], dir_name_as_job_name: bool = False):
