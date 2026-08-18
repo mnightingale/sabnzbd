@@ -2424,7 +2424,7 @@ class RequestLoggingMiddleware:
             # request did not pass through secured_expose, so there is nothing to log.
             if cfg.api_logging() and (params := scope.get("state", {}).get("params")) is not None:
                 request = Request(scope)
-                if xff_ips := request.headers.get("X-Forwarded-For"):
+                if cfg.verify_xff_header() and (xff_ips := request.headers.get("X-Forwarded-For")):
                     remote_label = "%s (X-Forwarded-For: %s) [%s]" % (
                         client_address(request).host,
                         xff_ips,
