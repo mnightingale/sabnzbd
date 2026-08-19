@@ -582,9 +582,9 @@ class TestUseSecureCookies:
 
 @pytest.fixture
 def session_store(tmp_path, monkeypatch):
-    """Wire sabnzbd.session_store to a fresh sessions database"""
+    """Wire sabnzbd.SessionStore to a fresh sessions database"""
     store = sessionstore.AsyncSessionStore(db_path=str(tmp_path / "sessions.db"))
-    monkeypatch.setattr(sabnzbd, "session_store", store)
+    monkeypatch.setattr(sabnzbd, "SessionStore", store, raising=False)
     yield store
     asyncio.run(store.close())
 
@@ -699,22 +699,14 @@ class TestSessionStoreFailure:
     back to the form on the next request -- for as long as the database stayed unwritable"""
 
     @pytest.fixture
-    def failing_store(self, monkeypatch, tmp_path):
-        """A store whose database cannot be opened, the way a read-only or full admin_dir
-        makes it fail.
-
-        Injected at the connect call rather than with an unopenable path because aiosqlite
-        fails a connect after starting its worker thread, then discards the stop future
-        without awaiting it. Under asyncio.run the loop can close first, and the thread's
-        "Event loop is closed" surfaces against whatever test happens to be running."""
-        store = sessionstore.AsyncSessionStore(db_path=str(tmp_path / "sessions.db"))
+    def failing_store(self, monkeypatch, tmp_path, session_store):
+        """A store whose database cannot be opened, the way a read-only or full admin_dir makes it fail."""
         monkeypatch.setattr(
             sessionstore.aiosqlite,
             "connect",
             Mock(side_effect=sqlite3.OperationalError("unable to open database file")),
         )
-        monkeypatch.setattr(sabnzbd, "session_store", store)
-        return store
+        return session_store
 
     def test_add_session_reports_failure(self, failing_store):
         stored = asyncio.run(failing_store.add_session("hash1", 0, int(time.time()) + 1000, "fp"))
@@ -1008,7 +1000,7 @@ class TestSessionActivityDetails:
         """The whole point of the throttle: a client that has not moved must not put a write
         behind every request it makes"""
         store_session(session_store, "tok", last_ip="10.11.12.13", user_agent="some-browser")
-        with patch.object(sabnzbd.session_store, "touch_session") as touch:
+        with patch.object(sabnzbd.SessionStore, "touch_session") as touch:
             assert self._validate_from("10.11.12.13", "some-browser") is True
         touch.assert_not_called()
 
@@ -1018,7 +1010,7 @@ class TestSessionActivityDetails:
         User-Agent must not read as 'moved' -- that would rewrite the row on every request
         for the rest of the session's life"""
         store_session(session_store, "tok", last_ip="10.11.12.13", user_agent="some-browser")
-        with patch.object(sabnzbd.session_store, "touch_session") as touch:
+        with patch.object(sabnzbd.SessionStore, "touch_session") as touch:
             assert self._validate_from("10.11.12.13") is True
         touch.assert_not_called()
 
@@ -1103,7 +1095,7 @@ class TestSessionAbsoluteDeadline:
         session = asyncio.run(session_store.get_session(token_hash))
         assert session["expires"] == session["created"] + security.SESSION_MAX_AGE
 
-        with patch.object(sabnzbd.session_store, "touch_session") as touch:
+        with patch.object(sabnzbd.SessionStore, "touch_session") as touch:
             assert asyncio.run(security.validate_session(mock_request("tok"))) is True
         touch.assert_not_called()
         assert asyncio.run(session_store.get_session(token_hash))["expires"] == session["expires"]
@@ -1552,7 +1544,7 @@ class TestPagePostCsrf:
         store_session(session_store, "login-token")
         request = page_post("login-token", csrf=security.csrf_token_for("login-token"))
 
-        with patch.object(sabnzbd.session_store, "get_session", wraps=sabnzbd.session_store.get_session) as get_session:
+        with patch.object(sabnzbd.SessionStore, "get_session", wraps=sabnzbd.SessionStore.get_session) as get_session:
             assert asyncio.run(config_save_middleware().denied_response(request)) is None
         assert get_session.call_count == 1
 

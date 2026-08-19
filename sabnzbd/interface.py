@@ -2221,11 +2221,9 @@ async def not_found_redirect(request: Request, exc):
 
 @contextlib.asynccontextmanager
 async def app_lifespan(app: Starlette):
-    """Close the async session store when the server's event loop shuts down.
-    The store is opened lazily on the first session lookup, so there is no
-    startup counterpart."""
+    """Close the async session store when the server's event loop shuts down"""
     yield
-    await sabnzbd.session_store.close()
+    await sabnzbd.SessionStore.close()
 
 
 def create_app() -> Starlette:
@@ -2258,7 +2256,7 @@ def create_app() -> Starlette:
         Middleware(GZipMiddleware, minimum_size=1000, compresslevel=2),
         Middleware(SecureSessionCookieMiddleware),
         # Signed cookie for short-lived UI state such as the RSS read-out flash, its key
-        # regenerated each run. Not authentication: that lives in SESSION_COOKIE.
+        # regenerated each run. Not authentication: that lives in SESSION_COOKIE_USER.
         Middleware(
             SessionMiddleware,
             secret_key=secrets.token_hex(),

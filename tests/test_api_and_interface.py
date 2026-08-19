@@ -754,12 +754,7 @@ def renderable_header(monkeypatch):
 
 
 class TestBuildHeaderCsrfToken:
-    """build_header hands the page its CSRF token, but only when it has a request.
-
-    That condition is load-bearing, not tidiness: build_status() also renders the
-    for_template block and mode=fullstatus returns the whole dict through report(), which
-    sets Access-Control-Allow-Origin: *. A token added unconditionally would be readable
-    by exactly the same-site-different-port origin the token exists to shut out."""
+    """build_header hands the page its CSRF token, but only when it has a request."""
 
     @pytest.mark.config({"username": "", "password": ""})
     def test_present_for_a_page_request(self, renderable_header):

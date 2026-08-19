@@ -23,14 +23,11 @@ if(isMobile) {
     });
 }
 
-// CSRF token for every request, including the FormData uploads that bypass callAPI; a
-// cross-site page cannot set a header. Logout and shutdown navigate, so they use a field.
 $.ajaxSetup({
     headers: { "X-SABnzbd-CSRF": csrfToken }
 });
 
-// Basic API-call. POST so the bulk queue and history actions, which pass a comma-joined list
-// of job ids, are not capped by the URL length a proxy accepts.
+// Basic API-call
 function callAPI(data, timeout = 10000) {
     // Fill basis var's
     data.output = "json";

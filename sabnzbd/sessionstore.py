@@ -32,25 +32,17 @@ logging.getLogger("aiosqlite").setLevel(logging.INFO)
 
 import sabnzbd
 import sabnzbd.cfg
-from sabnzbd.constants import DB_SESSIONS_NAME, DB_SESSIONS_VERSION
+from sabnzbd.constants import DB_SESSIONS_NAME
 from sabnzbd.filesystem import remove_file
 
 # Expired sessions are purged on first use and at most once per interval afterwards
 PURGE_INTERVAL = 3600 * 24
 
+DB_SESSIONS_VERSION = 1
+
 
 class AsyncSessionStore:
-    """Async store for web-UI login sessions, in its own sessions.db, available as
-    sabnzbd.session_store.
-
-    Kept out of the history database: as the only user of its file it needs no pooling and
-    never contends with history writers or suffers their corruption, and running on
-    aiosqlite's worker thread keeps per-request checks off the event loop.
-
-    The connection is opened lazily and closed by the Starlette lifespan (see
-    interface.create_app). All methods fail closed: on a database error the session is
-    treated as absent and the error logged, and a corrupt file is discarded and recreated.
-    """
+    """Async store for web-UI login sessions"""
 
     def __init__(self, db_path: Optional[str] = None):
         # Explicit path is for tests; normally resolved from admin_dir on first use
@@ -98,8 +90,6 @@ class AsyncSessionStore:
                 async with connection.execute("PRAGMA user_version") as cursor:
                     version_row = await cursor.fetchone()
                 if not version_row or version_row[0] != DB_SESSIONS_VERSION:
-                    # Worth saying, because it logs every remembered browser out. A fresh
-                    # database reports 0 and has no table to drop, so stay quiet there.
                     if version_row and version_row[0]:
                         logging.info(
                             "Sessions database is generation %s, resetting to %s: logins will be required again",
@@ -124,20 +114,14 @@ class AsyncSessionStore:
         return self._connection
 
     async def _maybe_purge(self, connection: aiosqlite.Connection):
-        """Opportunistically delete expired sessions, throttled to once per PURGE_INTERVAL.
-
-        The throttle is stamped before the delete, so a failed purge waits out the interval
-        instead of being retried: this runs inside get_session, where an exception fails the
-        lookup the caller is waiting for. Rows outliving a purge only cost disk, since
-        validate_session checks the expiry of the row it reads."""
+        """Opportunistically delete expired sessions, throttled to once per PURGE_INTERVAL"""
         now = time.time()
         if now - self._last_purge >= PURGE_INTERVAL:
             self._last_purge = now
             await connection.execute("DELETE FROM sessions WHERE expires < ?", (int(now),))
 
     async def _handle_error(self, error: BaseException):
-        """Log a failed operation. Corruption-class errors discard the database
-        file: sessions are low-value, a fresh start just means logging in again."""
+        """Log a failed operation"""
         logging.info("Sessions database error: %s", error, exc_info=True)
         if isinstance(error, sqlite3.DatabaseError) and not isinstance(
             error, (sqlite3.OperationalError, sqlite3.IntegrityError, sqlite3.ProgrammingError)
@@ -175,12 +159,7 @@ class AsyncSessionStore:
         last_ip: Optional[str] = None,
         user_agent: Optional[str] = None,
     ) -> bool:
-        """Store a new login session. Returns whether the row was written.
-
-        The one method that reports its outcome, because it is the one whose failure the user
-        would otherwise never hear about: every read fails closed to "no session", which just
-        asks for a login, but a login whose session was never stored looks like it worked and
-        then does not."""
+        """Store a new login session. Returns whether the row was written."""
         try:
             if connection := await self._connect():
                 await connection.execute(
@@ -201,12 +180,7 @@ class AsyncSessionStore:
         user_agent: Optional[str] = None,
     ):
         """Extend the expiry of a session (sliding window) and record where it was last used,
-        so the row describes the session as it is now rather than only as it was created.
-
-        The caller throttles these updates to roughly one a day per session, so last_ip and
-        user_agent are that recent rather than exact -- enough to tell a browser apart from a
-        phone on another network, not a per-request audit trail. Either left as None keeps
-        whatever the row already had, so a caller without a request cannot blank them."""
+        so the row describes the session as it is now rather than only as it was created."""
         try:
             if connection := await self._connect():
                 await connection.execute(
@@ -226,8 +200,7 @@ class AsyncSessionStore:
             await self._handle_error(error)
 
     async def close(self):
-        """Close the connection; called from the web app's lifespan shutdown.
-        Later calls fail closed (get_session returns None) instead of reopening."""
+        """Close the connection; called from the web app's lifespan shutdown"""
         self._closed = True
         connection, self._connection = self._connection, None
         if connection:

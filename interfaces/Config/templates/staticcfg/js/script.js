@@ -244,8 +244,6 @@ $.fn.extractFormDataTo = function(target) {
  * (c) 2015 SABnzbd Team, Inc. All rights reserved.
  */
 
-// CSRF token for every ajax request; a cross-site page cannot set a header.
-// Forms that navigate instead carry it as a hidden field, see below.
 $.ajaxSetup({
     headers: { "X-SABnzbd-CSRF": csrfToken }
 });
@@ -378,9 +376,6 @@ jQuery.extend(jQuery.fn.typeahead.defaults, {
 })
 
 $(document).ready(function () {
-    // CSRF token for the forms that navigate instead of using ajax. Added up front, not on
-    // submit: ajaxForm serializes before a delegated handler runs, and the language-change
-    // path on Config->General calls form.submit(), which fires no submit event at all.
     $('form').append('<input type="hidden" name="csrf_token" value="' + csrfToken + '">');
 
     /**

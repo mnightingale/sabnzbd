@@ -129,6 +129,7 @@ DirScanner: sabnzbd.dirscanner.DirScanner
 BPSMeter: sabnzbd.bpsmeter.BPSMeter
 RSSReader: sabnzbd.rss.RSSReader
 Scheduler: sabnzbd.scheduler.Scheduler
+SessionStore: sabnzbd.sessionstore.AsyncSessionStore
 
 # For backwards compatibility with pre-5.0 queue files
 sys.modules["sabnzbd.nzbstuff"] = sabnzbd.nzb
@@ -221,11 +222,6 @@ INIT_LOCK = Lock()
 # Borrow with: with sabnzbd.db_pool.connection() as history_db
 db_pool = sabnzbd.database.HistoryDBPool()
 
-# Async store for web-UI login sessions (sessions.db), used exclusively by the
-# web interface on its event loop. Opened lazily on the first session lookup,
-# closed by the Starlette lifespan in interface.create_app().
-session_store = sabnzbd.sessionstore.AsyncSessionStore()
-
 
 @synchronized(INIT_LOCK)
 def initialize(pause_downloader=False, clean_up=False, repair=0):
@@ -309,6 +305,7 @@ def initialize(pause_downloader=False, clean_up=False, repair=0):
     sabnzbd.URLGrabber = sabnzbd.urlgrabber.URLGrabber()
     sabnzbd.RSSReader = sabnzbd.rss.RSSReader()
     sabnzbd.Scheduler = sabnzbd.scheduler.Scheduler()
+    sabnzbd.SessionStore = sabnzbd.sessionstore.AsyncSessionStore()
 
     # Run startup tasks
     sabnzbd.NzbQueue.read_queue(repair)

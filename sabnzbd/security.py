@@ -250,7 +250,7 @@ async def create_session(request: Request, response: Response, remember_me: bool
     Returns False when the session could not be stored"""
     token = secrets.token_urlsafe(32)
     now = int(time.time())
-    if not await sabnzbd.session_store.add_session(
+    if not await sabnzbd.SessionStore.add_session(
         token_hash=hash_session_token(token),
         created=now,
         expires=now + SESSION_DURATION,
@@ -341,7 +341,7 @@ async def validate_csrf(request: Request) -> bool:
 async def clear_session(request: Request, response: Response):
     """Delete the request's session (if any) and clear the session cookie"""
     if token := request.cookies.get(SESSION_COOKIE_USER):
-        await sabnzbd.session_store.delete_session(hash_session_token(token))
+        await sabnzbd.SessionStore.delete_session(hash_session_token(token))
     response.set_cookie(
         SESSION_COOKIE_USER,
         "",
@@ -373,7 +373,7 @@ async def _validate_session(request: Request) -> bool:
 
     token_hash = hash_session_token(token)
     now = int(time.time())
-    session = await sabnzbd.session_store.get_session(token_hash)
+    session = await sabnzbd.SessionStore.get_session(token_hash)
     if not session:
         return False
 
@@ -384,7 +384,7 @@ async def _validate_session(request: Request) -> bool:
         or session["created"] + SESSION_MAX_AGE < now
         or session["cred_fingerprint"] != credential_fingerprint()
     ):
-        await sabnzbd.session_store.delete_session(token_hash)
+        await sabnzbd.SessionStore.delete_session(token_hash)
         return False
 
     # Slide the idle timeout forward, never past the deadline and never backwards: an older
@@ -400,7 +400,7 @@ async def _validate_session(request: Request) -> bool:
     moved = (last_ip and session["last_ip"] != last_ip) or (user_agent and session["user_agent"] != user_agent)
 
     if moved or new_expires > session["expires"] + SESSION_REFRESH_THRESHOLD:
-        await sabnzbd.session_store.touch_session(
+        await sabnzbd.SessionStore.touch_session(
             token_hash,
             new_expires,
             last_ip=last_ip,

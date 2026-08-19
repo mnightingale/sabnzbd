@@ -787,8 +787,7 @@ def sanitize_line(line: bytes, cur_user_bytes: Optional[bytes] = None) -> bytes:
 
 
 def build_log_response() -> StreamingResponse:
-    """Fetch the INI and the log-data and add a message at the top. Shared by the /log page
-    route, which is what the interface links to, and the mode=showlog API-call."""
+    """Fetch the INI and the log-data and add a message at the top"""
 
     def _generate_log():
         # Build header with version and environment info
@@ -1928,11 +1927,8 @@ def clear_trans_cache():
 def base_redirect_response(root: str = "", **kwargs) -> RedirectResponse:
     """Create a Starlette RedirectResponse with SABnzbd URL base and query parameters"""
     url = url_for(root, **kwargs)
-
-    # Log the redirect if API logging is enabled
     if cfg.api_logging():
         logging.debug("Redirecting to %s", url)
-
     return RedirectResponse(url=url, status_code=302)
 
 
@@ -1999,10 +1995,6 @@ def build_header(
         header["color_scheme"] = sabnzbd.WEB_COLOR or ""
         header["confighelpuri"] = f"https://sabnzbd.org/wiki/configuration/{sabnzbd.__version__[:3]}/"
 
-        # The token the page echoes on state-changing requests, stashed by SecurityMiddleware,
-        # which knows the cookie the client will end up with even on a first load. Only with a
-        # request: build_status() renders this too, and mode=fullstatus returns it through
-        # report(), which sets Access-Control-Allow-Origin: *.
         if request:
             header["csrf_token"] = getattr(request.state, "csrf_token", "")
 
