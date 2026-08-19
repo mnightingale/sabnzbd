@@ -36,7 +36,7 @@ from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import QueryParams, UploadFile
 from starlette.requests import Request
-from starlette.responses import Response, StreamingResponse
+from starlette.responses import RedirectResponse, Response, StreamingResponse
 
 # For json.dumps, orjson is magnitudes faster than ujson, but it is harder to
 # compile due to Rust dependency. Since the output is the same, we support all modules.
@@ -1923,6 +1923,17 @@ def clear_trans_cache():
     global _SKIN_CACHE
     _SKIN_CACHE = {}
     sabnzbd.WEBUI_READY = True
+
+
+def base_redirect_response(root: str = "", **kwargs) -> RedirectResponse:
+    """Create a Starlette RedirectResponse with SABnzbd URL base and query parameters"""
+    url = url_for(root, **kwargs)
+
+    # Log the redirect if API logging is enabled
+    if cfg.api_logging():
+        logging.debug("Redirecting to %s", url)
+
+    return RedirectResponse(url=url, status_code=302)
 
 
 def url_for(path: str = "", **kwargs) -> str:

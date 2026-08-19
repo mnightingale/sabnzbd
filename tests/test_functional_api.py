@@ -32,7 +32,7 @@ import pytest
 from tavern.core import run
 
 import sabnzbd
-import sabnzbd.interface as interface
+import sabnzbd.security as security
 from sabnzbd.constants import (
     DEFAULT_PRIORITY,
     DEF_SORTER_RENAME_SIZE,
@@ -330,7 +330,7 @@ class TestOtherApi(ApiTestFunctions):
     def test_api_get_clear_warnings(self):
         # Trigger warnings by sending requests with a truncated apikey
         for _ in range(0, 2):
-            assert interface._MSG_APIKEY_INCORRECT in self._get_api_json(
+            assert security._MSG_APIKEY_INCORRECT in self._get_api_json(
                 "shutdown", extra_args={"apikey": SAB_APIKEY[:-1]}
             )
 
@@ -341,7 +341,7 @@ class TestOtherApi(ApiTestFunctions):
         for warning in json["warnings"]:
             for key in ("type", "text", "time"):
                 assert key in warning.keys()
-        assert interface._MSG_APIKEY_INCORRECT.lower() in json["warnings"][-1]["text"].lower()
+        assert security._MSG_APIKEY_INCORRECT.lower() in json["warnings"][-1]["text"].lower()
 
         # Clear all warnings
         assert self._get_api_json("warnings", extra_args={"name": "clear"})["status"] is True

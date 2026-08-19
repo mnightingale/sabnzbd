@@ -41,6 +41,7 @@ from uvicorn.server import ServerState
 import sabnzbd
 import sabnzbd.cfg as cfg
 import sabnzbd.sessionstore as sessionstore
+import sabnzbd.security as security
 from sabnzbd import interface
 from sabnzbd.misc import is_local_addr, is_loopback_addr, xff_trusted_networks
 
@@ -58,13 +59,13 @@ def mock_request(
 ):
     """Mock Starlette Request"""
     if csrf is not None:
-        headers = {**(headers or {}), interface.CSRF_HEADER: csrf}
+        headers = {**(headers or {}), security.CSRF_HEADER: csrf}
 
     request = Mock(spec=Request)
     request.method = method
     request.client = Address(remote_ip, remote_port)
     request.headers = Headers(headers or {})
-    request.cookies = {interface.SESSION_COOKIE: token} if token else {}
+    request.cookies = {security.SESSION_COOKIE_USER: token} if token else {}
     request.query_params = QueryParams("")
     request.state = State({})
     request.state.params = params or {}
@@ -84,7 +85,7 @@ def api_request(token: Optional[str] = None, *, mode: str = "queue", with_token:
     return mock_request(
         token,
         params={"mode": mode, "name": "", **kwargs},
-        csrf=interface.csrf_token_for(token or "") if with_token else None,
+        csrf=security.csrf_token_for(token or "") if with_token else None,
     )
 
 
@@ -249,9 +250,9 @@ class TestInterfaceFunctions:
             request = mock_request(remote_ip=client.host, remote_port=client.port)
 
             if access_type <= inet_exposure:
-                assert interface.check_access(request, access_type) is True
+                assert security.check_access(request, access_type) is True
             else:
-                assert interface.check_access(request, access_type) is result
+                assert security.check_access(request, access_type) is result
 
         _func()
 
@@ -332,9 +333,9 @@ class TestInterfaceFunctions:
         request = mock_request()
         request.client = None
 
-        assert interface.check_access(request, access_type, warn_user=True) is (access_type <= inet_exposure)
+        assert security.check_access(request, access_type, warn_user=True) is (access_type <= inet_exposure)
         # The logging helpers must not raise either
-        interface.log_warning_and_ip(request, "txt")
+        security.log_warning_and_ip(request, "txt")
 
     @pytest.mark.parametrize(
         "local_ranges, expected_networks, unexpected_networks",
@@ -489,18 +490,18 @@ class TestClientAddressInfo:
     )
     def test_brackets_ipv6(self, remote_ip, expected):
         request = mock_request(remote_ip=remote_ip, remote_port=55170)
-        assert interface.client_address_info(request) == expected
+        assert security.client_address_info(request) == expected
 
     @pytest.mark.config({"verify_xff_header": True})
     def test_includes_forwarded_chain(self):
         request = mock_request(remote_ip="::1", remote_port=55170, headers={"X-Forwarded-For": "8.7.6.5, ::1"})
-        assert interface.client_address_info(request) == "[::1]:55170 (X-Forwarded-For: 8.7.6.5, ::1)"
+        assert security.client_address_info(request) == "[::1]:55170 (X-Forwarded-For: 8.7.6.5, ::1)"
 
     @pytest.mark.config({"verify_xff_header": False})
     def test_omits_forwarded_chain_when_not_verified(self):
         """Without verify_xff_header the header is not trusted, so it is not reported"""
         request = mock_request(remote_ip="::1", remote_port=55170, headers={"X-Forwarded-For": "8.7.6.5"})
-        assert interface.client_address_info(request) == "[::1]:55170"
+        assert security.client_address_info(request) == "[::1]:55170"
 
 
 class TestUseSecureCookies:
@@ -541,12 +542,12 @@ class TestUseSecureCookies:
         ],
     )
     def test_follows_request_scheme(self, scheme, host, server, expected):
-        assert interface.use_secure_cookies(self.make_request(scheme, host, server)) is expected
+        assert security.use_secure_cookies(self.make_request(scheme, host, server)) is expected
 
     @pytest.mark.config({"enable_https": True})
     def test_https_enabled_always_secure(self):
         """Serving https ourselves is enough, whatever the request looks like"""
-        assert interface.use_secure_cookies(self.make_request("http")) is True
+        assert security.use_secure_cookies(self.make_request("http")) is True
 
     @pytest.mark.config({"enable_https": False})
     def test_scheme_from_trusted_proxy(self):
@@ -556,7 +557,7 @@ class TestUseSecureCookies:
         captured = {}
 
         async def asgi_app(scope, receive, send):
-            captured["secure"] = interface.use_secure_cookies(Request(scope))
+            captured["secure"] = security.use_secure_cookies(Request(scope))
 
         def run(remote_ip: str):
             middleware = ProxyHeadersMiddleware(asgi_app, trusted_hosts=xff_trusted_networks())
@@ -591,7 +592,7 @@ def session_store(tmp_path, monkeypatch):
 def store_session(
     store,
     token: str,
-    expires_offset: int = interface.SESSION_DURATION,
+    expires_offset: int = security.SESSION_DURATION,
     created_offset: int = 0,
     last_ip: str = "127.0.0.1",
     user_agent: Optional[str] = None,
@@ -605,10 +606,10 @@ def store_session(
     now = int(time.time())
     asyncio.run(
         store.add_session(
-            interface.hash_session_token(token),
+            security.hash_session_token(token),
             now + created_offset,
             now + expires_offset,
-            interface.credential_fingerprint(),
+            security.credential_fingerprint(),
             last_ip=last_ip,
             user_agent=user_agent,
         )
@@ -629,32 +630,32 @@ class TestHostileTokenValues:
 
     def test_compare_helper_rejects_instead_of_raising(self):
         for value in self.BODY_HOSTILE:
-            assert interface.constant_time_equals(value, "a" * 64) is False
-            assert interface.constant_time_equals("a" * 64, value) is False
+            assert security.constant_time_equals(value, "a" * 64) is False
+            assert security.constant_time_equals("a" * 64, value) is False
         # ...and still matches what it should
-        assert interface.constant_time_equals("a" * 64, "a" * 64) is True
+        assert security.constant_time_equals("a" * 64, "a" * 64) is True
 
     @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
     def test_hostile_session_cookie_is_rejected(self, session_store):
         """The worst of the three: this path runs on a plain page GET with no credentials
         configured, so a 500 here needed no session and no authentication at all"""
         for value in self.WIRE_HOSTILE:
-            assert interface.validate_anonymous_session(mock_request(value)) is False
-            assert asyncio.run(interface.validate_any_session(mock_request(value))) is False
+            assert security.validate_anonymous_session(mock_request(value)) is False
+            assert asyncio.run(security.validate_any_session(mock_request(value))) is False
 
     @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
     def test_hostile_csrf_token_in_header_is_rejected(self, session_store):
-        tag = interface.anonymous_session_tag()
+        tag = security.anonymous_session_tag()
         for value in self.WIRE_HOSTILE:
-            assert interface.csrf_token_matches(mock_request(tag, csrf=value)) is False
+            assert security.csrf_token_matches(mock_request(tag, csrf=value)) is False
             assert asyncio.run(config_save_middleware().denied_response(page_post(tag, csrf=value))) is not None
 
     @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
     def test_hostile_csrf_token_in_form_field_is_rejected(self, session_store):
-        tag = interface.anonymous_session_tag()
+        tag = security.anonymous_session_tag()
         for value in self.BODY_HOSTILE:
-            request = mock_request(tag, params={interface.CSRF_FIELD: value})
-            assert interface.csrf_token_matches(request) is False
+            request = mock_request(tag, params={security.CSRF_FIELD: value})
+            assert security.csrf_token_matches(request) is False
             assert asyncio.run(config_save_middleware().denied_response(page_post(tag, csrf_field=value))) is not None
 
     @staticmethod
@@ -666,23 +667,23 @@ class TestHostileTokenValues:
         """Sending one of these field names as a multipart file gives an UploadFile, not text.
         It has no .encode(), so it used to reach the comparison and 500 on the way to being
         rejected -- unauthenticated, on /api, on the login form and on any page POST."""
-        assert interface.constant_time_equals(self._upload_part(), "a" * 64) is False
+        assert security.constant_time_equals(self._upload_part(), "a" * 64) is False
         # Compared against nothing rather than str()-ed, so no repr can stand in for a secret
-        assert interface.constant_time_equals(self._upload_part(), str(self._upload_part())) is False
+        assert security.constant_time_equals(self._upload_part(), str(self._upload_part())) is False
 
     @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
     def test_csrf_token_sent_as_a_file_part_is_refused(self, session_store):
-        tag = interface.anonymous_session_tag()
-        request = mock_request(tag, params={interface.CSRF_FIELD: self._upload_part()})
-        assert interface.presented_csrf_token(request) == ""
-        assert interface.csrf_token_matches(request) is False
+        tag = security.anonymous_session_tag()
+        request = mock_request(tag, params={security.CSRF_FIELD: self._upload_part()})
+        assert security.presented_csrf_token(request) == ""
+        assert security.csrf_token_matches(request) is False
         denied = page_post(tag, csrf_field=self._upload_part())
         assert asyncio.run(config_save_middleware().denied_response(denied)) is not None
 
     @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
     def test_apikey_sent_as_a_file_part_is_refused(self, session_store):
         request = mock_request(params={"mode": "queue", "name": "", "apikey": self._upload_part()})
-        response = asyncio.run(interface.check_apikey(request))
+        response = asyncio.run(security.check_apikey(request))
         assert response is not None and response.status_code == 403
 
     @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 0})
@@ -690,7 +691,7 @@ class TestHostileTokenValues:
         """The login comparison already encoded both sides, but with a codec that raises on a
         lone surrogate; the shared helper cannot fail on any string"""
         for value in self.BODY_HOSTILE:
-            assert interface.constant_time_equals(value, "user") is False
+            assert security.constant_time_equals(value, "user") is False
 
 
 class TestSessionStoreFailure:
@@ -723,7 +724,7 @@ class TestSessionStoreFailure:
     def test_create_session_sets_no_cookie_when_it_cannot_store(self, failing_store):
         request = mock_request()
         response = Mock()
-        assert asyncio.run(interface.create_session(request, response)) is False
+        assert asyncio.run(security.create_session(request, response)) is False
         # No cookie, because a cookie whose session does not exist authorizes nothing
         response.set_cookie.assert_not_called()
 
@@ -752,34 +753,34 @@ class TestSessionAuth:
     @pytest.mark.config({"username": "user", "password": "pass"})
     def test_valid_session_authorizes(self, session_store):
         store_session(session_store, "good-token")
-        assert asyncio.run(interface.validate_session(mock_request("good-token"))) is True
+        assert asyncio.run(security.validate_session(mock_request("good-token"))) is True
 
     @pytest.mark.config({"username": "user", "password": "pass"})
     def test_no_cookie_rejected(self, session_store):
-        assert asyncio.run(interface.validate_session(mock_request(None))) is False
+        assert asyncio.run(security.validate_session(mock_request(None))) is False
 
     @pytest.mark.config({"username": "user", "password": "pass"})
     def test_expired_session_rejected_and_deleted(self, session_store):
         store_session(session_store, "old-token", expires_offset=-10)
-        assert asyncio.run(interface.validate_session(mock_request("old-token"))) is False
+        assert asyncio.run(security.validate_session(mock_request("old-token"))) is False
         # The stale row is cleaned up on rejection
-        assert asyncio.run(session_store.get_session(interface.hash_session_token("old-token"))) is None
+        assert asyncio.run(session_store.get_session(security.hash_session_token("old-token"))) is None
 
     @pytest.mark.config({"username": "user", "password": "pass"})
     def test_credential_change_invalidates_session(self, session_store):
         store_session(session_store, "tok")
-        assert asyncio.run(interface.validate_session(mock_request("tok"))) is True
+        assert asyncio.run(security.validate_session(mock_request("tok"))) is True
         # Changing the password changes the fingerprint, invalidating existing sessions
         cfg.password.set("newpass")
-        assert asyncio.run(interface.validate_session(mock_request("tok"))) is False
+        assert asyncio.run(security.validate_session(mock_request("tok"))) is False
 
     @pytest.mark.config({"username": "user", "password": "pass"})
     def test_sliding_expiry_extends(self, session_store):
         # Store a session already past its refresh threshold so validation touches it
-        store_session(session_store, "tok", expires_offset=interface.SESSION_REFRESH_THRESHOLD)
-        token_hash = interface.hash_session_token("tok")
+        store_session(session_store, "tok", expires_offset=security.SESSION_REFRESH_THRESHOLD)
+        token_hash = security.hash_session_token("tok")
         before = asyncio.run(session_store.get_session(token_hash))["expires"]
-        assert asyncio.run(interface.validate_session(mock_request("tok"))) is True
+        assert asyncio.run(security.validate_session(mock_request("tok"))) is True
         after = asyncio.run(session_store.get_session(token_hash))["expires"]
         assert after > before
 
@@ -788,9 +789,9 @@ class TestSessionAuth:
         """The slide is throttled: a session touched moments ago gains nothing from another
         write, so an active browser does not put one UPDATE behind every request"""
         store_session(session_store, "tok")
-        token_hash = interface.hash_session_token("tok")
+        token_hash = security.hash_session_token("tok")
         before = asyncio.run(session_store.get_session(token_hash))["expires"]
-        assert asyncio.run(interface.validate_session(mock_request("tok"))) is True
+        assert asyncio.run(security.validate_session(mock_request("tok"))) is True
         assert asyncio.run(session_store.get_session(token_hash))["expires"] == before
 
 
@@ -802,7 +803,7 @@ def login_post(username: str = "", password: str = "", remote_ip: str = "127.0.0
 def locked_out(request) -> bool:
     """Whether the cooldown is running for this client. Production asks for the remaining
     seconds instead, because the refusal reports them as Retry-After."""
-    return interface.login_cooldown_remaining(request) > 0
+    return security.login_cooldown_remaining(request) > 0
 
 
 class TestLoginRateLimiting:
@@ -814,46 +815,46 @@ class TestLoginRateLimiting:
         """The tracker is module state, so start and leave each test with it empty. The web
         dir is unset outside a running SABnzbd, and login_index builds a template path."""
         monkeypatch.setattr(sabnzbd, "WEB_DIR_CONFIG", "/nonexistent", raising=False)
-        interface._login_attempts.clear()
+        security._login_attempts.clear()
         yield
-        interface._login_attempts.clear()
+        security._login_attempts.clear()
 
     def test_allowance_before_lockout(self):
         request = login_post()
-        for _ in range(interface.LOGIN_MAX_ATTEMPTS - 1):
-            interface.record_login_failure(request)
+        for _ in range(security.LOGIN_MAX_ATTEMPTS - 1):
+            security.record_login_failure(request)
             assert locked_out(request) is False
         # The one that uses up the allowance
-        interface.record_login_failure(request)
+        security.record_login_failure(request)
         assert locked_out(request) is True
 
     def test_cooldown_expires(self):
         request = login_post()
-        for _ in range(interface.LOGIN_MAX_ATTEMPTS):
-            interface.record_login_failure(request)
+        for _ in range(security.LOGIN_MAX_ATTEMPTS):
+            security.record_login_failure(request)
         assert locked_out(request) is True
 
         # Rewind the cooldown rather than sleeping through it
-        failures, cooldown_expiry = interface._login_attempts["127.0.0.1"]
-        interface._login_attempts["127.0.0.1"] = (failures, cooldown_expiry - interface.LOGIN_LOCKOUT_TIME - 1)
+        failures, cooldown_expiry = security._login_attempts["127.0.0.1"]
+        security._login_attempts["127.0.0.1"] = (failures, cooldown_expiry - security.LOGIN_LOCKOUT_TIME - 1)
         assert locked_out(request) is False
 
     def test_success_restores_the_allowance(self):
         request = login_post()
-        for _ in range(interface.LOGIN_MAX_ATTEMPTS):
-            interface.record_login_failure(request)
+        for _ in range(security.LOGIN_MAX_ATTEMPTS):
+            security.record_login_failure(request)
         assert locked_out(request) is True
-        interface.clear_login_failures(request)
+        security.clear_login_failures(request)
         assert locked_out(request) is False
-        assert "127.0.0.1" not in interface._login_attempts
+        assert "127.0.0.1" not in security._login_attempts
 
     def test_lockout_is_per_client(self):
         """Keyed on the address, so guessing from one host must not lock anyone else out --
         and keyed on the address rather than the username, so it cannot be used to lock a
         known account out of its own instance"""
         attacker = login_post(remote_ip="10.11.12.13")
-        for _ in range(interface.LOGIN_MAX_ATTEMPTS):
-            interface.record_login_failure(attacker)
+        for _ in range(security.LOGIN_MAX_ATTEMPTS):
+            security.record_login_failure(attacker)
         assert locked_out(attacker) is True
         assert locked_out(login_post(remote_ip="127.0.0.1")) is False
 
@@ -862,17 +863,17 @@ class TestLoginRateLimiting:
         inside the window, and a client whose cooldown passed starts over with a full
         allowance rather than one attempt short of a lockout"""
         old = login_post(remote_ip="10.11.12.13")
-        for _ in range(interface.LOGIN_MAX_ATTEMPTS):
-            interface.record_login_failure(old)
-        failures, cooldown_expiry = interface._login_attempts["10.11.12.13"]
-        interface._login_attempts["10.11.12.13"] = (failures, cooldown_expiry - interface.LOGIN_LOCKOUT_TIME - 1)
+        for _ in range(security.LOGIN_MAX_ATTEMPTS):
+            security.record_login_failure(old)
+        failures, cooldown_expiry = security._login_attempts["10.11.12.13"]
+        security._login_attempts["10.11.12.13"] = (failures, cooldown_expiry - security.LOGIN_LOCKOUT_TIME - 1)
 
-        interface.record_login_failure(login_post(remote_ip="127.0.0.1"))
-        assert "10.11.12.13" not in interface._login_attempts
+        security.record_login_failure(login_post(remote_ip="127.0.0.1"))
+        assert "10.11.12.13" not in security._login_attempts
 
         # And that address is back to a clean slate, not still one away from a lockout
-        interface.record_login_failure(old)
-        assert interface._login_attempts["10.11.12.13"][0] == 1
+        security.record_login_failure(old)
+        assert security._login_attempts["10.11.12.13"][0] == 1
 
     @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 0})
     def test_correct_credentials_are_refused_while_locked_out(self, session_store):
@@ -880,13 +881,13 @@ class TestLoginRateLimiting:
         looked at while it is running -- otherwise a client willing to be told no keeps
         testing passwords. Answers 429 so the refusal is legible to a log watcher too."""
         request = login_post(username="user", password="pass")
-        for _ in range(interface.LOGIN_MAX_ATTEMPTS):
-            interface.record_login_failure(request)
+        for _ in range(security.LOGIN_MAX_ATTEMPTS):
+            security.record_login_failure(request)
 
         with (
             patch("sabnzbd.interface.build_header", return_value={}),
             patch("sabnzbd.interface.template_filtered_response") as render,
-            patch("sabnzbd.interface.create_session") as create_session,
+            patch("sabnzbd.security.create_session") as create_session,
         ):
             asyncio.run(interface.login_index(request))
 
@@ -905,33 +906,33 @@ class TestLoginRateLimiting:
         ):
             asyncio.run(interface.login_index(wrong))
         assert render.call_args.kwargs["status_code"] == 200
-        assert interface._login_attempts["127.0.0.1"][0] == 1
+        assert security._login_attempts["127.0.0.1"][0] == 1
 
         right = login_post(username="user", password="pass")
         asyncio.run(interface.login_index(right))
-        assert "127.0.0.1" not in interface._login_attempts
+        assert "127.0.0.1" not in security._login_attempts
 
     def test_cooldown_remaining_counts_down_and_rounds_up(self):
         request = login_post()
-        assert interface.login_cooldown_remaining(request) == 0
-        for _ in range(interface.LOGIN_MAX_ATTEMPTS):
-            interface.record_login_failure(request)
+        assert security.login_cooldown_remaining(request) == 0
+        for _ in range(security.LOGIN_MAX_ATTEMPTS):
+            security.record_login_failure(request)
 
-        remaining = interface.login_cooldown_remaining(request)
+        remaining = security.login_cooldown_remaining(request)
         # Rounded up, so it is never 0 while the client is still locked out
-        assert 0 < remaining <= interface.LOGIN_LOCKOUT_TIME + 1
+        assert 0 < remaining <= security.LOGIN_LOCKOUT_TIME + 1
 
         # Most of the cooldown served: still non-zero, and smaller than it was
-        failures, cooldown_expiry = interface._login_attempts["127.0.0.1"]
-        interface._login_attempts["127.0.0.1"] = (failures, cooldown_expiry - interface.LOGIN_LOCKOUT_TIME + 2)
-        assert 0 < interface.login_cooldown_remaining(request) < remaining
+        failures, cooldown_expiry = security._login_attempts["127.0.0.1"]
+        security._login_attempts["127.0.0.1"] = (failures, cooldown_expiry - security.LOGIN_LOCKOUT_TIME + 2)
+        assert 0 < security.login_cooldown_remaining(request) < remaining
 
     def test_cooldown_survives_a_wall_clock_jump(self, monkeypatch):
         """The cooldown is a duration, so it is measured on the monotonic clock: an NTP step
         or a manual clock change must not hand a guesser its attempts back"""
         request = login_post()
-        for _ in range(interface.LOGIN_MAX_ATTEMPTS):
-            interface.record_login_failure(request)
+        for _ in range(security.LOGIN_MAX_ATTEMPTS):
+            security.record_login_failure(request)
         assert locked_out(request) is True
 
         # Jump the wall clock a year forward from where it really is; the cooldown is unmoved
@@ -943,20 +944,20 @@ class TestLoginRateLimiting:
         """Pruning on reads as well as writes means a client that stopped failing is forgotten
         by the next login attempt from anyone, not only by the next failure"""
         old = login_post(remote_ip="10.11.12.13")
-        for _ in range(interface.LOGIN_MAX_ATTEMPTS):
-            interface.record_login_failure(old)
-        failures, cooldown_expiry = interface._login_attempts["10.11.12.13"]
-        interface._login_attempts["10.11.12.13"] = (failures, cooldown_expiry - interface.LOGIN_LOCKOUT_TIME - 1)
+        for _ in range(security.LOGIN_MAX_ATTEMPTS):
+            security.record_login_failure(old)
+        failures, cooldown_expiry = security._login_attempts["10.11.12.13"]
+        security._login_attempts["10.11.12.13"] = (failures, cooldown_expiry - security.LOGIN_LOCKOUT_TIME - 1)
 
         # A read on behalf of some other client is enough
         assert locked_out(login_post(remote_ip="127.0.0.1")) is False
-        assert "10.11.12.13" not in interface._login_attempts
+        assert "10.11.12.13" not in security._login_attempts
 
     @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 0})
     def test_lockout_response_says_how_long_to_wait(self, session_store):
         request = login_post(username="user", password="pass")
-        for _ in range(interface.LOGIN_MAX_ATTEMPTS):
-            interface.record_login_failure(request)
+        for _ in range(security.LOGIN_MAX_ATTEMPTS):
+            security.record_login_failure(request)
 
         # A real response, so the assertions below read the header the client would actually get
         with (
@@ -969,7 +970,7 @@ class TestLoginRateLimiting:
             response = asyncio.run(interface.login_index(request))
 
         assert response.status_code == 429
-        assert 0 < int(response.headers["Retry-After"]) <= interface.LOGIN_LOCKOUT_TIME + 1
+        assert 0 < int(response.headers["Retry-After"]) <= security.LOGIN_LOCKOUT_TIME + 1
 
 
 class TestSessionActivityDetails:
@@ -979,14 +980,14 @@ class TestSessionActivityDetails:
     is written through immediately."""
 
     def _details(self, store, token: str = "tok") -> tuple:
-        session = asyncio.run(store.get_session(interface.hash_session_token(token)))
+        session = asyncio.run(store.get_session(security.hash_session_token(token)))
         return session["last_ip"], session["user_agent"]
 
     def _validate_from(self, remote_ip: str, user_agent: Optional[str] = None, token: str = "tok") -> bool:
         request = mock_request(token, remote_ip=remote_ip)
         if user_agent:
             request.headers = Headers({"User-Agent": user_agent})
-        return asyncio.run(interface.validate_session(request))
+        return asyncio.run(security.validate_session(request))
 
     @pytest.mark.config({"username": "user", "password": "pass"})
     def test_moving_address_is_written_through_immediately(self, session_store):
@@ -1033,9 +1034,9 @@ class TestSessionActivityDetails:
     def test_activity_write_never_shortens_the_expiry(self, session_store):
         """A row written before the window shrank to SESSION_DURATION carries a longer expiry
         than today's slide would grant, and moving must not claw that back"""
-        long_expiry = interface.SESSION_DURATION * 2
+        long_expiry = security.SESSION_DURATION * 2
         store_session(session_store, "tok", expires_offset=long_expiry, last_ip="10.11.12.13")
-        token_hash = interface.hash_session_token("tok")
+        token_hash = security.hash_session_token("tok")
         before = asyncio.run(session_store.get_session(token_hash))["expires"]
 
         assert self._validate_from("192.168.1.5") is True
@@ -1053,37 +1054,37 @@ class TestSessionAbsoluteDeadline:
         store_session(
             session_store,
             "old-tok",
-            created_offset=-(interface.SESSION_MAX_AGE + 60),
-            expires_offset=interface.SESSION_DURATION,
+            created_offset=-(security.SESSION_MAX_AGE + 60),
+            expires_offset=security.SESSION_DURATION,
         )
-        assert asyncio.run(interface.validate_session(mock_request("old-tok"))) is False
-        assert asyncio.run(session_store.get_session(interface.hash_session_token("old-tok"))) is None
+        assert asyncio.run(security.validate_session(mock_request("old-tok"))) is False
+        assert asyncio.run(session_store.get_session(security.hash_session_token("old-tok"))) is None
 
     @pytest.mark.config({"username": "user", "password": "pass"})
     def test_session_just_inside_its_deadline_still_works(self, session_store):
         store_session(
             session_store,
             "tok",
-            created_offset=-(interface.SESSION_MAX_AGE - 3600),
-            expires_offset=interface.SESSION_REFRESH_THRESHOLD,
+            created_offset=-(security.SESSION_MAX_AGE - 3600),
+            expires_offset=security.SESSION_REFRESH_THRESHOLD,
         )
-        assert asyncio.run(interface.validate_session(mock_request("tok"))) is True
+        assert asyncio.run(security.validate_session(mock_request("tok"))) is True
 
     @pytest.mark.config({"username": "user", "password": "pass"})
     def test_slide_is_clamped_to_the_deadline(self, session_store):
         """Near the end of its life a session may only be extended up to created +
         SESSION_MAX_AGE, so using it cannot push the deadline out"""
         # Deadline half a window away, and idle-expiry close enough that the slide fires
-        created_offset = -(interface.SESSION_MAX_AGE - interface.SESSION_DURATION // 2)
+        created_offset = -(security.SESSION_MAX_AGE - security.SESSION_DURATION // 2)
         store_session(session_store, "tok", created_offset=created_offset, expires_offset=3600)
-        token_hash = interface.hash_session_token("tok")
-        deadline = asyncio.run(session_store.get_session(token_hash))["created"] + interface.SESSION_MAX_AGE
+        token_hash = security.hash_session_token("tok")
+        deadline = asyncio.run(session_store.get_session(token_hash))["created"] + security.SESSION_MAX_AGE
 
-        assert asyncio.run(interface.validate_session(mock_request("tok"))) is True
+        assert asyncio.run(security.validate_session(mock_request("tok"))) is True
         expires = asyncio.run(session_store.get_session(token_hash))["expires"]
         assert expires == deadline
         # ...and it really was clamped, not just left alone
-        assert expires < int(time.time()) + interface.SESSION_DURATION
+        assert expires < int(time.time()) + security.SESSION_DURATION
 
     @pytest.mark.config({"username": "user", "password": "pass"})
     def test_pinned_session_stops_being_rewritten(self, session_store):
@@ -1095,15 +1096,15 @@ class TestSessionAbsoluteDeadline:
         store_session(
             session_store,
             "tok",
-            created_offset=-(interface.SESSION_MAX_AGE - 3600),
+            created_offset=-(security.SESSION_MAX_AGE - 3600),
             expires_offset=3600,
         )
-        token_hash = interface.hash_session_token("tok")
+        token_hash = security.hash_session_token("tok")
         session = asyncio.run(session_store.get_session(token_hash))
-        assert session["expires"] == session["created"] + interface.SESSION_MAX_AGE
+        assert session["expires"] == session["created"] + security.SESSION_MAX_AGE
 
         with patch.object(sabnzbd.session_store, "touch_session") as touch:
-            assert asyncio.run(interface.validate_session(mock_request("tok"))) is True
+            assert asyncio.run(security.validate_session(mock_request("tok"))) is True
         touch.assert_not_called()
         assert asyncio.run(session_store.get_session(token_hash))["expires"] == session["expires"]
 
@@ -1111,7 +1112,7 @@ class TestSessionAbsoluteDeadline:
     def test_check_apikey_accepts_session_without_key(self, session_store):
         store_session(session_store, "browser-token")
         # A local browser call with a valid session and its CSRF token, but no apikey
-        assert asyncio.run(interface.check_apikey(api_request("browser-token"))) is None
+        assert asyncio.run(security.check_apikey(api_request("browser-token"))) is None
 
     @pytest.mark.config({"username": "user", "password": "pass"})
     def test_auth_functions_are_async(self):
@@ -1119,11 +1120,11 @@ class TestSessionAbsoluteDeadline:
         secured_expose, so they must stay awaitable (blocking work belongs in
         the session store or a threadpool)"""
         for func in (
-            interface.validate_session,
-            interface.check_login,
-            interface.check_apikey,
-            interface.create_session,
-            interface.clear_session,
+            security.validate_session,
+            security.check_login,
+            security.check_apikey,
+            security.create_session,
+            security.clear_session,
         ):
             assert inspect.iscoroutinefunction(func)
 
@@ -1133,31 +1134,31 @@ class TestAnonymousSession:
 
     @pytest.mark.config({"username": "", "password": ""})
     def test_valid_tag_accepted(self):
-        assert interface.validate_anonymous_session(mock_request(interface.anonymous_session_tag())) is True
+        assert security.validate_anonymous_session(mock_request(security.anonymous_session_tag())) is True
 
     @pytest.mark.config({"username": "", "password": ""})
     def test_missing_or_wrong_tag_rejected(self):
-        assert interface.validate_anonymous_session(mock_request(None)) is False
-        assert interface.validate_anonymous_session(mock_request("forged-tag")) is False
+        assert security.validate_anonymous_session(mock_request(None)) is False
+        assert security.validate_anonymous_session(mock_request("forged-tag")) is False
 
     @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 0})
     def test_rejected_when_credentials_configured(self):
         # A tag minted while auth was off grants nothing once credentials are set
-        assert interface.validate_anonymous_session(mock_request(interface.anonymous_session_tag())) is False
+        assert security.validate_anonymous_session(mock_request(security.anonymous_session_tag())) is False
 
     @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 5})
     def test_accepted_when_login_waived_for_local_client(self):
         # inet_exposure 5 waives the login for local clients even though credentials are
         # set, so those page loads get an anonymous cookie that has to validate: it is
         # what their POSTs present to the CSRF guard and their API calls to check_apikey
-        assert interface.validate_anonymous_session(mock_request(interface.anonymous_session_tag())) is True
+        assert security.validate_anonymous_session(mock_request(security.anonymous_session_tag())) is True
         # An external client still needs to log in, so no tag is good enough
-        external = mock_request(interface.anonymous_session_tag(), remote_ip="9.8.7.6")
-        assert interface.validate_anonymous_session(external) is False
+        external = mock_request(security.anonymous_session_tag(), remote_ip="9.8.7.6")
+        assert security.validate_anonymous_session(external) is False
 
     @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
     def test_check_apikey_accepts_anonymous_without_key(self):
-        assert asyncio.run(interface.check_apikey(api_request(interface.anonymous_session_tag()))) is None
+        assert asyncio.run(security.check_apikey(api_request(security.anonymous_session_tag()))) is None
 
     @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 5})
     def test_check_apikey_accepts_anonymous_when_login_waived(self, session_store):
@@ -1165,15 +1166,15 @@ class TestAnonymousSession:
         waived by inet_exposure 5 has only its anonymous cookie to authorize API calls.
         Rejecting it answers the frontend with a 401, which it handles by reloading the
         page — which authorizes nothing either, so it reloads again."""
-        assert asyncio.run(interface.check_apikey(api_request(interface.anonymous_session_tag()))) is None
+        assert asyncio.run(security.check_apikey(api_request(security.anonymous_session_tag()))) is None
 
     @pytest.mark.config({"username": "", "password": ""})
     def test_create_sets_matching_cookie(self):
         request = Mock()
         response = Mock()
-        interface.create_anonymous_session(request, response)
-        assert response.set_cookie.call_args.args[1] == interface.anonymous_session_tag()
-        assert response.set_cookie.call_args.args[0] == interface.SESSION_COOKIE
+        security.create_anonymous_session(request, response)
+        assert response.set_cookie.call_args.args[1] == security.anonymous_session_tag()
+        assert response.set_cookie.call_args.args[0] == security.SESSION_COOKIE_USER
 
 
 class TestStaleTokenIsNotAWarning:
@@ -1190,8 +1191,8 @@ class TestStaleTokenIsNotAWarning:
 
     @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0, "api_warnings": True})
     def test_api_call_with_a_stale_token_is_only_info(self, session_store, caplog):
-        request = mock_request(interface.anonymous_session_tag(), params={"mode": "queue", "name": ""}, csrf="f0" * 32)
-        levels = self._levels(caplog, lambda: asyncio.run(interface.check_apikey(request)))
+        request = mock_request(security.anonymous_session_tag(), params={"mode": "queue", "name": ""}, csrf="f0" * 32)
+        levels = self._levels(caplog, lambda: asyncio.run(security.check_apikey(request)))
         assert "WARNING" not in levels
         assert "INFO" in levels
 
@@ -1199,13 +1200,13 @@ class TestStaleTokenIsNotAWarning:
     def test_api_call_with_no_token_still_warns(self, session_store, caplog):
         """No token at all is what a scanner or a keyless 3rd-party program looks like, and our
         own frontend always sends one, so this keeps its warning"""
-        request = api_request(interface.anonymous_session_tag(), with_token=False)
-        levels = self._levels(caplog, lambda: asyncio.run(interface.check_apikey(request)))
+        request = api_request(security.anonymous_session_tag(), with_token=False)
+        levels = self._levels(caplog, lambda: asyncio.run(security.check_apikey(request)))
         assert "WARNING" in levels
 
     @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0, "api_warnings": True})
     def test_page_post_with_a_stale_token_is_only_info(self, session_store, caplog):
-        request = page_post(interface.anonymous_session_tag(), csrf="f0" * 32)
+        request = page_post(security.anonymous_session_tag(), csrf="f0" * 32)
         levels = self._levels(caplog, lambda: asyncio.run(config_save_middleware().denied_response(request)))
         assert "WARNING" not in levels
         assert "INFO" in levels
@@ -1225,25 +1226,25 @@ class TestApiCsrf:
     answers with a bare 405. An apikey-authorized call is deliberately untouched."""
 
     def _status(self, request) -> Optional[int]:
-        response = asyncio.run(interface.check_apikey(request))
+        response = asyncio.run(security.check_apikey(request))
         return response.status_code if response else None
 
     @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
     def test_cookie_with_token_authorizes(self, session_store):
-        assert self._status(api_request(interface.anonymous_session_tag())) is None
+        assert self._status(api_request(security.anonymous_session_tag())) is None
 
     @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
     def test_cookie_without_token_is_forbidden(self, session_store):
         """403, not 401: the frontend reloads on a 401, and a reload cannot conjure up a
         header it never sends, so answering 401 here would loop forever"""
-        assert self._status(api_request(interface.anonymous_session_tag(), with_token=False)) == 403
+        assert self._status(api_request(security.anonymous_session_tag(), with_token=False)) == 403
 
     @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
     def test_stale_token_asks_for_a_reload(self, session_store):
         """401, because a reload does fix this one: the page was rendered before a restart
         rotated the key. A login session survives that restart, so its cookie still
         validates while the token it holds no longer does."""
-        request = mock_request(interface.anonymous_session_tag(), params={"mode": "queue", "name": ""}, csrf="f0" * 32)
+        request = mock_request(security.anonymous_session_tag(), params={"mode": "queue", "name": ""}, csrf="f0" * 32)
         assert self._status(request) == 401
 
     @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
@@ -1253,7 +1254,7 @@ class TestApiCsrf:
         both a cookie and a key — so the cookie check must fall through to the key, never
         reject on its own."""
         request = mock_request(
-            interface.anonymous_session_tag(),
+            security.anonymous_session_tag(),
             params={"mode": "queue", "name": "", "apikey": cfg.api_key()},
         )
         assert self._status(request) is None
@@ -1265,8 +1266,8 @@ class TestApiCsrf:
         """There is no carve-out list. The one mode that needed it, showlog, is served to the
         interface by the /log page route instead, so every cookie-authorized API call has to
         present a token — including showlog itself."""
-        assert self._status(api_request(interface.anonymous_session_tag(), mode="showlog", with_token=False)) == 403
-        assert self._status(api_request(interface.anonymous_session_tag(), mode="showlog")) is None
+        assert self._status(api_request(security.anonymous_session_tag(), mode="showlog", with_token=False)) == 403
+        assert self._status(api_request(security.anonymous_session_tag(), mode="showlog")) is None
 
     @pytest.mark.config({"username": "", "password": "", "inet_exposure": 0})
     def test_token_outside_the_header_is_not_accepted(self, session_store):
@@ -1275,10 +1276,10 @@ class TestApiCsrf:
         headers and onto a channel an <img> can reach, losing the preflight guarantee that
         makes the header a CSRF defence in the first place. Page routes still take the field,
         because their params are the form body and a native form cannot send a header."""
-        tag = interface.anonymous_session_tag()
-        token = interface.csrf_token_for(tag)
+        tag = security.anonymous_session_tag()
+        token = security.csrf_token_for(tag)
 
-        as_parameter = mock_request(tag, params={"mode": "queue", "name": "", interface.CSRF_FIELD: token})
+        as_parameter = mock_request(tag, params={"mode": "queue", "name": "", security.CSRF_FIELD: token})
         assert self._status(as_parameter) == 403
         # The same token in the header is what the frontend sends, and it is accepted
         assert self._status(api_request(tag)) is None
@@ -1331,8 +1332,8 @@ class TestApiCsrf:
         """The explanation above is only for requests that were going to be refused: a
         logged-in browser opening an old bookmark that still carries ?apikey= gets its page"""
         store_session(session_store, "login-token")
-        request = page_post("login-token", csrf=interface.csrf_token_for("login-token"))
-        request.state.params = {interface.CSRF_FIELD: interface.csrf_token_for("login-token")}
+        request = page_post("login-token", csrf=security.csrf_token_for("login-token"))
+        request.state.params = {security.CSRF_FIELD: security.csrf_token_for("login-token")}
         request.query_params = QueryParams("apikey=" + cfg.api_key())
         assert asyncio.run(config_save_middleware().denied_response(request)) is None
 
@@ -1422,15 +1423,15 @@ def page_post(
     modelled as carrying neither: SameSite=Strict makes the browser withhold SABnzbd's
     cookies on a request originating from another site, and a cross-site page can read
     neither the token out of a page (CORS) nor the httponly cookie."""
-    params = {interface.CSRF_FIELD: csrf_field} if csrf_field is not None else None
+    params = {security.CSRF_FIELD: csrf_field} if csrf_field is not None else None
     return mock_request(cookie, params=params, csrf=csrf, method="POST", remote_ip=remote_ip)
 
 
-def config_save_middleware() -> interface.SecurityMiddleware:
+def config_save_middleware() -> security.SecurityMiddleware:
     """SecurityMiddleware as secured_expose attaches it to a config *_save route: a page
     route that changes state and, since these routes dropped check_api_key, has nothing
     but the session cookie between a cross-site form and the whole configuration"""
-    return interface.SecurityMiddleware(
+    return security.SecurityMiddleware(
         Mock(), check_configlock=True, check_for_login=True, check_api_key=False, access_type=4
     )
 
@@ -1447,7 +1448,7 @@ def cookie_of_kind(kind: str, store) -> Optional[str]:
     if kind == COOKIE_NONE:
         return None
     if kind == COOKIE_ANONYMOUS:
-        return interface.anonymous_session_tag()
+        return security.anonymous_session_tag()
     if kind == COOKIE_FORGED:
         return "f0" * 32
     store_session(store, "login-token")
@@ -1465,7 +1466,7 @@ def token_of_kind(kind: str, cookie_value: Optional[str]) -> Optional[str]:
         return None
     if kind == TOKEN_WRONG:
         return "f0" * 32
-    return interface.csrf_token_for(cookie_value or "")
+    return security.csrf_token_for(cookie_value or "")
 
 
 class TestPagePostCsrf:
@@ -1517,8 +1518,8 @@ class TestPagePostCsrf:
         """The header covers every ajax call, but a form that navigates cannot set one, so
         the token is accepted from the body too (never from the query string, which a page
         POST discards outright — see get_request_params)"""
-        tag = interface.anonymous_session_tag()
-        allowed = page_post(tag, csrf_field=interface.csrf_token_for(tag))
+        tag = security.anonymous_session_tag()
+        allowed = page_post(tag, csrf_field=security.csrf_token_for(tag))
         assert asyncio.run(config_save_middleware().denied_response(allowed)) is None
         denied = page_post(tag, csrf_field="f0" * 32)
         assert asyncio.run(config_save_middleware().denied_response(denied)) is not None
@@ -1528,19 +1529,19 @@ class TestPagePostCsrf:
         """A token minted for another session grants nothing, in either direction. This is
         what a shared or global token would fail, and why it is derived per cookie."""
         cookie_of_kind(COOKIE_LOGIN, session_store)
-        anonymous_tag = interface.anonymous_session_tag()
+        anonymous_tag = security.anonymous_session_tag()
 
-        login_with_anonymous_token = page_post("login-token", csrf=interface.csrf_token_for(anonymous_tag))
+        login_with_anonymous_token = page_post("login-token", csrf=security.csrf_token_for(anonymous_tag))
         assert asyncio.run(config_save_middleware().denied_response(login_with_anonymous_token)) is not None
 
-        anonymous_with_login_token = page_post(anonymous_tag, csrf=interface.csrf_token_for("login-token"))
+        anonymous_with_login_token = page_post(anonymous_tag, csrf=security.csrf_token_for("login-token"))
         assert asyncio.run(config_save_middleware().denied_response(anonymous_with_login_token)) is not None
 
     @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 5})
     def test_external_client_still_needs_login(self, session_store):
         """The waiver is local-only: an external POST gets no help from the anonymous tag"""
-        tag = interface.anonymous_session_tag()
-        request = page_post(tag, remote_ip="9.8.7.6", csrf=interface.csrf_token_for(tag))
+        tag = security.anonymous_session_tag()
+        request = page_post(tag, remote_ip="9.8.7.6", csrf=security.csrf_token_for(tag))
         assert asyncio.run(config_save_middleware().denied_response(request)) is not None
 
     @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 0})
@@ -1549,7 +1550,7 @@ class TestPagePostCsrf:
         and under inet_exposure 5 the cookie-issuing decision asks a third time. Repeating the
         lookup would repeat the row read and the expiry and activity writes under it."""
         store_session(session_store, "login-token")
-        request = page_post("login-token", csrf=interface.csrf_token_for("login-token"))
+        request = page_post("login-token", csrf=security.csrf_token_for("login-token"))
 
         with patch.object(sabnzbd.session_store, "get_session", wraps=sabnzbd.session_store.get_session) as get_session:
             assert asyncio.run(config_save_middleware().denied_response(request)) is None
@@ -1577,11 +1578,11 @@ def run_page_request(cookie: Optional[str] = None, remote_ip: str = "127.0.0.1")
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b"ok"})
 
-    middleware = interface.SecurityMiddleware(asgi_app, check_for_login=True, check_api_key=False, access_type=4)
+    middleware = security.SecurityMiddleware(asgi_app, check_for_login=True, check_api_key=False, access_type=4)
 
     headers = [(b"host", b"127.0.0.1:8080")]
     if cookie:
-        headers.append((b"cookie", ("%s=%s" % (interface.SESSION_COOKIE, cookie)).encode()))
+        headers.append((b"cookie", ("%s=%s" % (security.SESSION_COOKIE_USER, cookie)).encode()))
     scope = {
         "type": "http",
         "method": "GET",
@@ -1615,7 +1616,7 @@ class TestAnonymousSessionIssuing:
     have something to present"""
 
     def _issued(self, **kwargs) -> bool:
-        return any(value.startswith(interface.SESSION_COOKIE + "=") for value in issued_session_cookies(**kwargs))
+        return any(value.startswith(security.SESSION_COOKIE_USER + "=") for value in issued_session_cookies(**kwargs))
 
     @pytest.mark.config({"username": "", "password": ""})
     def test_issued_without_credentials(self, session_store):
@@ -1623,7 +1624,7 @@ class TestAnonymousSessionIssuing:
 
     @pytest.mark.config({"username": "", "password": ""})
     def test_not_reissued_when_tag_already_held(self, session_store):
-        assert self._issued(cookie=interface.anonymous_session_tag()) is False
+        assert self._issued(cookie=security.anonymous_session_tag()) is False
 
     @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 5})
     def test_issued_when_login_waived_for_local_client(self, session_store):
@@ -1643,7 +1644,7 @@ def session_cookie_value(set_cookie_headers: list[str], fallback: Optional[str])
     """The session cookie the client is left holding after a response: the one it was just
     issued, or the one it already had if none was set"""
     for value in set_cookie_headers:
-        if value.startswith(interface.SESSION_COOKIE + "="):
+        if value.startswith(security.SESSION_COOKIE_USER + "="):
             return value.split("=", 1)[1].split(";", 1)[0]
     return fallback or ""
 
@@ -1659,7 +1660,7 @@ class TestRenderedTokenMatchesCookie:
     def _assert_token_matches(self, cookie: Optional[str]):
         set_cookies, rendered_token = run_page_request(cookie=cookie)
         held = session_cookie_value(set_cookies, cookie)
-        assert rendered_token == interface.csrf_token_for(held)
+        assert rendered_token == security.csrf_token_for(held)
         assert rendered_token, "a page rendered no usable token at all"
 
     @pytest.mark.config({"username": "", "password": ""})
@@ -1674,7 +1675,7 @@ class TestRenderedTokenMatchesCookie:
 
     @pytest.mark.config({"username": "", "password": ""})
     def test_steady_state_anonymous(self, session_store):
-        self._assert_token_matches(interface.anonymous_session_tag())
+        self._assert_token_matches(security.anonymous_session_tag())
 
     @pytest.mark.config({"username": "user", "password": "pass", "inet_exposure": 0})
     def test_login_session(self, session_store):

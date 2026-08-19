@@ -32,6 +32,7 @@ from starlette.datastructures import Headers, Address, QueryParams, State
 
 import sabnzbd.api as api
 import sabnzbd.interface as interface
+import sabnzbd.security as security
 import sabnzbd
 import sabnzbd.database as db
 from sabnzbd.constants import DB_HISTORY_NAME, DEF_ADMIN_DIR, PP_LOOKUP, AddNzbFileResult, Status
@@ -193,7 +194,7 @@ def create_mock_request(
 
 
 def run_get_request_params(method, query_string="", body=b"", content_type=None, merge_query=False):
-    """Drive interface.get_request_params with a real Starlette Request"""
+    """Drive security.get_request_params with a real Starlette Request"""
     headers = [(b"content-type", content_type.encode())] if content_type else []
     scope = {
         "type": "http",
@@ -206,7 +207,7 @@ def run_get_request_params(method, query_string="", body=b"", content_type=None,
         return {"type": "http.request", "body": body, "more_body": False}
 
     request = Request(scope, receive)
-    return asyncio.run(interface.get_request_params(request, merge_query=merge_query))
+    return asyncio.run(security.get_request_params(request, merge_query=merge_query))
 
 
 FORM = "application/x-www-form-urlencoded"
@@ -466,11 +467,11 @@ class TestSecuredExpose:
 
         # Block bad host
         bad_request = create_mock_request(hostname="not_me")
-        assert interface.check_hostname(bad_request) is False
+        assert security.check_hostname(bad_request) is False
 
         # Block empty hostname
         empty_request = create_mock_request(hostname="")
-        assert interface.check_hostname(empty_request) is False
+        assert security.check_hostname(empty_request) is False
 
         # Allow valid hostnames/IPs
         for test_hostname in (
@@ -484,14 +485,14 @@ class TestSecuredExpose:
             "localhost",
         ):
             good_request = create_mock_request(hostname=test_hostname)
-            assert interface.check_hostname(good_request) is True
+            assert security.check_hostname(good_request) is True
 
     @pytest.mark.config({"username": "foo", "password": "bar"})
     def test_check_hostname_with_auth(self):
         """Test hostname checking with authentication enabled"""
         # With username/password set, hostname check should always pass
         bad_request = create_mock_request(hostname="not_me")
-        assert interface.check_hostname(bad_request) is True
+        assert security.check_hostname(bad_request) is True
 
     def test_check_hostname_bare_ipv6_is_refused(self):
         """An IPv6 literal must be bracketed in a Host header (RFC 7230). A bare one is
@@ -503,42 +504,42 @@ class TestSecuredExpose:
             "::ffff:127.0.0.1:8080",
             "2001:db8:3333:4444:5555:6666:7777:8888",
         ):
-            assert interface.check_hostname(create_mock_request(hostname=bad_hostname)) is False
+            assert security.check_hostname(create_mock_request(hostname=bad_hostname)) is False
 
         # The bracketed forms of the same addresses stay allowed
         for good_hostname in ("[1234:5678::1]:8080", "[::ffff:127.0.0.1]:8080", "[1234:5678::1]"):
-            assert interface.check_hostname(create_mock_request(hostname=good_hostname)) is True
+            assert security.check_hostname(create_mock_request(hostname=good_hostname)) is True
 
     @pytest.mark.config({"host_whitelist": "test.com, not_evil"})
     def test_check_hostname_whitelist(self):
         """Test hostname whitelist functionality"""
         # Whitelisted hostnames should be allowed
         request1 = create_mock_request(hostname="test.com")
-        assert interface.check_hostname(request1) is True
+        assert security.check_hostname(request1) is True
 
         request2 = create_mock_request(hostname="not_evil")
-        assert interface.check_hostname(request2) is True
+        assert security.check_hostname(request2) is True
 
         # Non-whitelisted hostname should be blocked
         request3 = create_mock_request(hostname="evil.com")
-        assert interface.check_hostname(request3) is False
+        assert security.check_hostname(request3) is False
 
     def test_dual_stack(self):
         """Test IPv6 dual stack functionality"""
         request = create_mock_request(remote_ip="::ffff:192.168.0.10")
         # Dual stack IPs should be treated as local
-        assert interface.check_access(request, access_type=4) is True
+        assert security.check_access(request, access_type=4) is True
 
     @pytest.mark.config({"local_ranges": "132.10."})
     def test_dual_stack_local_ranges(self):
         """Test custom local ranges"""
         # IP not in custom local_ranges should be blocked
         request1 = create_mock_request(remote_ip="::ffff:192.168.0.10")
-        assert interface.check_access(request1, access_type=5) is False
+        assert security.check_access(request1, access_type=5) is False
 
         # IP in custom local_ranges should be allowed
         request2 = create_mock_request(remote_ip="::ffff:132.10.0.10")
-        assert interface.check_access(request2, access_type=4) is True
+        assert security.check_access(request2, access_type=4) is True
 
     @pytest.mark.config({"inet_exposure": 2})
     def test_inet_exposure_basic(self):
@@ -547,11 +548,11 @@ class TestSecuredExpose:
         external_request = create_mock_request(remote_ip="11.11.11.11")
 
         # Level 1-2 should be allowed
-        assert interface.check_access(external_request, access_type=1) is True
-        assert interface.check_access(external_request, access_type=2) is True
+        assert security.check_access(external_request, access_type=1) is True
+        assert security.check_access(external_request, access_type=2) is True
         # Level 3+ should be blocked
-        assert interface.check_access(external_request, access_type=3) is False
-        assert interface.check_access(external_request, access_type=4) is False
+        assert security.check_access(external_request, access_type=3) is False
+        assert security.check_access(external_request, access_type=4) is False
 
     @pytest.mark.config({"inet_exposure": 0})
     def test_local_access_always_allowed(self):
@@ -559,8 +560,8 @@ class TestSecuredExpose:
         local_request = create_mock_request(remote_ip="127.0.0.1")
 
         # Even with minimal exposure, local IPs should be allowed
-        assert interface.check_access(local_request, access_type=4) is True
-        assert interface.check_access(local_request, access_type=5) is True
+        assert security.check_access(local_request, access_type=4) is True
+        assert security.check_access(local_request, access_type=5) is True
 
     @pytest.mark.parametrize("inet_exposure", [0, 1, 2, 3, 4, 5])
     @pytest.mark.parametrize("access_type", [1, 2, 3, 4, 5, 6])
@@ -579,11 +580,11 @@ class TestSecuredExpose:
 
         if expected_local:
             # Local and loopback IPs should always be allowed
-            assert interface.check_access(request, access_type) is True
+            assert security.check_access(request, access_type) is True
         else:
             # External IPs should follow inet_exposure rules
             expected_allowed = access_type <= inet_exposure
-            assert interface.check_access(request, access_type) is expected_allowed
+            assert security.check_access(request, access_type) is expected_allowed
 
     @pytest.mark.config({"inet_exposure": 2, "verify_xff_header": True})
     def test_inet_exposure_with_xff_headers(self):
@@ -610,15 +611,15 @@ class TestSecuredExpose:
         )
 
         # Local IP with external XFF should be denied
-        assert interface.check_access(local_request_external_xff, access_type=4) is False
+        assert security.check_access(local_request_external_xff, access_type=4) is False
 
         # Local IP with local XFF should be allowed
-        assert interface.check_access(local_request_local_xff, access_type=4) is True
+        assert security.check_access(local_request_local_xff, access_type=4) is True
 
         # External IP should follow inet_exposure rules (XFF ignored for external IPs)
-        assert interface.check_access(external_request, access_type=1) is True
-        assert interface.check_access(external_request, access_type=2) is True
-        assert interface.check_access(external_request, access_type=3) is False
+        assert security.check_access(external_request, access_type=1) is True
+        assert security.check_access(external_request, access_type=2) is True
+        assert security.check_access(external_request, access_type=3) is False
 
     # Note: The comprehensive parametrized test above covers all these scenarios,
     # but this test provides explicit documentation of the API access level meanings
@@ -628,13 +629,13 @@ class TestSecuredExpose:
         external_request = create_mock_request(remote_ip="8.8.8.8")
 
         # access_type = 1: NZB upload access
-        assert interface.check_access(external_request, access_type=1) is True
+        assert security.check_access(external_request, access_type=1) is True
         # access_type = 2: Basic API access
-        assert interface.check_access(external_request, access_type=2) is True
+        assert security.check_access(external_request, access_type=2) is True
         # access_type = 3: Full API access (blocked with inet_exposure=2)
-        assert interface.check_access(external_request, access_type=3) is False
+        assert security.check_access(external_request, access_type=3) is False
         # access_type = 4: WebUI access (blocked with inet_exposure=2)
-        assert interface.check_access(external_request, access_type=4) is False
+        assert security.check_access(external_request, access_type=4) is False
 
     @pytest.mark.config({"inet_exposure": 1})
     def test_inet_exposure_ipv6(self):
@@ -647,14 +648,14 @@ class TestSecuredExpose:
         dual_stack_request = create_mock_request(remote_ip="::ffff:192.168.1.10")
 
         # IPv6 loopback should always be allowed
-        assert interface.check_access(ipv6_local_request, access_type=4) is True
+        assert security.check_access(ipv6_local_request, access_type=4) is True
 
         # IPv6 external should follow inet_exposure rules
-        assert interface.check_access(ipv6_external_request, access_type=1) is True
-        assert interface.check_access(ipv6_external_request, access_type=2) is False
+        assert security.check_access(ipv6_external_request, access_type=1) is True
+        assert security.check_access(ipv6_external_request, access_type=2) is False
 
         # Dual-stack should be treated as local
-        assert interface.check_access(dual_stack_request, access_type=4) is True
+        assert security.check_access(dual_stack_request, access_type=4) is True
 
     @pytest.mark.config({"inet_exposure": 1, "local_ranges": ["4.4.4.0/24"]})
     def test_inet_exposure_custom_local_ranges(self):
@@ -663,7 +664,7 @@ class TestSecuredExpose:
         custom_local_request = create_mock_request(remote_ip="4.4.4.10")
 
         # IP in custom local range should be treated as local
-        assert interface.check_access(custom_local_request, access_type=4) is True
+        assert security.check_access(custom_local_request, access_type=4) is True
 
     # Note: Boundary conditions are covered by the comprehensive parametrized test
     # These tests serve as explicit documentation of the most restrictive/permissive settings
@@ -672,15 +673,15 @@ class TestSecuredExpose:
         """Document the most restrictive inet_exposure setting"""
         external_request = create_mock_request(remote_ip="1.1.1.1")
         # inet_exposure=0: No external access allowed for any access type
-        assert interface.check_access(external_request, access_type=1) is False
+        assert security.check_access(external_request, access_type=1) is False
 
     @pytest.mark.config({"inet_exposure": 5})
     def test_inet_exposure_most_permissive(self):
         """Document the most permissive inet_exposure setting"""
         external_request = create_mock_request(remote_ip="1.1.1.1")
         # inet_exposure=5: External access allowed for access_type 1-5, but not 6
-        assert interface.check_access(external_request, access_type=5) is True
-        assert interface.check_access(external_request, access_type=6) is False
+        assert security.check_access(external_request, access_type=5) is True
+        assert security.check_access(external_request, access_type=6) is False
 
 
 class TestHistory:
