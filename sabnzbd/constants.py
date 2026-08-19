@@ -58,12 +58,10 @@ SABCTOOLS_VERSION_REQUIRED = "9.6.3"
 DB_HISTORY_VERSION = 1
 DB_HISTORY_NAME = "history%s.db" % DB_HISTORY_VERSION
 
-# Web-UI login sessions (see sabnzbd.sessionstore). Deliberately kept out of
-# CONFIG_BACKUP_FILES: sessions are per-browser state that shouldn't move to a
-# restored install, and a lost sessions database only means logging in again.
-# Sessions are disposable, so DB_SESSIONS_VERSION is a schema generation stored
-# in the database's PRAGMA user_version: a bump drops and recreates the table on
-# next open rather than migrating (see AsyncSessionStore._connect).
+# Web-UI login sessions (see sabnzbd.sessionstore). Kept out of CONFIG_BACKUP_FILES: they are
+# per-browser state, and losing them only means logging in again. DB_SESSIONS_VERSION is a
+# schema generation held in PRAGMA user_version; a bump recreates the table instead of
+# migrating it.
 DB_SESSIONS_VERSION = 1
 DB_SESSIONS_NAME = "sessions.db"
 

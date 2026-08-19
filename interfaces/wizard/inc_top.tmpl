@@ -12,9 +12,7 @@
         <script type="text/javascript" src="$url('staticcfg/js/jquery-3.5.1.min.js', v=$cache_buster)"></script>
         <script type="text/javascript" src="$url('staticcfg/bootstrap/js/bootstrap.min.js', v=$cache_buster)"></script>
         <script type="text/javascript">
-            // Echo the session's CSRF token on every ajax request; the forms that navigate
-            // carry it as a hidden field instead. Write jQuery(), never \$(), in a template:
-            // Cheetah eats a leading \$( and would silently drop the call.
+            // CSRF token for every ajax request; navigating forms use a hidden field
             var csrfToken = "$csrf_token";
             $.ajaxSetup({
                 headers: { "X-SABnzbd-CSRF": csrfToken }

@@ -313,11 +313,10 @@ class TestInterfaceFunctions:
     )
     def test_effective_client_from_xff(self, local_ranges, xff_ips, expected_result):
         def _func():
-            # The effective client IP (used for login-cookie binding and access
-            # checks) is selected by uvicorn's ProxyHeadersMiddleware: the last
-            # XFF entry that is not a trusted (local) proxy, or the first entry
-            # when the whole chain is trusted. Connect from loopback, which is
-            # always a trusted peer.
+            # The effective client IP (used for access checks, the login cooldown and
+            # session activity) is selected by uvicorn's ProxyHeadersMiddleware: the last
+            # XFF entry that is not a trusted proxy, or the first when all of them are.
+            # Connect from loopback, which is always a trusted peer.
             assert xff_ips
             client = resolve_client(remote_ip="127.0.0.1", xff_header=", ".join(xff_ips))
             assert client.host == expected_result
@@ -700,17 +699,13 @@ class TestSessionStoreFailure:
 
     @pytest.fixture
     def failing_store(self, monkeypatch, tmp_path):
-        """A store whose database cannot be opened, the way a read-only or full admin_dir makes
-        it fail.
+        """A store whose database cannot be opened, the way a read-only or full admin_dir
+        makes it fail.
 
-        The failure is injected at the connect call rather than by pointing the store at an
-        unopenable path, because aiosqlite fails a connect *after* starting its worker thread:
-        its cleanup enqueues a stop future that it then discards without awaiting (core.py's
-        `except BaseException: self.stop()`). Under asyncio.run the loop can close before that
-        thread delivers, and its two attempts to resolve the future both raise "Event loop is
-        closed" -- the second from inside the first's handler, so it escapes the worker and
-        pytest reports an unhandled thread exception against whatever test is running by then.
-        Raising before any thread exists keeps that path unreachable."""
+        Injected at the connect call rather than with an unopenable path because aiosqlite
+        fails a connect after starting its worker thread, then discards the stop future
+        without awaiting it. Under asyncio.run the loop can close first, and the thread's
+        "Event loop is closed" surfaces against whatever test happens to be running."""
         store = sessionstore.AsyncSessionStore(db_path=str(tmp_path / "sessions.db"))
         monkeypatch.setattr(
             sessionstore.aiosqlite,
@@ -1474,12 +1469,9 @@ def token_of_kind(kind: str, cookie_value: Optional[str]) -> Optional[str]:
 
 
 class TestPagePostCsrf:
-    """Every state-changing page POST has to echo the CSRF token belonging to its session.
-    A session cookie on its own is not enough, in either of login_bypassed's cases: where
-    the login is waived the request carries no proof of origin at all, and where it is
-    enforced the cookie only proves SameSite=Strict let it through — and SameSite is not
-    origin-scoped, so a page served from another port on the same host is same-site and
-    its forms do send the cookie. Only a value the attacker cannot read closes that."""
+    """Every state-changing page POST has to echo its session's CSRF token. The cookie alone
+    is not enough: waived, the login proves nothing about origin, and enforced it only proves
+    SameSite=Strict let the request through -- and another port on this host is same-site."""
 
     @pytest.mark.parametrize(
         "credentials, inet_exposure, cookie, token, allowed",
@@ -1657,14 +1649,12 @@ def session_cookie_value(set_cookie_headers: list[str], fallback: Optional[str])
 
 
 class TestRenderedTokenMatchesCookie:
-    """The token a page renders must belong to the cookie its client ends up holding,
-    otherwise the very next POST from that page is refused.
+    """The token a page renders must belong to the cookie its client ends up holding, or the
+    next POST from that page is refused.
 
-    This is easy to get subtly wrong: the anonymous cookie is injected into the response
-    start by SecurityMiddleware *after* the handler has already rendered the page, so a
-    token derived from request.cookies is right in the steady state and wrong on every
-    first load — where the cookie is absent or stale. That failure hits hardest exactly
-    where there is no ajax to paper over it: the wizard, a fresh install's first screen."""
+    Easy to get subtly wrong: the anonymous cookie is injected after the handler rendered the
+    page, so a token taken from request.cookies is right in the steady state and wrong on
+    every first load -- worst on the wizard, where there is no ajax to paper over it."""
 
     def _assert_token_matches(self, cookie: Optional[str]):
         set_cookies, rendered_token = run_page_request(cookie=cookie)

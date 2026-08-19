@@ -244,10 +244,8 @@ $.fn.extractFormDataTo = function(target) {
  * (c) 2015 SABnzbd Team, Inc. All rights reserved.
  */
 
-// Every ajax request has to echo the session's CSRF token. Setting it as a header here covers
-// all of them at once -- $.ajax, $.get, $.getJSON and the jquery.form plugin all end up in
-// $.ajax -- and a header is something a cross-site page cannot set at all. Forms that navigate
-// instead of using ajax get the token as a hidden field, see below.
+// CSRF token for every ajax request; a cross-site page cannot set a header.
+// Forms that navigate instead carry it as a hidden field, see below.
 $.ajaxSetup({
     headers: { "X-SABnzbd-CSRF": csrfToken }
 });
@@ -299,7 +297,7 @@ function do_restart() {
     // Show where we are going to connect
     $('.main-restarting .restarting-url').text(urlTotal)
 
-    // Initiate restart. POST because it acts on the server rather than reading from it
+    // Initiate restart
     $.ajax({ url: '../../api?mode=restart', type: 'POST',
         complete: function() {
             // Keep counter of failures
@@ -380,11 +378,9 @@ jQuery.extend(jQuery.fn.typeahead.defaults, {
 })
 
 $(document).ready(function () {
-    // Give every form the CSRF token, for the ones that navigate instead of using ajax.
-    // Done here rather than from a submit handler on purpose: ajaxForm binds straight to the
-    // form so it serializes before a delegated handler ever runs, and the language-change path
-    // on Config->General calls the native form.submit(), which fires no submit event at all.
-    // Adding the field up front is immune to both.
+    // CSRF token for the forms that navigate instead of using ajax. Added up front, not on
+    // submit: ajaxForm serializes before a delegated handler runs, and the language-change
+    // path on Config->General calls form.submit(), which fires no submit event at all.
     $('form').append('<input type="hidden" name="csrf_token" value="' + csrfToken + '">');
 
     /**

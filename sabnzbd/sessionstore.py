@@ -40,24 +40,16 @@ PURGE_INTERVAL = 3600 * 24
 
 
 class AsyncSessionStore:
-    """Async store for web-UI login sessions, in its own database file
-    (sessions.db), available as sabnzbd.session_store.
+    """Async store for web-UI login sessions, in its own sessions.db, available as
+    sabnzbd.session_store.
 
-    Sessions deliberately live outside the history database:
-     - This store is the only reader and writer of its file, so it needs no
-       pooling or coordination with HistoryDBPool, and the auth path never
-       contends with history writers or suffers from history corruption.
-     - All queries run on aiosqlite's worker thread, so the event loop only
-       ever awaits: per-request session checks cannot stall the loop the way
-       a blocking sqlite call (or a pool-checkout wait) would.
-     - The file is deliberately NOT in CONFIG_BACKUP_FILES: sessions are
-       per-browser state that shouldn't move to a restored install, and a
-       lost sessions database only means logging in again.
+    Kept out of the history database: as the only user of its file it needs no pooling and
+    never contends with history writers or suffers their corruption, and running on
+    aiosqlite's worker thread keeps per-request checks off the event loop.
 
-    The connection is opened lazily on the server's event loop and closed by
-    the Starlette lifespan (see interface.create_app). All methods fail
-    closed: on any database error the session is treated as absent and the
-    error logged. A corrupt database file is discarded and recreated.
+    The connection is opened lazily and closed by the Starlette lifespan (see
+    interface.create_app). All methods fail closed: on a database error the session is
+    treated as absent and the error logged, and a corrupt file is discarded and recreated.
     """
 
     def __init__(self, db_path: Optional[str] = None):
@@ -101,16 +93,13 @@ class AsyncSessionStore:
                 await connection.execute("PRAGMA temp_store = MEMORY")
                 # Reduce disk access
                 await connection.execute("PRAGMA mmap_size = 1048576")
-                # Sessions are disposable, so a schema change resets them rather
-                # than migrating: on any user_version mismatch (including a fresh
-                # database, which reports 0) drop the old table and recreate it
-                # below, then stamp the current generation.
+                # Sessions are disposable, so a user_version mismatch drops and
+                # recreates the table rather than migrating it
                 async with connection.execute("PRAGMA user_version") as cursor:
                     version_row = await cursor.fetchone()
                 if not version_row or version_row[0] != DB_SESSIONS_VERSION:
-                    # Say so: from the user's side this logs every remembered browser out, and
-                    # a silent reset looks like sessions randomly stopped being honoured.
-                    # A fresh database reports 0 and has no table to drop, so stay quiet there.
+                    # Worth saying, because it logs every remembered browser out. A fresh
+                    # database reports 0 and has no table to drop, so stay quiet there.
                     if version_row and version_row[0]:
                         logging.info(
                             "Sessions database is generation %s, resetting to %s: logins will be required again",
@@ -136,15 +125,11 @@ class AsyncSessionStore:
 
     async def _maybe_purge(self, connection: aiosqlite.Connection):
         """Opportunistically delete expired sessions, throttled to once per PURGE_INTERVAL.
-        _last_purge starts at 0, so the first call after startup always purges.
 
-        The throttle is stamped before the delete, not after it succeeds, so a purge that
-        fails waits out the full interval rather than being retried. That is deliberate: this
-        runs inside get_session, on the auth path, and an exception here propagates out of the
-        lookup the caller is actually waiting for. Retrying every request would turn one
-        failed housekeeping query into a failed session check on every request, each able to
-        wait out busy_timeout first. Rows outliving a failed purge cost disk and nothing else,
-        because validate_session checks the expiry of the row it reads."""
+        The throttle is stamped before the delete, so a failed purge waits out the interval
+        instead of being retried: this runs inside get_session, where an exception fails the
+        lookup the caller is waiting for. Rows outliving a purge only cost disk, since
+        validate_session checks the expiry of the row it reads."""
         now = time.time()
         if now - self._last_purge >= PURGE_INTERVAL:
             self._last_purge = now

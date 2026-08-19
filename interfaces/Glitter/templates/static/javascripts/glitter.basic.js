@@ -23,17 +23,14 @@ if(isMobile) {
     });
 }
 
-// Every API-call and page POST has to echo the session's CSRF token. Sending it as a header
-// covers all of them at once, including the FormData uploads that bypass callAPI, and a header
-// is something a cross-site page cannot set at all. The two forms that navigate rather than
-// use ajax (logout, shutdown) carry it as a hidden field instead.
+// CSRF token for every request, including the FormData uploads that bypass callAPI; a
+// cross-site page cannot set a header. Logout and shutdown navigate, so they use a field.
 $.ajaxSetup({
     headers: { "X-SABnzbd-CSRF": csrfToken }
 });
 
-// Basic API-call. POST, so the parameters travel in the body: the bulk queue and history
-// actions pass a comma-joined list of job ids, which outgrows what a URL can carry once enough
-// jobs are selected -- sooner still behind a reverse proxy, where 8k header limits are typical.
+// Basic API-call. POST so the bulk queue and history actions, which pass a comma-joined list
+// of job ids, are not capped by the URL length a proxy accepts.
 function callAPI(data, timeout = 10000) {
     // Fill basis var's
     data.output = "json";

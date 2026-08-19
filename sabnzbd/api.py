@@ -1988,12 +1988,10 @@ def build_header(
         header["color_scheme"] = sabnzbd.WEB_COLOR or ""
         header["confighelpuri"] = f"https://sabnzbd.org/wiki/configuration/{sabnzbd.__version__[:3]}/"
 
-        # The CSRF token the page has to echo on state-changing requests, stashed on the
-        # request by SecurityMiddleware (which knows the cookie the client will end up
-        # with, even on the very first load). Deliberately only when there is a request:
-        # build_status() also renders this block, and mode=fullstatus returns the whole
-        # dict through report(), which sets Access-Control-Allow-Origin: *. Adding the
-        # token unconditionally would hand it to any origin that can read that response.
+        # The token the page echoes on state-changing requests, stashed by SecurityMiddleware,
+        # which knows the cookie the client will end up with even on a first load. Only with a
+        # request: build_status() renders this too, and mode=fullstatus returns it through
+        # report(), which sets Access-Control-Allow-Origin: *.
         if request:
             header["csrf_token"] = getattr(request.state, "csrf_token", "")
 

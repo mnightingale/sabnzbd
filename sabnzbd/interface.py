@@ -263,54 +263,39 @@ def check_hostname(request: Request) -> bool:
     return False
 
 
-# Name of the cookie holding the session token: a database-backed login token, or the
-# stateless anonymous tag when no credentials are configured. Deliberately distinct
-# from the Starlette SessionMiddleware cookie (COOKIE_SESSION below), which is an
-# unrelated signed client-side cookie used only for transient RSS flash messages.
+# Holds a database-backed login token, or the anonymous tag when the login is bypassed
 SESSION_COOKIE = "sabnzbd_user_session"
-# Name of the Starlette SessionMiddleware (flash) cookie; see create_app and
-# SecureSessionCookieMiddleware. Not authentication.
+# The SessionMiddleware cookie, used for RSS flash messages only. Not authentication.
 COOKIE_SESSION = "sabnzbd_flash"
 
 
 def use_secure_cookies(request: Request) -> bool:
     """Whether cookies for this request should carry the Secure attribute"""
-    # Taken from the scope, which is what the proxy headers are applied to and what
-    # request.url is built from. The URL itself comes out relative, and its scheme
-    # empty, when there is neither a Host header nor an address to fall back on.
+    # From the scope, which is what the proxy headers are applied to. request.url would
+    # come out relative, and its scheme empty, without a Host header or an address.
     return request.scope.get("scheme") == "https" or bool(cfg.enable_https())
 
 
 # How long a session survives without being used. Expiry slides forward on use, so this is
 # an idle timeout rather than a lifetime.
 SESSION_DURATION = 3600 * 24 * 14  # 14 days
-# The lifetime, counted from the session's created stamp. Sliding expiry alone means a
-# session that keeps being used never ends, so a stolen cookie would stay good indefinitely;
-# past this deadline the session is refused and deleted however active it was, and the user
-# logs in again. Expiry is clamped to it too, so the ordinary purge collects the row.
+# Lifetime from the created stamp, so a session that keeps being used still ends and a
+# stolen cookie cannot stay good forever. Expiry is clamped to it, so the purge collects it.
 SESSION_MAX_AGE = 3600 * 24 * 90  # 90 days
 # Only extend a session's expiry when doing so buys it more than this much extra time, so an
 # active session triggers at most ~1 database write per day instead of one per request
 SESSION_REFRESH_THRESHOLD = 3600 * 24  # 1 day
 
-# Login rate limiting. A client gets LOGIN_MAX_ATTEMPTS failures, then has to sit out
-# LOGIN_LOCKOUT_TIME before it may try again, which leaves an online guesser about a dozen
-# attempts an hour while costing someone who mistypes their password one short wait.
+# Failures a client may make before it has to sit out the lockout, which leaves an online
+# guesser about a dozen attempts an hour
 LOGIN_MAX_ATTEMPTS = 5
 LOGIN_LOCKOUT_TIME = 300  # 5 minutes
 
-# Failed attempts per client address, as {host: (failures, cooldown_expiry)}. Expiries are
-# time.monotonic() stamps, not wall clock: this is a duration to sit out, and an NTP step or a
-# manual clock change would otherwise clear an active cooldown or stretch it past its length.
-#
-# Deliberately in memory rather than in the sessions database: it is short-lived per-process
-# state, and persisting it would mean a schema change -- which logs every remembered browser
-# out -- to inconvenience an attacker who can already restart SABnzbd. Only ever touched from
-# the event loop, so it needs no locking.
-#
-# Keyed on the address rather than the username, so that guessing at one account cannot lock
-# its owner out. Note that behind a reverse proxy without verify_xff_header every client
-# shares the proxy's address, and so shares one allowance.
+# {host: (failures, cooldown_expiry)}, expiries on the monotonic clock so a clock change
+# cannot clear or stretch a cooldown. Kept in memory: it is short-lived per-process state,
+# and only the event loop touches it, so it needs no locking. Keyed on the address rather
+# than the username, so guessing at an account cannot lock its owner out -- but every client
+# behind a proxy without verify_xff_header shares one allowance.
 _login_attempts: dict[str, tuple[int, float]] = {}
 
 
@@ -354,18 +339,13 @@ def clear_login_failures(request: Request):
 def constant_time_equals(presented: Any, expected: str) -> bool:
     """Constant-time comparison of a secret that arrived off the wire against the one expected.
 
-    Both sides are encoded rather than handed to hmac.compare_digest as str, which refuses
-    any string holding a non-ASCII character. These values come straight off the wire -- a
-    cookie or header carrying a byte above 0x7F, which Starlette decodes as latin-1, would
-    otherwise raise TypeError instead of simply failing to match, turning a rejection into a
-    500. backslashreplace so the encode cannot fail either: UTF-8 has no representation for a
-    lone surrogate, and what a body decoder hands back is not ours to depend on.
+    Both sides are encoded, because compare_digest refuses a str holding any non-ASCII
+    character: a cookie or header carrying a byte above 0x7F would raise TypeError instead of
+    failing to match, turning a rejection into a 500. backslashreplace so the encode cannot
+    fail either, UTF-8 having no representation for a lone surrogate.
 
-    Anything that is not text counts as nothing presented. A multipart part carrying one of
-    these field names arrives as an UploadFile rather than a string, so an apikey, token or
-    password sent as a file would otherwise reach .encode() and 500 on the way to being
-    rejected. Compared against nothing rather than str()-ed, so no object's repr can ever
-    stand in for a secret."""
+    Anything that is not text counts as nothing presented: a secret sent as a multipart file
+    part arrives as an UploadFile, and str()-ing it would let a repr stand in for a secret."""
     if not isinstance(presented, str):
         presented = ""
     return hmac.compare_digest(
@@ -377,12 +357,9 @@ def credential_fingerprint() -> str:
     """Fingerprint of the current username/password. Stored with each session and
     compared on validation, so changing either credential invalidates all sessions.
 
-    Unsalted deliberately: a session written weeks ago still has to compare equal, so any salt
-    would have to be a stored one -- a fresh one per call would invalidate every session on
-    sight -- and it would only guard a password that sabnzbd.ini keeps in the clear one
-    directory up. That last part ends when the ini starts storing passwords hashed: salt this
-    from a stored salt then, or keep credentials out of it altogether and compare a marker that
-    changes whenever they do."""
+    Unsalted deliberately: a session written weeks ago still has to compare equal, so the salt
+    would have to be a stored one, and it would only guard a password sabnzbd.ini keeps in the
+    clear anyway. Revisit if the ini ever stores them hashed."""
     return hashlib.sha256(utob("%s:%s" % (cfg.username(), cfg.password()))).hexdigest()
 
 
@@ -410,11 +387,9 @@ async def create_session(request: Request, response: Response, remember_me: bool
         return False
 
     # remember_me yields a persistent cookie; a plain login without remember_me yields a
-    # browser-session cookie, while the row lives on server-side either way. The cookie is
-    # given the absolute deadline rather than the idle timeout, because the idle timeout
-    # slides and the server is the one enforcing it: a cookie capped at SESSION_DURATION
-    # would log an active user out after 14 days for no reason, and one that outlived
-    # SESSION_MAX_AGE could never be honoured anyway.
+    # browser-session cookie; the row lives server-side either way. Given the absolute
+    # deadline, not the idle timeout: the server slides and enforces that one, so a cookie
+    # capped at SESSION_DURATION would log an active user out for no reason.
     max_age = SESSION_MAX_AGE if remember_me else None
     response.set_cookie(
         SESSION_COOKIE,
@@ -443,13 +418,10 @@ def login_bypassed(request: Request) -> bool:
     return cfg.inet_exposure() == 5 and check_access(request, access_type=6)
 
 
-# Anonymous sessions (used when the login is bypassed, so the frontend can authenticate
-# API calls by cookie without the apikey) are stateless: the cookie holds an HMAC tag
-# instead of a database-backed token, so cookie-less clients (bots, scanners) cannot
-# grow the sessions table by minting a row per request.
-# The key is regenerated each run; after a restart the next page load simply
-# receives a fresh cookie. All anonymous clients share the same tag: it carries
-# no identity, it only proves the client loaded a UI page from this instance.
+# Anonymous sessions are issued where the login is bypassed, so the frontend can still
+# authenticate by cookie. Stateless -- the cookie holds an HMAC tag rather than a stored
+# token -- so bots and scanners cannot grow the sessions table a row per request. The tag
+# is shared and carries no identity: it only proves the client loaded a page from this run.
 _ANONYMOUS_SESSION_KEY = secrets.token_bytes(32)
 
 
@@ -481,23 +453,17 @@ def create_anonymous_session(request: Request, response: Response):
     )
 
 
-# CSRF tokens are derived from the session cookie rather than stored: a session's token
-# is hmac(_CSRF_KEY, cookie_value), so it is bound to that session, dies with it, and
-# needs neither a column in the sessions database nor a lookup to compute. The key is
-# regenerated each run like _ANONYMOUS_SESSION_KEY, so a page left open across a restart
-# holds a stale token; check_apikey answers those with a 401 so the frontend reloads.
+# A token is hmac(_CSRF_KEY, cookie_value): bound to its session, dying with it, needing
+# neither storage nor a lookup. The key is regenerated each run, so a page left open across
+# a restart holds a stale token; check_apikey answers those with a 401 to reload.
 #
-# Unlike the cookie, the token is NOT sent automatically by the browser: it is rendered
-# into the page ($csrf_token) and echoed back in a form field or the header below. That
-# is what makes it a CSRF defence, because a cross-site page can read neither the page
-# (CORS) nor the httponly cookie. SameSite=Strict on its own cannot do this job: it is
-# not origin-scoped, so a page served from another port on the same host counts as
-# same-site and its forms do carry the session cookie.
+# Unlike the cookie it is not sent automatically: it is rendered into the page and echoed
+# back in the header or a field, and a cross-site page can read neither the page (CORS) nor
+# the httponly cookie. SameSite=Strict cannot do this job alone because it is not
+# origin-scoped -- another port on the same host is same-site and its forms send the cookie.
 #
-# Login sessions get a token each; all anonymous clients share one, since anonymous
-# sessions deliberately have no database row to hang a per-client value on. That is
-# sound: reading the shared token means fetching a page from this instance, and anyone
-# who can do that can make the request directly anyway.
+# All anonymous clients share one token, having no row to hang a per-client value on. Sound
+# enough: reading it means fetching a page from this instance, which is all it proves.
 _CSRF_KEY = secrets.token_bytes(32)
 CSRF_HEADER = "X-SABnzbd-CSRF"
 CSRF_FIELD = "csrf_token"
@@ -516,15 +482,12 @@ def csrf_token_for(cookie_value: str) -> str:
 def presented_csrf_token(request: Request, header_only: bool = False) -> str:
     """The CSRF token this request offers, from the header or a form field.
 
-    The header covers every XHR (one $.ajaxSetup per skin) and cannot be set cross-site at
-    all. The field additionally serves the handful of native form navigations, which cannot
-    send headers, and on a page route it really is a field: those params are the form body
+    The header covers every XHR and cannot be set cross-site; the field serves the few native
+    form navigations, which cannot send headers. On a page route the params are the form body
     only, so a ?csrf_token= is invisible here by design.
 
-    header_only is for /api, the one route whose params are merged with the query string.
-    Accepting a field there would accept a token from a URL, which puts it in access logs and
-    Referer headers and drops it onto a channel an <img> can reach -- so the API takes it from
-    the header alone, which is what lets it rely on the CORS preflight."""
+    header_only is for /api, whose params are merged with the query string: a token from a URL
+    would land in access logs and Referer headers, and could be sent by an <img>."""
     if header_only:
         return request.headers.get(CSRF_HEADER) or ""
     presented = request.headers.get(CSRF_HEADER) or request_params(request).get(CSRF_FIELD) or ""
@@ -591,9 +554,8 @@ async def _validate_session(request: Request) -> bool:
     if not session:
         return False
 
-    # Reject (and clean up) sessions that are idle-expired, past their absolute deadline, or
-    # from before a credential change. The absolute check is not redundant with the clamp
-    # below: it also covers rows written before this cap existed, or by an older version.
+    # Reject and clean up sessions that are idle-expired, past the deadline, or from before a
+    # credential change. The deadline check also catches rows written before the cap existed.
     if (
         session["expires"] < now
         or session["created"] + SESSION_MAX_AGE < now
@@ -602,21 +564,14 @@ async def _validate_session(request: Request) -> bool:
         await sabnzbd.session_store.delete_session(token_hash)
         return False
 
-    # Slide the idle timeout forward, never past the absolute deadline, and never backwards:
-    # a row written by an older version can carry a longer expiry than today's window, and
-    # using a session should not shorten it.
+    # Slide the idle timeout forward, never past the deadline and never backwards: an older
+    # version's row can carry a longer expiry, and using a session should not shorten it.
     new_expires = max(session["expires"], min(now + SESSION_DURATION, session["created"] + SESSION_MAX_AGE))
 
-    # Write when the slide gains real time, or when the client's address or browser changed.
-    # The first keeps an idle-timeout refresh down to roughly one write a day per session --
-    # and stops entirely once the expiry is pinned to the deadline, where sliding can gain
-    # nothing. The second keeps the row describing where the session is actually being used
-    # rather than lagging a day behind, which is what makes it worth showing to the user.
-    #
-    # Only a value we actually have counts as a change: touch_session keeps the stored one
-    # when passed None, so treating a missing User-Agent as different would write on every
-    # single request forever. A client whose address genuinely changes per request (a rotating
-    # proxy pool in front of a trusted verify_xff_header) does pay a write per request.
+    # Write when the slide gains real time, keeping refreshes to about one a day, or when the
+    # client moved, so the row shows where the session is in use rather than lagging a day.
+    # Only a value we have counts as a change: touch_session keeps the stored one when passed
+    # None, so treating a missing User-Agent as different would write on every request.
     last_ip = client_address(request).host
     user_agent = request.headers.get("User-Agent")
     moved = (last_ip and session["last_ip"] != last_ip) or (user_agent and session["user_agent"] != user_agent)
@@ -672,14 +627,11 @@ async def check_apikey(request: Request) -> Optional[Response]:
     if mode in ("version", "auth"):
         return None
 
-    # A valid browser session (login or anonymous cookie) authorizes API calls without the
-    # apikey, so the frontend no longer needs the key embedded in the page — but only when it
-    # also echoes that session's CSRF token in the header, which no cross-site page can set.
-    # That header is what protects the API: unlike the cookie it is neither sent automatically
-    # nor settable by a form, an image or a navigation, and a cross-origin fetch that sets it
-    # is preflighted, which SABnzbd answers with a bare 405. Header only, so that stays true:
-    # this route merges the query string into its params, so honouring the field as well would
-    # accept a token from a URL.
+    # A session cookie authorizes the frontend without the apikey, but only when it also
+    # echoes the session's CSRF token in the header. That header is what protects the API: it
+    # is not sent automatically, a form or image cannot set it, and a cross-origin fetch that
+    # does is preflighted, which SABnzbd answers with a bare 405. Header only, because this
+    # route merges the query string in and a field would accept a token from a URL.
     cookie_ok = await validate_any_session(request)
     if cookie_ok and csrf_token_matches(request, header_only=True):
         return None
@@ -708,11 +660,9 @@ async def check_apikey(request: Request) -> Optional[Response]:
             )
         else:
             log_warning_and_ip(request, T("Refused connection from:"))
-        # 401 only where reloading the page genuinely fixes it, because that is how the
-        # frontend answers a 401: a session that no longer validates (a restart regenerated
-        # the anonymous key, the login session expired, credentials changed), or a token from
-        # before a restart rotated _CSRF_KEY. A valid session sending no token at all is not
-        # something a reload repairs, so it gets a 403 instead of an endless reload loop.
+        # The frontend answers a 401 by reloading, so only send one where that fixes it: a
+        # session or token left stale by a restart, expiry or credential change. A valid
+        # session sending no token at all gets a 403, or it would reload forever.
         if not cookie_ok or stale_token:
             return PlainTextResponse(_MSG_SESSION_EXPIRED, status_code=401)
         return forbidden(_MSG_MISSING_SESSION)
@@ -741,12 +691,9 @@ def log_warning_and_ip(request: Request, txt: str):
         logging.warning("%s %s", txt, client_address_info(request))
 
 
-# CherryPy collapsed these API routing/scalar keys to their first value when a key
-# was supplied more than once (e.g. ?mode=queue&mode=version resolved to "queue"),
-# whereas Starlette's .get() would otherwise return the last. Dispatch and the
-# handlers still assume a single value, so the merged API routes reproduce this.
-# Genuinely multi-valued keys (keyword, file uploads) are left alone so getlist()
-# still sees every value.
+# CherryPy resolved a repeated key to its first value (?mode=queue&mode=version gave
+# "queue") where Starlette's .get() returns the last, and the handlers still assume a single
+# value. Multi-valued keys (keyword, file uploads) are left for getlist() to see in full.
 API_FIRST_WINS_KEYS = ("mode", "name", "value", "value2", "value3", "start", "limit", "search")
 
 
@@ -759,21 +706,15 @@ def is_form_post(request: Request) -> bool:
 async def get_request_params(request: Request, merge_query: bool = False) -> MultiDict | QueryParams:
     """Parse the request's parameters.
 
-    A page GET renders a page and never changes state, so only the URL query
-    string is used, returned as the request's immutable QueryParams. A page POST
-    reads the form body only (urlencoded or multipart, with file uploads kept as
-    UploadFile objects) into a mutable MultiDict; the query string is ignored, so
-    parameters cannot be smuggled into form handlers via the URL. A POST without a
-    form body yields an empty MultiDict.
+    A page GET uses the query string alone, as the request's immutable QueryParams. A page
+    POST reads the form body only (urlencoded or multipart, file uploads kept as UploadFile)
+    into a mutable MultiDict, so parameters cannot be smuggled into a form handler through
+    the URL; without a body it gets an empty one.
 
-    The merged API route (merge_query, i.e. /api, the only route left with
-    check_api_key) keeps the CherryPy behavior instead: 3rd-party clients
-    traditionally POST an NZB as a multipart body while passing mode/apikey/output
-    in the query string, so the form body and query string are merged into a
-    mutable MultiDict, the body winning per key. A key supplied only in the query
-    string keeps all of its values. GET, form POST and bodyless POST all take this
-    same path, so a duplicated key resolves identically regardless of method, and
-    the API scalar keys collapse to their first value exactly as CherryPy did.
+    The merged API route (merge_query, i.e. /api) keeps the CherryPy behavior: clients POST
+    an NZB as a multipart body while passing mode/apikey/output in the query string, so the
+    two are merged with the body winning per key. Every method takes this same path, so a
+    duplicated key resolves identically and the API scalar keys collapse to their first.
 
     ParamsMiddleware stores the result on request.state.params so that
     request_params(request) returns it in every handler without an extra await.
@@ -870,16 +811,12 @@ class SecurityMiddleware:
             request = Request(scope, receive)
             if response := await self.denied_response(request):
                 return await response(scope, receive, send)
-            # Whenever the login is bypassed (see login_bypassed), issue a stateless anonymous
-            # session cookie on the UI page routes so the frontend authenticates API calls by
-            # cookie instead of the apikey, and POSTs pass the CSRF guard in denied_response.
-            # Limited to check_for_login routes (the real UI pages) so bots hitting
-            # robots.txt/favicon and the login/logout routes don't get one, and API routes never
-            # set it: the browser always loads a page (and its cookie) first. Skipped when the
-            # client already holds a usable session, so a login session created before the
-            # bypass applied (a laptop that was remote and is now on the local network) is not
-            # overwritten by the anonymous tag. Pure ASGI, so the cookie is injected into the
-            # response start rather than onto a Response.
+            # Where the login is bypassed, issue an anonymous cookie so the frontend can
+            # authenticate by cookie and its POSTs pass the CSRF guard. UI pages only: bots
+            # hitting robots.txt and the API get none, since a browser loads a page first.
+            # Skipped when the client already holds a session, so a login session made before
+            # the bypass applied is not overwritten. Injected into the response start, this
+            # being pure ASGI.
             if (
                 self.check_for_login
                 and not self.check_api_key
@@ -887,10 +824,9 @@ class SecurityMiddleware:
                 and not await validate_any_session(request)
             ):
                 send = _anonymous_session_sender(request, send)
-                # The handler renders the page before that Set-Cookie reaches the client, so
-                # the token it embeds has to belong to the cookie we are about to issue, not
-                # to the absent or stale one this request arrived with. Getting this wrong
-                # ships a token matching nothing on every first page load.
+                # The page is rendered before that Set-Cookie reaches the client, so its
+                # token has to belong to the cookie being issued, not the one that arrived,
+                # or every first page load ships a token matching nothing.
                 request.state.csrf_token = csrf_token_for(anonymous_session_tag())
             else:
                 request.state.csrf_token = csrf_token_for(request.cookies.get(SESSION_COOKIE, ""))
@@ -906,12 +842,9 @@ class SecurityMiddleware:
         if not check_access(request, access_type=self.access_type, warn_user=True):
             return forbidden(_MSG_ACCESS_DENIED)
 
-        # A client that presented an apikey to a route that does not take one is automation
-        # reaching for the interface's own pages. Both refusals below then say so plainly
-        # rather than sending it to the login form or talking about session tokens: it is not
-        # a browser to redirect, and a client that followed the redirect would read the form's
-        # 200 as success. Only consulted when the request is refused anyway, so a stray apikey
-        # on a URL a logged-in browser opens still just gets the page.
+        # An apikey on a route that does not take one is automation reaching for the UI pages,
+        # so the refusals below say that rather than redirecting to a login form it cannot use
+        # and would read as success. Only consulted once the request is refused anyway.
         offered_apikey = not self.check_api_key and bool(
             request_params(request).get("apikey") or request.query_params.get("apikey")
         )
@@ -923,13 +856,10 @@ class SecurityMiddleware:
                 return forbidden(_MSG_APIKEY_NOT_ON_PAGES)
             return base_redirect_response("/login")
 
-        # CSRF guard for state-changing requests: a page POST has to echo the token belonging
-        # to its session, which only a page served by this instance could have read. Applies to
-        # every such route unconditionally, rather than only where login_bypassed() holds:
-        # check_login is not a CSRF defence in either case. Where it passes with no cookie the
-        # request carries no proof of origin at all, and where it requires the login cookie it
-        # is relying on SameSite=Strict, which is not origin-scoped — a page served from
-        # another port on the same host is same-site and its forms do send the cookie.
+        # CSRF guard: a page POST has to echo its session's token, which only a page from this
+        # instance could have read. Unconditional, because check_login is no CSRF defence
+        # either way: bypassed it proves nothing, and otherwise it leans on SameSite=Strict,
+        # which is not origin-scoped -- another port on this host is same-site.
         if self.check_csrf and request.method == "POST" and not await validate_csrf(request):
             # A token that simply does not match is a page left open across a restart
             if presented_csrf_token(request) and not offered_apikey:
@@ -1008,13 +938,9 @@ def main_index(request: Request):
 
 @secured_expose(route="/shutdown")
 async def shutdown(request: Request):
-    """Shut down and show a goodbye page, for UI users; automation should use
-    the mode=shutdown API-call. Only a POST shuts down: the UI submits it as a
-    form, so the browser navigates to this response, and it is authorized like
-    any other page POST — a SameSite=Strict session cookie (login or anonymous),
-    which a cross-site page cannot send, so it cannot trigger a shutdown. A GET
-    (stale bookmark, typed URL or pre-1.x link) must never shut down anything
-    and is sent back to the main page."""
+    """Shut down and show a goodbye page, for UI users; automation should use the
+    mode=shutdown API-call. Only a POST shuts down, authorized like any other page POST, so a
+    stale bookmark or a cross-site link cannot trigger one."""
     if request.method != "POST":
         return base_redirect_response("/")
 
@@ -1022,9 +948,8 @@ async def shutdown(request: Request):
     return PlainTextResponse(T("SABnzbd shutdown finished"))
 
 
-# check_csrf=False: the API has its own rule, enforced in check_apikey, because only that
-# function knows whether the cookie or the apikey authorized the call. Applying the page
-# guard here as well would reject 3rd-party clients that send a valid key.
+# check_csrf=False: only check_apikey knows whether the cookie or the apikey authorized the
+# call, so it enforces the rule; the page guard would reject valid 3rd-party keys.
 @secured_expose(route="/api", check_api_key=True, check_csrf=False, access_type=1)
 async def api(request: Request):
     """Redirect to API-handler, we check the access_type in the API-handler"""
@@ -1035,15 +960,12 @@ async def api(request: Request):
 def log(request: Request):
     """Download the log plus a sanitized copy of the ini, for the Help window's log button.
 
-    A page route rather than a link to the mode=showlog API-call because the interface reaches
-    it by navigating: a navigation cannot carry the CSRF header a cookie-authorized API call
-    requires, but a form can carry the token as a field, which page routes accept.
+    A page route rather than the mode=showlog API-call because the interface navigates here,
+    and a navigation cannot carry the CSRF header, only the field a page route accepts.
 
-    POST rather than GET, even though it changes nothing, so that the rule stays plain --
-    nothing sensitive is served without the token. This hands out the log and a copy of the
-    ini, and a GET would be reachable as a cross-site navigation: the response is not readable
-    cross-origin, but a victim could still be made to download their own log. Automation keeps
-    using mode=showlog with an apikey."""
+    POST although it changes nothing, so nothing sensitive is served without a token: a GET
+    would be reachable as a cross-site navigation, which could make a victim download their
+    own log. Automation keeps using mode=showlog with an apikey."""
     return build_log_response()
 
 
@@ -1225,9 +1147,8 @@ def get_access_info(request: Optional[Request] = None) -> list[str]:
 ##############################################################################
 
 
-# check_csrf=False: a login POST is the one state-changing request that can legitimately
-# arrive from a client that has never held a session, so demanding a token would make
-# logging in impossible. Login CSRF only lets an attacker log the victim in as themselves.
+# check_csrf=False: logging in is the one state-changing request from a client that has
+# never held a session. Login CSRF only lets an attacker log the victim in as themselves.
 @secured_expose(route="/login", check_for_login=False, check_csrf=False)
 async def login_index(request: Request):
     # Already logged in, or no username/password set at all
@@ -1240,9 +1161,8 @@ async def login_index(request: Request):
     retry_after = 0
     if request.method == "POST":
         if retry_after := login_cooldown_remaining(request):
-            # Refused without looking at what was submitted: the whole point is to deny this
-            # client another guess, and checking anyway would let it keep testing passwords
-            # for as long as it is willing to be told no.
+            # Refused without looking at what was submitted, or the client could keep
+            # testing passwords for as long as it is willing to be told no
             error = T("Too many failed login attempts, try again later.")
             status_code = 429
             logging.warning(T("Login attempt refused, too many failures from %s"), client_address_info(request))
@@ -1251,9 +1171,8 @@ async def login_index(request: Request):
             password = request_params(request).get("password")
             remember_me = bool(request_params(request).get("remember_me", False))
 
-            # Constant-time comparison of submitted credentials against the configured
-            # username/password. Both fields are always compared (no short-circuit), so
-            # neither the comparison time nor an early exit leaks which field matched.
+            # Both fields are always compared, so neither the timing nor an early exit
+            # leaks which one matched
             username_ok = constant_time_equals(username or "", cfg.username())
             password_ok = constant_time_equals(password or "", cfg.password())
             if username_ok and password_ok:
@@ -3109,11 +3028,8 @@ def create_app() -> Starlette:
         Middleware(RequestLoggingMiddleware),
         Middleware(GZipMiddleware, minimum_size=1000, compresslevel=2),
         Middleware(SecureSessionCookieMiddleware),
-        # Signed session cookie, used for short-lived per-client UI state such as the
-        # RSS read-out result message (flash). Secret key is regenerated each run,
-        # so sessions naturally expire on restart, which is fine for flash messages.
-        # This is NOT authentication: the authenticated-user session lives in a separate,
-        # DB-backed cookie (SESSION_COOKIE = "sabnzbd_user_session").
+        # Signed cookie for short-lived UI state such as the RSS read-out flash, its key
+        # regenerated each run. Not authentication: that lives in SESSION_COOKIE.
         Middleware(
             SessionMiddleware,
             secret_key=secrets.token_hex(),
