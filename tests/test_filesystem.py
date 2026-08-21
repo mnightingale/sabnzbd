@@ -1642,10 +1642,18 @@ class TestRetrying:
             monitor.sample()
         assert monitor.retry_after <= filesystem.RETRY_AFTER_MAX
 
-    def test_the_ordered_path_is_not_measured(self, monitor, clock, writes):
+    def test_the_ordered_path_does_not_change_the_mode(self, monitor, clock, writes):
+        """Its writes are the runs the assembler gathered, not scattered ones, so they
+        cannot argue for going back to streaming - only the clock does that."""
         feed(monitor, clock, writes, samples=filesystem.SLOW_SAMPLES_BEFORE_BACKOFF, **SLOW)
         feed(monitor, clock, writes, samples=5, **FAST)
-        assert monitor.cost is None
+        assert monitor.allows_streaming() is False
+
+    def test_the_ordered_path_is_still_measured(self, monitor, clock, writes):
+        """The downloader paces against the write rate in both modes"""
+        feed(monitor, clock, writes, samples=filesystem.SLOW_SAMPLES_BEFORE_BACKOFF, **SLOW)
+        feed(monitor, clock, writes, samples=5, **FAST)
+        assert monitor.write_rate() > 0
 
     def test_a_retry_does_not_inherit_the_ordered_path_writes(self, monitor, clock, writes):
         feed(monitor, clock, writes, samples=filesystem.SLOW_SAMPLES_BEFORE_BACKOFF, **SLOW)
@@ -1658,12 +1666,35 @@ class TestRetrying:
         feed(monitor, clock, writes, samples=1, **SLOW)
         assert monitor.slow_samples == 1
 
-    def test_a_retry_starts_from_no_measurement(self, monitor, clock, writes):
+    def test_a_retry_starts_from_no_streak(self, monitor, clock, writes):
         feed(monitor, clock, writes, samples=filesystem.SLOW_SAMPLES_BEFORE_BACKOFF, **SLOW)
         clock.advance(filesystem.RETRY_AFTER)
         monitor.sample()
-        assert monitor.cost is None
         assert monitor.slow_samples == 0
+
+
+class TestWriteRate:
+    def test_unmeasured_is_none(self, monitor):
+        assert monitor.write_rate() is None
+
+    def test_it_reports_what_the_disk_drained(self, monitor, clock, writes):
+        """Bytes over the wall clock, not over the time spent inside write()"""
+        feed(monitor, clock, writes, samples=3, **SLOW)
+        assert monitor.write_rate() == pytest.approx(SLOW["written"] / filesystem.SAMPLE_INTERVAL, rel=0.01)
+
+    def test_it_is_not_the_rate_inside_write(self, monitor, clock, writes):
+        """SLOW writes 8 MB but spends only 400 ms of the 2 s interval doing it, so
+        the two readings are five times apart and only one paces the downloader."""
+        feed(monitor, clock, writes, samples=3, **SLOW)
+        inside_write = SLOW["written"] / (SLOW["nanos"] / 1e9)
+        assert monitor.write_rate() < inside_write / 4
+
+    def test_it_survives_a_mode_change(self, monitor, clock, writes):
+        """Dropped on demotion, the downloader would have nothing to pace against for
+        several seconds at exactly the moment the disk is struggling."""
+        feed(monitor, clock, writes, samples=filesystem.SLOW_SAMPLES_BEFORE_BACKOFF, **SLOW)
+        assert monitor.allows_streaming() is False
+        assert monitor.write_rate() > 0
 
 
 class TestReporting:
