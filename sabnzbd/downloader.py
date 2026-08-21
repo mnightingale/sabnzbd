@@ -843,12 +843,12 @@ class Downloader(Thread):
         if (delay := sabnzbd.Assembler.delay()) <= 0:
             return
 
-        sabnzbd.BPSMeter.delayed_assembler += 1
         time.sleep(delay)
         sabnzbd.BPSMeter.update()
 
         if time.monotonic() >= self.next_delay_log:
             self.next_delay_log = time.monotonic() + 1.0
+            sabnzbd.BPSMeter.delayed_assembler += 1
             logging.debug(
                 "Delaying %.0f ms per pass - Assembler queue: %s - disk %s/s",
                 delay * 1000,
