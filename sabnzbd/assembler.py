@@ -47,9 +47,9 @@ from sabnzbd.filesystem import (
 from sabnzbd.constants import (
     Status,
     GIGI,
-    SOFT_ASSEMBLER_QUEUE_LIMIT,
-    ASSEMBLER_DELAY_FACTOR_DIRECT_WRITE,
-    ARTICLE_CACHE_NON_CONTIGUOUS_FLUSH_PERCENTAGE,
+    ASSEMBLER_DRAIN_MARGIN,
+    ASSEMBLER_MAX_DELAY,
+    DOWNLOADER_TICK,
     ASSEMBLER_WRITE_INTERVAL,
     ASSEMBLER_TRIGGER_PERCENTAGE,
     ASSEMBLER_MAX_OPEN_WRITERS,
@@ -76,7 +76,6 @@ class Assembler(Thread):
         self.cache_limit: int = 0
         # Total bytes required per file to trigger the assembler
         self.assembler_trigger: int = 0
-        self.delay_trigger: int = 1
         self.queue: queue.Queue[AssemblerTask] = queue.Queue()
         self.queued_lock = threading.Lock()
         self.queued_nzf: set[str] = set()
@@ -95,32 +94,10 @@ class Assembler(Thread):
         self.cache_limit = limit
         self.assembler_trigger = max(1, int(self.cache_limit * ASSEMBLER_TRIGGER_PERCENTAGE))
         self.change_direct_write(cfg.direct_write())
-        logging.debug(
-            "Assembler trigger=%s, delay=%s",
-            to_units(self.assembler_trigger),
-            to_units(self.delay_trigger),
-        )
+        logging.debug("Assembler trigger=%s", to_units(self.assembler_trigger))
 
     def change_direct_write(self, direct_write: bool) -> None:
         self.direct_write = direct_write
-        self.calculate_delay_trigger()
-
-    def calculate_delay_trigger(self):
-        """Point at which downloader should start being delayed, recalculated when cache limit or direct write changes"""
-        self.delay_trigger = int(
-            max(
-                (
-                    750_000 * self.max_queue_size * ASSEMBLER_DELAY_FACTOR_DIRECT_WRITE
-                    if self.direct_write
-                    else 750_000 * self.max_queue_size
-                ),
-                (
-                    self.cache_limit * ARTICLE_CACHE_NON_CONTIGUOUS_FLUSH_PERCENTAGE
-                    if self.direct_write
-                    else min(self.assembler_trigger * self.max_queue_size, int(self.cache_limit * 0.5))
-                ),
-            )
-        )
 
     def is_busy(self) -> bool:
         """Returns True if the assembler thread has at least one NzbFile it is assembling"""
@@ -303,17 +280,28 @@ class Assembler(Thread):
         return False
 
     def delay(self) -> float:
-        """Calculate how long if at all the downloader thread should sleep to allow the assembler to catch up"""
-        ready_total = self.total_ready_bytes()
-        # Below trigger: no delay possible
-        if ready_total <= self.delay_trigger:
-            return 0
-        pressure = (ready_total - self.delay_trigger) / max(1.0, self.cache_limit - self.delay_trigger)
-        if pressure <= SOFT_ASSEMBLER_QUEUE_LIMIT:
-            return 0
-        # 50-100%: 0-0.25 seconds, capped at 0.15
-        sleep = min((pressure - SOFT_ASSEMBLER_QUEUE_LIMIT) / 2, 0.15)
-        return max(0.001, sleep)
+        """How long the downloader should sleep before its next pass.
+
+        Whichever of two demands is greater, so either can throttle on its own.
+        """
+        fill = min(1.0, self.total_ready_bytes() / max(1.0, self.cache_limit))
+
+        # Holds the download to the share of the cache still free, so it approaches a
+        # stop as the cache approaches its limit. Once the limit is reached every
+        # further article is written to the admin folder instead, and that write
+        # competes for the disk with the assembler - which is the only thing that can
+        # free the cache again.
+        crowded = DOWNLOADER_TICK * fill / max(1e-6, 1.0 - fill)
+
+        # Holds the download to what the disk drains, which is what keeps the cache
+        # from filling at all. Says nothing while no write has been measured yet.
+        paced = 0.0
+        if (write_rate := sabnzbd.WriteMonitor.write_rate()) and (download_rate := sabnzbd.BPSMeter.bps) > 0:
+            target = write_rate * ASSEMBLER_DRAIN_MARGIN
+            paced = DOWNLOADER_TICK * max(0.0, download_rate / target - 1.0)
+
+        # A pass then takes tick + delay to fetch what it used to fetch in tick
+        return min(ASSEMBLER_MAX_DELAY, max(crowded, paced))
 
     def run(self):
         while 1:
