@@ -50,8 +50,6 @@ from sabnzbd.constants import (
     ASSEMBLER_DRAIN_MARGIN,
     ASSEMBLER_MAX_DELAY,
     DOWNLOADER_TICK,
-    ASSEMBLER_DELAY_FACTOR_DIRECT_WRITE,
-    ARTICLE_CACHE_NON_CONTIGUOUS_FLUSH_PERCENTAGE,
     ASSEMBLER_WRITE_INTERVAL,
     ASSEMBLER_TRIGGER_PERCENTAGE,
     ASSEMBLER_MAX_OPEN_WRITERS,
@@ -78,7 +76,6 @@ class Assembler(Thread):
         self.cache_limit: int = 0
         # Total bytes required per file to trigger the assembler
         self.assembler_trigger: int = 0
-        self.delay_trigger: int = 1
         self.queue: queue.Queue[AssemblerTask] = queue.Queue()
         self.queued_lock = threading.Lock()
         self.queued_nzf: set[str] = set()
@@ -97,32 +94,10 @@ class Assembler(Thread):
         self.cache_limit = limit
         self.assembler_trigger = max(1, int(self.cache_limit * ASSEMBLER_TRIGGER_PERCENTAGE))
         self.change_direct_write(cfg.direct_write())
-        logging.debug(
-            "Assembler trigger=%s, delay=%s",
-            to_units(self.assembler_trigger),
-            to_units(self.delay_trigger),
-        )
+        logging.debug("Assembler trigger=%s", to_units(self.assembler_trigger))
 
     def change_direct_write(self, direct_write: bool) -> None:
         self.direct_write = direct_write
-        self.calculate_delay_trigger()
-
-    def calculate_delay_trigger(self):
-        """Point at which downloader should start being delayed, recalculated when cache limit or direct write changes"""
-        self.delay_trigger = int(
-            max(
-                (
-                    750_000 * self.max_queue_size * ASSEMBLER_DELAY_FACTOR_DIRECT_WRITE
-                    if self.direct_write
-                    else 750_000 * self.max_queue_size
-                ),
-                (
-                    self.cache_limit * ARTICLE_CACHE_NON_CONTIGUOUS_FLUSH_PERCENTAGE
-                    if self.direct_write
-                    else min(self.assembler_trigger * self.max_queue_size, int(self.cache_limit * 0.5))
-                ),
-            )
-        )
 
     def is_busy(self) -> bool:
         """Returns True if the assembler thread has at least one NzbFile it is assembling"""
@@ -309,8 +284,7 @@ class Assembler(Thread):
 
         Whichever of two demands is greater, so either can throttle on its own.
         """
-        ready_total = self.total_ready_bytes()
-        fill = min(1.0, max(0.0, ready_total - self.delay_trigger) / max(1.0, self.cache_limit - self.delay_trigger))
+        fill = min(1.0, self.total_ready_bytes() / max(1.0, self.cache_limit))
 
         # Holds the download to the share of the cache still free, so it approaches a
         # stop as the cache approaches its limit. Once the limit is reached every

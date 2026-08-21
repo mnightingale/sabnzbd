@@ -117,7 +117,6 @@ ASSEMBLER_TRIGGER_PERCENTAGE = 0.05
 # open/close pair, but they are a limited resource shared with every socket the
 # downloader holds, so the cache is bounded rather than growing with the queue.
 ASSEMBLER_MAX_OPEN_WRITERS = 32
-ASSEMBLER_DELAY_FACTOR_DIRECT_WRITE = 1.5
 ASSEMBLER_WRITE_INTERVAL = 5.0
 NNTP_BUFFER_SIZE = int(256 * KIBI)
 NTTP_MAX_BUFFER_SIZE = int(10 * MEBI)

@@ -886,7 +886,6 @@ class TestDelay:
     def assembler(self, monkeypatch):
         instance = Assembler.__new__(Assembler)
         instance.cache_limit = 1024 * MB
-        instance.delay_trigger = 512 * MB
         instance.ready_bytes = {}
         instance.ready_bytes_lock = threading.Lock()
         monkeypatch.setattr(sabnzbd, "BPSMeter", SimpleNamespace(bps=0.0), raising=False)
@@ -918,9 +917,9 @@ class TestDelay:
         achieved = 100 * DOWNLOADER_TICK / (DOWNLOADER_TICK + delay)
         assert achieved == pytest.approx(40 * ASSEMBLER_DRAIN_MARGIN, rel=0.01)
 
-    def test_a_disk_keeping_up_is_not_throttled(self, assembler, monkeypatch):
+    def test_an_empty_cache_and_a_disk_keeping_up_is_not_throttled(self, assembler, monkeypatch):
         self.rates(monkeypatch, download_mbps=40, write_mbps=100)
-        self.backlog(assembler, 400)
+        self.backlog(assembler, 0)
         assert assembler.delay() == 0
 
     def test_a_full_cache_throttles_even_when_the_rates_look_healthy(self, assembler, monkeypatch):
@@ -934,7 +933,7 @@ class TestDelay:
 
     def test_the_download_gets_the_share_of_the_cache_still_free(self, assembler, monkeypatch):
         self.rates(monkeypatch, download_mbps=100, write_mbps=10_000)
-        for used, free in ((512, 1.0), (640, 0.75), (768, 0.5), (896, 0.25)):
+        for used, free in ((0, 1.0), (256, 0.75), (512, 0.5), (768, 0.25)):
             self.backlog(assembler, used)
             achieved = 100 * DOWNLOADER_TICK / (DOWNLOADER_TICK + assembler.delay())
             assert achieved == pytest.approx(100 * free, rel=0.01)
@@ -963,11 +962,21 @@ class TestDelay:
         self.backlog(assembler, 900)
         assert assembler.delay() > paced
 
+    def test_the_ramp_does_not_depend_on_the_write_mode(self, assembler, monkeypatch):
+        """It used to start at a trigger that sat at 90% of the cache with direct write
+        on and 50% with it off, leaving the mode that fills fastest the least room."""
+        self.rates(monkeypatch, download_mbps=100, write_mbps=10_000)
+        self.backlog(assembler, 512)
+        assembler.direct_write = True
+        with_direct_write = assembler.delay()
+        assembler.direct_write = False
+        assert assembler.delay() == with_direct_write
+
     def test_the_stricter_demand_wins_rather_than_both_adding(self, assembler, monkeypatch):
         """Both terms are asking for the same thing - a slower download - so adding
         them would throttle for the sum of two answers to one question."""
         self.rates(monkeypatch, download_mbps=60, write_mbps=50)
-        self.backlog(assembler, 768)
+        self.backlog(assembler, 512)
         # fill is 0.5, so the cache alone asks for one tick; the rates ask for less
         assert assembler.delay() == pytest.approx(DOWNLOADER_TICK, rel=0.01)
 
@@ -978,7 +987,7 @@ class TestDelay:
 
     def test_an_unmeasured_disk_falls_back_to_the_cache(self, assembler, monkeypatch):
         self.rates(monkeypatch, download_mbps=100, write_mbps=None)
-        self.backlog(assembler, 400)
+        self.backlog(assembler, 0)
         assert assembler.delay() == 0
-        self.backlog(assembler, 768)
+        self.backlog(assembler, 512)
         assert assembler.delay() == pytest.approx(DOWNLOADER_TICK)
