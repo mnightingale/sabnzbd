@@ -35,6 +35,7 @@ import fnmatch
 import stat
 import ctypes
 import random
+from collections import deque
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Iterable, Optional, BinaryIO
@@ -1395,8 +1396,13 @@ SAMPLE_INTERVAL = 2.0
 # Least a reading may carry for the cost per byte to mean anything, below which the
 # syscall rather than the device dominates it
 MIN_COST_BYTES = 512 * 1024
+# Least a reading may carry to go into the rate estimate, which needs volume
+MIN_RATE_BYTES = 4 * 1024 * 1024
 # Weight of the newest sample in the reported average
 EMA_ALPHA = 0.3
+# Seconds of writes the rate estimate is averaged over. Long enough to span both a
+# burst the page cache absorbed and the stall that follows it.
+WRITE_RATE_WINDOW = 30.0
 # Throughput inside write() below which the destination counts as not keeping up
 SLOW_WRITE_MBPS = 200
 # The same figure as nanoseconds per byte, which is what is tracked
@@ -1439,6 +1445,9 @@ class WriteMonitor:
         self.hint: Optional[bool] = None
         # Nanoseconds per byte spent inside write(), smoothed
         self.cost: Optional[float] = None
+        # Bytes per second the destination actually drained, over WRITE_RATE_WINDOW
+        self.throughput: Optional[float] = None
+        self.window: deque[tuple[int, float]] = deque()
         # Consecutive samples in which the device did not keep up
         self.slow_samples = 0
         self.retry_after = RETRY_AFTER
@@ -1459,10 +1468,11 @@ class WriteMonitor:
         self.rebaseline()
 
     def rebaseline(self):
-        """Discard what was measured and start counting writes from this moment"""
-        self.cost = None
+        """Start counting writes from this moment, keeping what they have cost so far"""
         self.slow_samples = 0
         self.seen = self.read_counters()
+        # So the next sample measures from here, not from whenever the process started
+        self.sampled_at = time.monotonic()
 
     @synchronized()
     def allows_direct_decode(self) -> bool:
@@ -1473,30 +1483,55 @@ class WriteMonitor:
     def sample(self):
         """Look at what the writes have cost since last time"""
         now = time.monotonic()
-        if now - self.sampled_at < SAMPLE_INTERVAL:
+        if (elapsed := now - self.sampled_at) < SAMPLE_INTERVAL:
             return
         self.sampled_at = now
 
+        _, written, nanos = self.consume_counters()
+        cost = nanos / written if written >= MIN_COST_BYTES and nanos > 0 else None
+        if cost is not None:
+            self.cost = cost if self.cost is None else EMA_ALPHA * cost + (1 - EMA_ALPHA) * self.cost
+        if written >= MIN_RATE_BYTES:
+            # Over the wall clock, not over the time spent inside write()
+            self.record_rate(written, elapsed)
+
         if not self.allow_direct_decode:
-            # Nothing to measure while the cache is batching the writes
+            # Only the clock changes the mode back
             if now >= self.retry_at:
                 self.promote()
-            return
+        elif cost is not None:
+            # Without a cost the streak neither grows nor is given up
+            if cost <= SLOW_WRITE_COST:
+                self.slow_samples = 0
+            else:
+                self.slow_samples += 1
+                if self.slow_samples >= SLOW_SAMPLES_BEFORE_BACKOFF:
+                    self.demote()
 
-        _, written, nanos = self.consume_counters()
-        if written < MIN_COST_BYTES or nanos <= 0:
-            return
+    def record_rate(self, written: int, elapsed: float):
+        """Fold a reading into the windowed rate"""
+        self.window.append((written, elapsed))
+        span = sum(seconds for _, seconds in self.window)
+        while len(self.window) > 1 and span > WRITE_RATE_WINDOW:
+            span -= self.window.popleft()[1]
+        self.throughput = sum(size for size, _ in self.window) / span
 
-        cost = nanos / written
-        self.cost = cost if self.cost is None else EMA_ALPHA * cost + (1 - EMA_ALPHA) * self.cost
+    @synchronized()
+    def forget_rate(self):
+        """Drop what the destination was measured to drain.
 
-        if cost <= SLOW_WRITE_COST:
-            self.slow_samples = 0
-            return
+        Called when the downloader goes idle: nothing is being written, so nothing will
+        correct the estimate, and it would otherwise pace a later download that writes
+        nothing at all - a pre-check, or a job whose articles are all missing.
+        """
+        self.cost = None
+        self.throughput = None
+        self.window.clear()
 
-        self.slow_samples += 1
-        if self.slow_samples >= SLOW_SAMPLES_BEFORE_BACKOFF:
-            self.demote()
+    @synchronized()
+    def write_rate(self) -> Optional[float]:
+        """Bytes per second the destination is draining, None if unmeasured"""
+        return self.throughput
 
     @staticmethod
     def read_counters() -> tuple[int, int, int]:
