@@ -265,3 +265,58 @@ class TestNewsWrapper:
         else:
             assert current_ip is not None
         nntp.close(send_quit=False)
+
+
+class TestArticleSink:
+
+    @pytest.fixture
+    def article(self):
+        nzf = mock.Mock()
+        nzf.type = "yenc"
+        nzf.prepare_filepath.return_value = "/downloads/job/file.bin"
+        return mock.Mock(nzf=nzf, lowest_partnum=False)
+
+    @pytest.fixture(autouse=True)
+    def allowed(self, monkeypatch):
+        monkeypatch.setattr(sabnzbd.cfg.direct_decode, "get", lambda: True)
+        monkeypatch.setattr(sabnzbd.cfg.direct_write, "get", lambda: True)
+        monkeypatch.setattr(sabnzbd.storage, "download_dir_supports_random_writes", lambda: True)
+        monkeypatch.setattr(sabnzbd, "Assembler", mock.Mock(), raising=False)
+
+    def sink(self, article):
+        # Only ever reads its arguments, so it needs no wrapper to be called against
+        return newswrapper.NewsWrapper.article_sink(None, article)
+
+    def test_an_ordinary_article_gets_one(self, article):
+        assert self.sink(article) is sabnzbd.Assembler.get_writer.return_value
+
+    def test_no_article_gets_nothing(self):
+        assert self.sink(None) is None
+
+    def test_the_setting_being_off_refuses(self, article, monkeypatch):
+        monkeypatch.setattr(sabnzbd.cfg.direct_decode, "get", lambda: False)
+        assert self.sink(article) is None
+
+    def test_append_mode_refuses(self, article, monkeypatch):
+        monkeypatch.setattr(sabnzbd.cfg.direct_write, "get", lambda: False)
+        assert self.sink(article) is None
+
+    def test_a_destination_that_is_not_keeping_up_refuses(self, article, monkeypatch):
+        monkeypatch.setattr(sabnzbd.storage, "download_dir_supports_random_writes", lambda: False)
+        assert self.sink(article) is None
+
+    def test_the_first_article_of_a_file_refuses(self, article):
+        article.lowest_partnum = True
+        assert self.sink(article) is None
+
+    def test_a_uu_file_refuses(self, article):
+        article.nzf.type = "uu"
+        assert self.sink(article) is None
+
+    def test_a_file_without_a_path_yet_refuses(self, article):
+        article.nzf.prepare_filepath.return_value = None
+        assert self.sink(article) is None
+
+    def test_a_file_that_will_not_open_falls_back_to_memory(self, article):
+        sabnzbd.Assembler.get_writer.side_effect = OSError("no")
+        assert self.sink(article) is None
