@@ -1393,9 +1393,11 @@ def check_sparse_and_disable(test_dir: str) -> bool:
 
 # Seconds between readings of the write counters
 SAMPLE_INTERVAL = 2.0
-# Smallest reading acted on rather than discarded
-MIN_SAMPLE_WRITES = 16
-MIN_SAMPLE_BYTES = 4 * 1024 * 1024
+# Least a reading may carry for the cost per byte to mean anything, below which the
+# syscall rather than the device dominates it
+MIN_COST_BYTES = 512 * 1024
+# Least a reading may carry to go into the rate estimate, which needs volume
+MIN_RATE_BYTES = 4 * 1024 * 1024
 # Weight of the newest sample in the reported average
 EMA_ALPHA = 0.3
 # Seconds of writes the rate estimate is averaged over. Long enough to span both a
@@ -1485,33 +1487,46 @@ class WriteMonitor:
             return
         self.sampled_at = now
 
-        writes, written, nanos = self.consume_counters()
-        measured = writes >= MIN_SAMPLE_WRITES and written >= MIN_SAMPLE_BYTES and nanos > 0
-        if measured:
-            sample = nanos / written
-            self.cost = sample if self.cost is None else EMA_ALPHA * sample + (1 - EMA_ALPHA) * self.cost
-            # Over the wall clock, not over the time spent inside write(), and over a
-            # window rather than a sample: a single sample reads as memory speed while
-            # the page cache absorbs, then as almost nothing while a blocked write is
-            # still counting, and neither is the device.
-            self.window.append((written, elapsed))
-            while len(self.window) > 1 and sum(span for _, span in self.window) > WRITE_RATE_WINDOW:
-                self.window.popleft()
-            self.throughput = sum(size for size, _ in self.window) / sum(span for _, span in self.window)
+        _, written, nanos = self.consume_counters()
+        cost = nanos / written if written >= MIN_COST_BYTES and nanos > 0 else None
+        if cost is not None:
+            self.cost = cost if self.cost is None else EMA_ALPHA * cost + (1 - EMA_ALPHA) * self.cost
+        if written >= MIN_RATE_BYTES:
+            # Over the wall clock, not over the time spent inside write()
+            self.record_rate(written, elapsed)
 
         if not self.streaming:
             # Only the clock changes the mode back
             if now >= self.retry_at:
                 self.promote()
-            return
+        elif cost is not None:
+            # Without a cost the streak neither grows nor is given up
+            if cost <= SLOW_WRITE_COST:
+                self.slow_samples = 0
+            else:
+                self.slow_samples += 1
+                if self.slow_samples >= SLOW_SAMPLES_BEFORE_BACKOFF:
+                    self.demote()
 
-        if not measured or sample <= SLOW_WRITE_COST:
-            self.slow_samples = 0
-            return
+    def record_rate(self, written: int, elapsed: float):
+        """Fold a reading into the windowed rate"""
+        self.window.append((written, elapsed))
+        span = sum(seconds for _, seconds in self.window)
+        while len(self.window) > 1 and span > WRITE_RATE_WINDOW:
+            span -= self.window.popleft()[1]
+        self.throughput = sum(size for size, _ in self.window) / span
 
-        self.slow_samples += 1
-        if self.slow_samples >= SLOW_SAMPLES_BEFORE_BACKOFF:
-            self.demote()
+    @synchronized()
+    def forget_rate(self):
+        """Drop what the destination was measured to drain.
+
+        Called when the downloader goes idle: nothing is being written, so nothing will
+        correct the estimate, and it would otherwise pace a later download that writes
+        nothing at all - a pre-check, or a job whose articles are all missing.
+        """
+        self.cost = None
+        self.throughput = None
+        self.window.clear()
 
     @synchronized()
     def write_rate(self) -> Optional[float]:
@@ -1534,7 +1549,7 @@ class WriteMonitor:
     def demote(self):
         """Hold articles in the cache again, and wait longer before trying once more"""
         logging.info(
-            "Writes to %s are not being absorbed (%s), holding articles in the cache for the next " "%.0f minutes",
+            "Writes to %s are not being absorbed (%s), holding articles in the cache for %.0f minutes",
             self.path,
             self.measured(),
             self.retry_after / 60,

@@ -284,17 +284,14 @@ class Assembler(Thread):
 
         Whichever of two demands is greater, so either can throttle on its own.
         """
-        fill = min(1.0, self.total_ready_bytes() / max(1.0, self.cache_limit))
+        # Holds the download to the share of the cache still free. Without a cache
+        # there is no share to hold it to, and articles are going straight to disk.
+        crowded = 0.0
+        if self.cache_limit > 0:
+            fill = min(1.0, self.total_ready_bytes() / self.cache_limit)
+            crowded = DOWNLOADER_TICK * fill / max(1e-6, 1.0 - fill)
 
-        # Holds the download to the share of the cache still free, so it approaches a
-        # stop as the cache approaches its limit. Once the limit is reached every
-        # further article is written to the admin folder instead, and that write
-        # competes for the disk with the assembler - which is the only thing that can
-        # free the cache again.
-        crowded = DOWNLOADER_TICK * fill / max(1e-6, 1.0 - fill)
-
-        # Holds the download to what the disk drains, which is what keeps the cache
-        # from filling at all. Says nothing while no write has been measured yet.
+        # Holds the download to what the disk drains
         paced = 0.0
         if (write_rate := sabnzbd.WriteMonitor.write_rate()) and (download_rate := sabnzbd.BPSMeter.bps) > 0:
             target = write_rate * ASSEMBLER_DRAIN_MARGIN

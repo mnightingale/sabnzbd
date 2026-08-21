@@ -445,6 +445,7 @@ class Downloader(Thread):
                 cfg.start_paused.set(True)
             if self.no_active_jobs():
                 sabnzbd.BPSMeter.reset()
+                sabnzbd.WriteMonitor.forget_rate()
             if cfg.autodisconnect():
                 self.disconnect()
 
@@ -710,6 +711,7 @@ class Downloader(Thread):
                 else:
                     events = []
                     BPSMeter.reset()
+                    sabnzbd.WriteMonitor.forget_rate()
                     time.sleep(0.1)
                     self.max_chunk_size = _DEFAULT_CHUNK_SIZE
                     with DOWNLOADER_CV:
@@ -835,10 +837,7 @@ class Downloader(Thread):
                     sabnzbd.BPSMeter.update()
 
     def check_assembler_levels(self):
-        """Sleep for part of this pass if the disk is behind what is being downloaded.
-
-        One bounded sleep, not a loop: no server is read from while this thread sleeps.
-        """
+        """Sleep for part of this pass if the disk is behind what is being downloaded"""
         if (delay := sabnzbd.Assembler.delay()) <= 0:
             return
 
