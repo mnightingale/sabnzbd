@@ -1682,12 +1682,41 @@ class TestWriteRate:
         feed(monitor, clock, writes, samples=3, **SLOW)
         assert monitor.write_rate() == pytest.approx(SLOW["written"] / filesystem.SAMPLE_INTERVAL, rel=0.01)
 
+    def test_it_is_the_total_over_the_window(self, monitor, clock, writes):
+        feed(monitor, clock, writes, samples=5, **FAST)
+        feed(monitor, clock, writes, samples=5, **SLOW)
+        expected = (5 * FAST["written"] + 5 * SLOW["written"]) / (10 * filesystem.SAMPLE_INTERVAL)
+        assert monitor.write_rate() == pytest.approx(expected, rel=0.01)
+
+    def test_neither_extreme_decides_it(self, monitor, clock, writes):
+        """A sample reads as memory speed while the page cache absorbs, and as almost
+        nothing while a blocked write is still counting. The device is in between."""
+        feed(monitor, clock, writes, samples=5, **FAST)
+        feed(monitor, clock, writes, samples=1, **SLOW)
+        slowest = SLOW["written"] / filesystem.SAMPLE_INTERVAL
+        fastest = FAST["written"] / filesystem.SAMPLE_INTERVAL
+        assert slowest < monitor.write_rate() < fastest
+
+    def test_the_window_is_bounded(self, monitor, clock, writes):
+        """Otherwise one stall would hold the estimate down for the rest of the job"""
+        feed(monitor, clock, writes, samples=1, **SLOW)
+        samples = int(filesystem.WRITE_RATE_WINDOW / filesystem.SAMPLE_INTERVAL) + 5
+        feed(monitor, clock, writes, samples=samples, **FAST)
+        assert monitor.write_rate() == pytest.approx(FAST["written"] / filesystem.SAMPLE_INTERVAL, rel=0.01)
+
     def test_it_is_not_the_rate_inside_write(self, monitor, clock, writes):
         """SLOW writes 8 MB but spends only 400 ms of the 2 s interval doing it, so
         the two readings are five times apart and only one paces the downloader."""
         feed(monitor, clock, writes, samples=3, **SLOW)
         inside_write = SLOW["written"] / (SLOW["nanos"] / 1e9)
         assert monitor.write_rate() < inside_write / 4
+
+    def test_the_window_survives_a_mode_change(self, monitor, clock, writes):
+        """What the device can take is a property of the device, not of how SABnzbd
+        chose to write to it, and it is needed most in the moments after a demotion."""
+        feed(monitor, clock, writes, samples=filesystem.SLOW_SAMPLES_BEFORE_BACKOFF, **SLOW)
+        assert monitor.allows_streaming() is False
+        assert len(monitor.window) >= filesystem.SLOW_SAMPLES_BEFORE_BACKOFF
 
     def test_it_survives_a_mode_change(self, monitor, clock, writes):
         """Dropped on demotion, the downloader would have nothing to pace against for
