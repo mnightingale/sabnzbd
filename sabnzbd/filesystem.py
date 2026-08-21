@@ -1447,6 +1447,7 @@ class WriteMonitor:
         self.sampled_at = 0.0
         # Counters as of the previous sample
         self.seen = (0, 0, 0)
+        self.reset()
 
     @synchronized()
     def reset(self, path: Optional[str] = None):

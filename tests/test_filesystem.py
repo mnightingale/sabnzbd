@@ -1489,6 +1489,15 @@ def monitor(clock, writes, monkeypatch):
     return instance
 
 
+def test_a_new_monitor_picks_its_directory(clock, writes, monkeypatch):
+    """Left unreset it has no path and never streams, so nothing is ever handed a sink"""
+    monkeypatch.setattr(filesystem, "is_rotational", lambda path: None)
+    monkeypatch.setattr(sabnzbd.cfg.download_dir, "get_path", lambda: "/downloads")
+    instance = filesystem.WriteMonitor()
+    assert instance.path == "/downloads"
+    assert instance.allows_streaming() is True
+
+
 def feed(monitor, clock, writes, samples: int, count: int, written: int, nanos: int):
     for _ in range(samples):
         writes.add(count, written, nanos)
