@@ -35,6 +35,7 @@ import fnmatch
 import stat
 import ctypes
 import random
+from collections import deque
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Iterable, Optional, BinaryIO
@@ -1397,6 +1398,9 @@ MIN_SAMPLE_WRITES = 16
 MIN_SAMPLE_BYTES = 4 * 1024 * 1024
 # Weight of the newest sample in the reported average
 EMA_ALPHA = 0.3
+# Seconds of writes the rate estimate is averaged over. Long enough to span both a
+# burst the page cache absorbed and the stall that follows it.
+WRITE_RATE_WINDOW = 30.0
 # Throughput inside write() below which the destination counts as not keeping up
 SLOW_WRITE_MBPS = 200
 # The same figure as nanoseconds per byte, which is what is tracked
@@ -1439,6 +1443,9 @@ class WriteMonitor:
         self.hint: Optional[bool] = None
         # Nanoseconds per byte spent inside write(), smoothed
         self.cost: Optional[float] = None
+        # Bytes per second the destination actually drained, over WRITE_RATE_WINDOW
+        self.throughput: Optional[float] = None
+        self.window: deque[tuple[int, float]] = deque()
         # Consecutive samples in which the device did not keep up
         self.slow_samples = 0
         self.retry_after = RETRY_AFTER
@@ -1459,10 +1466,11 @@ class WriteMonitor:
         self.rebaseline()
 
     def rebaseline(self):
-        """Discard what was measured and start counting writes from this moment"""
-        self.cost = None
+        """Start counting writes from this moment, keeping what they have cost so far"""
         self.slow_samples = 0
         self.seen = self.read_counters()
+        # So the next sample measures from here, not from whenever the process started
+        self.sampled_at = time.monotonic()
 
     @synchronized()
     def allows_streaming(self) -> bool:
@@ -1473,30 +1481,42 @@ class WriteMonitor:
     def sample(self):
         """Look at what the writes have cost since last time"""
         now = time.monotonic()
-        if now - self.sampled_at < SAMPLE_INTERVAL:
+        if (elapsed := now - self.sampled_at) < SAMPLE_INTERVAL:
             return
         self.sampled_at = now
 
+        writes, written, nanos = self.consume_counters()
+        measured = writes >= MIN_SAMPLE_WRITES and written >= MIN_SAMPLE_BYTES and nanos > 0
+        if measured:
+            sample = nanos / written
+            self.cost = sample if self.cost is None else EMA_ALPHA * sample + (1 - EMA_ALPHA) * self.cost
+            # Over the wall clock, not over the time spent inside write(), and over a
+            # window rather than a sample: a single sample reads as memory speed while
+            # the page cache absorbs, then as almost nothing while a blocked write is
+            # still counting, and neither is the device.
+            self.window.append((written, elapsed))
+            while len(self.window) > 1 and sum(span for _, span in self.window) > WRITE_RATE_WINDOW:
+                self.window.popleft()
+            self.throughput = sum(size for size, _ in self.window) / sum(span for _, span in self.window)
+
         if not self.streaming:
-            # Nothing to measure while the cache is batching the writes
+            # Only the clock changes the mode back
             if now >= self.retry_at:
                 self.promote()
             return
 
-        writes, written, nanos = self.consume_counters()
-        if writes < MIN_SAMPLE_WRITES or written < MIN_SAMPLE_BYTES or nanos <= 0:
-            return
-
-        sample = nanos / written
-        self.cost = sample if self.cost is None else EMA_ALPHA * sample + (1 - EMA_ALPHA) * self.cost
-
-        if sample <= SLOW_WRITE_COST:
+        if not measured or sample <= SLOW_WRITE_COST:
             self.slow_samples = 0
             return
 
         self.slow_samples += 1
         if self.slow_samples >= SLOW_SAMPLES_BEFORE_BACKOFF:
             self.demote()
+
+    @synchronized()
+    def write_rate(self) -> Optional[float]:
+        """Bytes per second the destination is draining, None if unmeasured"""
+        return self.throughput
 
     @staticmethod
     def read_counters() -> tuple[int, int, int]:
