@@ -109,6 +109,7 @@ import sabnzbd.decoder
 import sabnzbd.assembler
 import sabnzbd.articlecache
 import sabnzbd.bpsmeter
+import sabnzbd.storage
 import sabnzbd.scheduler as scheduler
 import sabnzbd.notifier as notifier
 import sabnzbd.sorting
@@ -248,9 +249,12 @@ def initialize(pause_downloader=False, clean_up=False, repair=0):
     cfg.complete_dir.set_create(True)
     cfg.complete_dir.create_path()
 
+    sabnzbd.storage.initialize()
+
     # Set call backs for Config items
     cfg.cache_limit.callback(cfg.new_limit)
     cfg.direct_write.callback(cfg.new_direct_write)
+    cfg.download_dir.callback(cfg.new_storage_dir)
     cfg.web_host.callback(cfg.guard_restart)
     cfg.web_port.callback(cfg.guard_restart)
     cfg.web_dir.callback(cfg.guard_restart)
@@ -578,6 +582,8 @@ def delayed_startup_actions():
                 "SABnzbd %s" % sabnzbd.__version__,
                 ssdp_broadcast_interval=sabnzbd.cfg.ssdp_broadcast_interval(),
             )
+
+    sabnzbd.storage.log_profile()
 
 
 def check_all_tasks():
