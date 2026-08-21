@@ -307,26 +307,27 @@ class Assembler(Thread):
     def delay(self) -> float:
         """How long the downloader should sleep before its next pass.
 
-        Paced on the download rate against the measured write rate, not on the cache,
-        which a streamed article never enters.
+        Whichever of two demands is greater, so either can throttle on its own.
         """
         ready_total = self.total_ready_bytes()
         fill = min(1.0, max(0.0, ready_total - self.delay_trigger) / max(1.0, self.cache_limit - self.delay_trigger))
 
-        write_rate = sabnzbd.WriteMonitor.write_rate()
-        download_rate = sabnzbd.BPSMeter.bps
-        if write_rate and download_rate > 0:
-            target = write_rate * ASSEMBLER_DRAIN_MARGIN
-            excess = max(0.0, download_rate / target - 1.0)
-        elif ready_total > self.delay_trigger:
-            # Nothing measured yet, so the cache filling is all there is to go on
-            excess = 1.0
-        else:
-            return 0
+        # Holds the download to the share of the cache still free, so it approaches a
+        # stop as the cache approaches its limit. Once the limit is reached every
+        # further article is written to the admin folder instead, and that write
+        # competes for the disk with the assembler - which is the only thing that can
+        # free the cache again.
+        crowded = DOWNLOADER_TICK * fill / max(1e-6, 1.0 - fill)
 
-        # A pass then takes tick + delay to fetch what it used to fetch in tick, which
-        # lands the download on the target. A filling cache doubles it.
-        return min(ASSEMBLER_MAX_DELAY, DOWNLOADER_TICK * excess * (1.0 + fill))
+        # Holds the download to what the disk drains, which is what keeps the cache
+        # from filling at all. Says nothing while no write has been measured yet.
+        paced = 0.0
+        if (write_rate := sabnzbd.WriteMonitor.write_rate()) and (download_rate := sabnzbd.BPSMeter.bps) > 0:
+            target = write_rate * ASSEMBLER_DRAIN_MARGIN
+            paced = DOWNLOADER_TICK * max(0.0, download_rate / target - 1.0)
+
+        # A pass then takes tick + delay to fetch what it used to fetch in tick
+        return min(ASSEMBLER_MAX_DELAY, max(crowded, paced))
 
     def run(self):
         while 1:
