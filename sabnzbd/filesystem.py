@@ -1398,7 +1398,7 @@ MIN_SAMPLE_BYTES = 4 * 1024 * 1024
 # Weight of the newest sample in the reported average
 EMA_ALPHA = 0.3
 # Throughput inside write() below which the destination counts as not keeping up
-SLOW_WRITE_MBPS = 100
+SLOW_WRITE_MBPS = 200
 # The same figure as nanoseconds per byte, which is what is tracked
 SLOW_WRITE_COST = 1e9 / (SLOW_WRITE_MBPS * 1024 * 1024)
 # Consecutive slow samples before backing off to the cache
