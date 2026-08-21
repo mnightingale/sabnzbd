@@ -30,7 +30,13 @@ import pytest
 
 import sabnzbd
 from sabnzbd.assembler import Assembler
-from sabnzbd.constants import ASSEMBLER_MAX_OPEN_WRITERS, GIGI
+from sabnzbd.constants import (
+    ASSEMBLER_DRAIN_MARGIN,
+    ASSEMBLER_MAX_DELAY,
+    ASSEMBLER_MAX_OPEN_WRITERS,
+    DOWNLOADER_TICK,
+    GIGI,
+)
 from sabnzbd.filesystem import Diskspace
 from sabnzbd.misc import pp_to_opts
 from sabnzbd.nzb import Article, NzbFile, NzbObject
@@ -870,3 +876,85 @@ class TestWriterCache:
             thread.join()
 
         assert len({id(writer) for writer in seen}) == 1
+
+
+MB = 1024 * 1024
+
+
+class TestDelay:
+    @pytest.fixture
+    def assembler(self, monkeypatch):
+        instance = Assembler.__new__(Assembler)
+        instance.cache_limit = 1024 * MB
+        instance.delay_trigger = 512 * MB
+        instance.ready_bytes = {}
+        instance.ready_bytes_lock = threading.Lock()
+        monkeypatch.setattr(sabnzbd, "BPSMeter", SimpleNamespace(bps=0.0), raising=False)
+        monkeypatch.setattr(sabnzbd, "WriteMonitor", SimpleNamespace(write_rate=lambda: None), raising=False)
+        return instance
+
+    @staticmethod
+    def rates(monkeypatch, download_mbps, write_mbps):
+        monkeypatch.setattr(sabnzbd.BPSMeter, "bps", download_mbps * MB)
+        monkeypatch.setattr(sabnzbd.WriteMonitor, "write_rate", lambda: write_mbps * MB if write_mbps else None)
+
+    def backlog(self, assembler, megabytes):
+        assembler.ready_bytes = {"nzf": int(megabytes * MB)}
+
+    def test_an_idle_downloader_is_not_delayed(self, assembler, monkeypatch):
+        self.rates(monkeypatch, download_mbps=0, write_mbps=40)
+        self.backlog(assembler, 0)
+        assert assembler.delay() == 0
+
+    def test_an_empty_cache_is_still_paced(self, assembler, monkeypatch):
+        self.rates(monkeypatch, download_mbps=100, write_mbps=40)
+        self.backlog(assembler, 0)
+        assert assembler.delay() > 0
+
+    def test_it_paces_to_the_measured_rate(self, assembler, monkeypatch):
+        self.rates(monkeypatch, download_mbps=100, write_mbps=40)
+        self.backlog(assembler, 0)
+        delay = assembler.delay()
+        achieved = 100 * DOWNLOADER_TICK / (DOWNLOADER_TICK + delay)
+        assert achieved == pytest.approx(40 * ASSEMBLER_DRAIN_MARGIN, rel=0.01)
+
+    def test_a_disk_keeping_up_is_not_throttled(self, assembler, monkeypatch):
+        self.rates(monkeypatch, download_mbps=40, write_mbps=100)
+        self.backlog(assembler, 1024)
+        assert assembler.delay() == 0
+
+    def test_downloading_faster_than_the_disk_throttles(self, assembler, monkeypatch):
+        self.rates(monkeypatch, download_mbps=100, write_mbps=40)
+        self.backlog(assembler, 1024)
+        assert assembler.delay() > 0
+
+    def test_matching_the_disk_exactly_still_drains(self, assembler, monkeypatch):
+        self.rates(monkeypatch, download_mbps=40, write_mbps=40)
+        self.backlog(assembler, 1024)
+        assert assembler.delay() > 0
+
+    def test_the_delay_grows_with_the_overshoot(self, assembler, monkeypatch):
+        self.backlog(assembler, 1024)
+        self.rates(monkeypatch, download_mbps=60, write_mbps=40)
+        gentle = assembler.delay()
+        self.rates(monkeypatch, download_mbps=200, write_mbps=40)
+        assert assembler.delay() > gentle
+
+    def test_a_filling_cache_throttles_harder(self, assembler, monkeypatch):
+        self.rates(monkeypatch, download_mbps=100, write_mbps=40)
+        self.backlog(assembler, 0)
+        paced = assembler.delay()
+        self.backlog(assembler, 1024)
+        assert assembler.delay() == pytest.approx(paced * 2, rel=0.01)
+
+    def test_it_is_capped(self, assembler, monkeypatch):
+        self.rates(monkeypatch, download_mbps=10_000, write_mbps=1)
+        self.backlog(assembler, 1024)
+        assert assembler.delay() == ASSEMBLER_MAX_DELAY
+
+    def test_an_unmeasured_disk_falls_back_to_the_cache(self, assembler, monkeypatch):
+        self.rates(monkeypatch, download_mbps=100, write_mbps=None)
+        self.backlog(assembler, 400)
+        assert assembler.delay() == 0
+        self.backlog(assembler, 1024)
+        assert assembler.delay() == pytest.approx(2 * DOWNLOADER_TICK)

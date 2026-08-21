@@ -104,7 +104,13 @@ CONFIG_BACKUP_HTTPS = {  # "basename": "associated setting"
 
 # Constants affecting download performance
 DEF_MAX_ASSEMBLER_QUEUE = 12
-SOFT_ASSEMBLER_QUEUE_LIMIT = 0.5
+# How often the downloader updates its meters and reconsiders the delay
+DOWNLOADER_TICK = 0.05
+# Longest the downloader sleeps in one pass to let the disk catch up
+ASSEMBLER_MAX_DELAY = 0.5
+# Fraction of the measured write rate the downloader aims for, so the backlog shrinks
+# rather than merely holding
+ASSEMBLER_DRAIN_MARGIN = 0.9
 # Percentage of cache to use before adding file to assembler
 ASSEMBLER_TRIGGER_PERCENTAGE = 0.05
 # Files kept open for writing at once. Handles are cached so an article does not cost an

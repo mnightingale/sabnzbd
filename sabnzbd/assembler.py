@@ -47,7 +47,9 @@ from sabnzbd.filesystem import (
 from sabnzbd.constants import (
     Status,
     GIGI,
-    SOFT_ASSEMBLER_QUEUE_LIMIT,
+    ASSEMBLER_DRAIN_MARGIN,
+    ASSEMBLER_MAX_DELAY,
+    DOWNLOADER_TICK,
     ASSEMBLER_DELAY_FACTOR_DIRECT_WRITE,
     ARTICLE_CACHE_NON_CONTIGUOUS_FLUSH_PERCENTAGE,
     ASSEMBLER_WRITE_INTERVAL,
@@ -303,17 +305,28 @@ class Assembler(Thread):
         return False
 
     def delay(self) -> float:
-        """Calculate how long if at all the downloader thread should sleep to allow the assembler to catch up"""
+        """How long the downloader should sleep before its next pass.
+
+        Paced on the download rate against the measured write rate, not on the cache,
+        which a streamed article never enters.
+        """
         ready_total = self.total_ready_bytes()
-        # Below trigger: no delay possible
-        if ready_total <= self.delay_trigger:
+        fill = min(1.0, max(0.0, ready_total - self.delay_trigger) / max(1.0, self.cache_limit - self.delay_trigger))
+
+        write_rate = sabnzbd.WriteMonitor.write_rate()
+        download_rate = sabnzbd.BPSMeter.bps
+        if write_rate and download_rate > 0:
+            target = write_rate * ASSEMBLER_DRAIN_MARGIN
+            excess = max(0.0, download_rate / target - 1.0)
+        elif ready_total > self.delay_trigger:
+            # Nothing measured yet, so the cache filling is all there is to go on
+            excess = 1.0
+        else:
             return 0
-        pressure = (ready_total - self.delay_trigger) / max(1.0, self.cache_limit - self.delay_trigger)
-        if pressure <= SOFT_ASSEMBLER_QUEUE_LIMIT:
-            return 0
-        # 50-100%: 0-0.25 seconds, capped at 0.15
-        sleep = min((pressure - SOFT_ASSEMBLER_QUEUE_LIMIT) / 2, 0.15)
-        return max(0.001, sleep)
+
+        # A pass then takes tick + delay to fetch what it used to fetch in tick, which
+        # lands the download on the target. A filling cache doubles it.
+        return min(ASSEMBLER_MAX_DELAY, DOWNLOADER_TICK * excess * (1.0 + fill))
 
     def run(self):
         while 1:
