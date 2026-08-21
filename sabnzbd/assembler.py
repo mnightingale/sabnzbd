@@ -71,7 +71,6 @@ class AssemblerTask(NamedTuple):
 class Assembler(Thread):
     def __init__(self):
         super().__init__()
-        self.max_queue_size: int = cfg.assembler_max_queue_size()
         self.direct_write: bool = cfg.direct_write()
         self.cache_limit: int = 0
         # Total bytes required per file to trigger the assembler

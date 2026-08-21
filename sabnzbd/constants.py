@@ -102,8 +102,6 @@ CONFIG_BACKUP_HTTPS = {  # "basename": "associated setting"
     "server.chain": "https_chain",
 }
 
-# Constants affecting download performance
-DEF_MAX_ASSEMBLER_QUEUE = 12
 # How often the downloader updates its meters and reconsiders the delay
 DOWNLOADER_TICK = 0.05
 # Longest the downloader sleeps in one pass to let the disk catch up

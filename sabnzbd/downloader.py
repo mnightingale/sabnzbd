@@ -503,9 +503,6 @@ class Downloader(Thread):
             if cfg.receive_threads() == cfg.receive_threads.default:
                 cfg.receive_threads.set(4)
                 logging.info("Receive threads set to 4")
-            if cfg.assembler_max_queue_size() == cfg.assembler_max_queue_size.default:
-                cfg.assembler_max_queue_size.set(30)
-                logging.info("Assembler max_queue_size set to 30")
 
     def sleep_time_set(self):
         self.sleep_time = cfg.downloader_sleep_time() * 0.0001
