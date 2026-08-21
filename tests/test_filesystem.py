@@ -1506,8 +1506,8 @@ def feed(monitor, clock, writes, samples: int, count: int, written: int, nanos: 
 
 
 # Either side of SLOW_WRITE_MBPS
-FAST = dict(count=64, written=45 * MB, nanos=3_200_000)
-SLOW = dict(count=64, written=8 * MB, nanos=400_000_000)
+FAST = {"count": 64, "written": 45 * MB, "nanos": 3_200_000}
+SLOW = {"count": 64, "written": 8 * MB, "nanos": 400_000_000}
 
 assert 1e9 / (FAST["nanos"] / FAST["written"]) / MB > filesystem.SLOW_WRITE_MBPS
 assert 1e9 / (SLOW["nanos"] / SLOW["written"]) / MB < filesystem.SLOW_WRITE_MBPS
