@@ -194,6 +194,20 @@ class Assembler(Thread):
 
             return writer
 
+    def write_stats(self) -> list[tuple[str, dict]]:
+        """Write counters for every handle currently open, keyed by file.
+
+        Keyed by nzf_id rather than by the writer itself so that a caller comparing
+        against its previous reading has something stable to compare against: the same
+        file may be on its second handle after an eviction, which shows up as counters
+        that have gone backwards.
+        """
+        with self.writers_lock:
+            writers = [(nzf.nzf_id, nzf.writer) for nzf in self.open_writers.values()]
+        # Outside the lock: reading the counters takes no lock of its own, and holding
+        # this one would put a sampler in the way of every write that wants a handle
+        return [(nzf_id, writer.stats) for nzf_id, writer in writers if writer is not None]
+
     def close_writer(self, nzf: NzbFile) -> None:
         """Close the handle for this file, if one is open"""
         with self.writers_lock:

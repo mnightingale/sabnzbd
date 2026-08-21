@@ -774,6 +774,13 @@ def new_direct_write():
     sabnzbd.ArticleCache.change_direct_write(bool(direct_write()))
 
 
+def new_storage_dir():
+    """Callback for download directory changes"""
+    if sabnzbd.__INITIALIZED__:
+        sabnzbd.storage.initialize()
+        sabnzbd.storage.log_profile()
+
+
 def guard_restart():
     """Callback for config options requiring a restart"""
     sabnzbd.RESTART_REQ = True
