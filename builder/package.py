@@ -246,8 +246,8 @@ def test_sab_binary(binary_path: str):
 
         # Parse API-key so we can do a graceful shutdown
         sab_config = configobj.ConfigObj(os.path.join(config_dir, "sabnzbd.ini"))
-        urllib.request.urlopen(base_url + "shutdown/?apikey=" + sab_config["misc"]["api_key"], timeout=10)
-        sabnzbd_process.wait()
+        urllib.request.urlopen(base_url + "api?mode=shutdown&apikey=" + sab_config["misc"]["api_key"], timeout=10)
+        sabnzbd_process.wait(timeout=60)
 
         # Print logs for verification
         with open(os.path.join(config_dir, "logs", "sabnzbd.log"), "r") as log_file:
