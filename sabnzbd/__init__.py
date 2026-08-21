@@ -128,6 +128,7 @@ DirScanner: sabnzbd.dirscanner.DirScanner
 BPSMeter: sabnzbd.bpsmeter.BPSMeter
 RSSReader: sabnzbd.rss.RSSReader
 Scheduler: sabnzbd.scheduler.Scheduler
+WriteMonitor: sabnzbd.filesystem.WriteMonitor
 
 # For backwards compatibility with pre-5.0 queue files
 sys.modules["sabnzbd.nzbstuff"] = sabnzbd.nzb
@@ -251,6 +252,7 @@ def initialize(pause_downloader=False, clean_up=False, repair=0):
     # Set call backs for Config items
     cfg.cache_limit.callback(cfg.new_limit)
     cfg.direct_write.callback(cfg.new_direct_write)
+    cfg.download_dir.callback(cfg.new_storage_dir)
     cfg.web_host.callback(cfg.guard_restart)
     cfg.web_port.callback(cfg.guard_restart)
     cfg.web_dir.callback(cfg.guard_restart)
@@ -303,6 +305,7 @@ def initialize(pause_downloader=False, clean_up=False, repair=0):
     sabnzbd.URLGrabber = sabnzbd.urlgrabber.URLGrabber()
     sabnzbd.RSSReader = sabnzbd.rss.RSSReader()
     sabnzbd.Scheduler = sabnzbd.scheduler.Scheduler()
+    sabnzbd.WriteMonitor = sabnzbd.filesystem.WriteMonitor()
 
     # Run startup tasks
     sabnzbd.NzbQueue.read_queue(repair)
@@ -578,6 +581,8 @@ def delayed_startup_actions():
                 "SABnzbd %s" % sabnzbd.__version__,
                 ssdp_broadcast_interval=sabnzbd.cfg.ssdp_broadcast_interval(),
             )
+
+    sabnzbd.WriteMonitor.log_profile()
 
 
 def check_all_tasks():
