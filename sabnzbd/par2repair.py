@@ -371,9 +371,8 @@ def article_backed_blocks(nzo: NzbObject, repairer: sabctools.Par2Repairer) -> d
     by_name = {nzf.filename: nzf for nzf in nzo.finished_files}
     known = {}
     for entry in repairer.files:
-        # Deliberately not filtered on entry["exists"]: par2 only sets that while
-        # scanning the source files, so straight after load() it is false for
-        # everything. _blocks_from_articles checks the file on disk instead.
+        # files describes the set, not what is on disk; _blocks_from_articles checks
+        # the file itself.
         if nzf := by_name.get(entry["name"]):
             if blocks := _blocks_from_articles(nzf, blocksize, entry["blocks"], entry["target"]):
                 known[entry["name"]] = blocks

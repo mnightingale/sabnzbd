@@ -154,7 +154,7 @@ class TestArticleBackedBlocks:
         nzf.filename = "alpha.bin"
         repairer = FakeRepairer(
             BLOCKSIZE,
-            [{"name": "alpha.bin", "target": str(path), "exists": True, "blocks": size // BLOCKSIZE}],
+            [{"name": "alpha.bin", "target": str(path), "size": size, "blocks": size // BLOCKSIZE}],
         )
         return FakeNzo([nzf]), repairer
 
@@ -207,17 +207,6 @@ class TestArticleBackedBlocks:
             mock.patch.object(cfg.direct_write, "get", return_value=True),
         ):
             assert article_backed_blocks(nzo, repairer) == {}
-
-    def test_ignores_par2s_exists_flag(self, tmp_path):
-        """par2 only sets targetexists while scanning source files, so it is false for
-        every entry at the point this runs - right after load(), before verify()."""
-        nzo, repairer = self._setup(tmp_path)
-        repairer.files[0]["exists"] = False
-        with (
-            mock.patch.object(cfg.par2_quick_verify, "get", return_value=True),
-            mock.patch.object(cfg.direct_write, "get", return_value=True),
-        ):
-            assert article_backed_blocks(nzo, repairer) == {"alpha.bin": [True] * 10}
 
     def test_skips_targets_not_on_disk(self, tmp_path):
         nzo, repairer = self._setup(tmp_path)
