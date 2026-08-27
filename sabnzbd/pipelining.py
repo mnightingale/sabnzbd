@@ -37,6 +37,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+import sabctools
+
 import sabnzbd
 from sabnzbd.decorators import synchronized
 
@@ -97,6 +99,7 @@ class ServerPipelineController:
         self.probe_at: Optional[float] = None
         self.probing_from: Optional[int] = None
         self.probe_throughput: float = 0.0
+        self.tcp: Optional[dict] = None
 
     def reset(self):
         """Forget what was measured, for a server that stopped downloading"""
@@ -251,6 +254,17 @@ class PipeliningMonitor:
             return True
         return downloader.receive_busy_fraction() > BUSY_FRACTION_LIMIT
 
+    @staticmethod
+    def tcp_snapshot(server) -> Optional[dict]:
+        """What the kernel says about one of this server's connections.
+
+        One is enough: they share a path, and the figures are for looking at rather than
+        for the controller to act on."""
+        for nw in server.busy_threads:
+            if nw.nntp and (info := sabctools.tcp_info(nw.nntp.sock)):
+                return info
+        return None
+
     def sample_server(self, server, now: float, limited: bool):
         """Take one window from a server's connections and apply the answer"""
         responses = 0
@@ -285,6 +299,8 @@ class PipeliningMonitor:
             receiver_limited=limited,
         )
 
+        server.pipeline_controller.tcp = self.tcp_snapshot(server)
+
         depth = server.pipeline_controller.sample(sample)
         if depth != server.effective_pipelining:
             logging.info(
@@ -296,6 +312,7 @@ class PipeliningMonitor:
                 to_time(server.pipeline_controller.transfer_time),
                 (server.pipeline_controller.idle_fraction or 0.0) * 100,
             )
+            log_tcp_info(server.host, server.pipeline_controller.tcp)
             server.effective_pipelining = depth
 
 
@@ -303,3 +320,25 @@ def to_time(seconds: Optional[float]) -> str:
     if seconds is None:
         return "unknown"
     return "%.0f ms" % (seconds * 1000)
+
+
+def log_tcp_info(host: str, info: Optional[dict]):
+    """Put the kernel's own view alongside a depth change, where there is one"""
+    if not info:
+        return
+    logging.debug(
+        "%s: kernel reports rtt %s, minimum %s, receive window %s, reordered %s, retransmitted %s (%s)",
+        host,
+        to_micros(info["rtt"]),
+        to_micros(info["min_rtt"]),
+        info["rcv_wnd"],
+        info["bytes_reordered"] if info["bytes_reordered"] is not None else info["packets_reordered"],
+        info["bytes_retrans_out"],
+        info["source"],
+    )
+
+
+def to_micros(value: Optional[int]) -> str:
+    if value is None:
+        return "unknown"
+    return "%.1f ms" % (value / 1000)

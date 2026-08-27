@@ -23,6 +23,7 @@ from itertools import pairwise
 from types import SimpleNamespace
 
 import pytest
+import sabctools
 
 import sabnzbd
 
@@ -34,6 +35,7 @@ from sabnzbd.pipelining import (
     REPROBE_INTERVAL,
     PipelineSample,
     ServerPipelineController,
+    log_tcp_info,
 )
 
 START = 10_000.0
@@ -250,9 +252,18 @@ class TestSmoothing:
 
 
 class FakeConnection:
-    """Just the counters the sampler reads"""
+    """Just the counters the sampler reads, and the socket it looks for"""
 
-    def __init__(self, responses=20, transfer_total=1.5, idle_total=0.5, round_trip_total=0.32, round_trip_count=4):
+    def __init__(
+        self,
+        responses=20,
+        transfer_total=1.5,
+        idle_total=0.5,
+        round_trip_total=0.32,
+        round_trip_count=4,
+        nntp=None,
+    ):
+        self.nntp = nntp
         self.responses_seen = responses
         self.transfer_total = transfer_total
         self.idle_total = idle_total
@@ -374,3 +385,37 @@ class TestReceiverLimited:
         )
 
         assert PipeliningMonitor.receiver_limited() is False
+
+
+class TestTcpSnapshot:
+    def test_reads_one_of_the_connections(self, mocker):
+        info = {"source": "linux", "rtt": 19000}
+        mocker.patch.object(sabctools, "tcp_info", return_value=info)
+        server = fake_server()
+        server.busy_threads = {FakeConnection(nntp=SimpleNamespace(sock=object()))}
+
+        assert PipeliningMonitor.tcp_snapshot(server) is info
+
+    def test_skips_connections_that_have_no_socket(self, mocker):
+        mocker.patch.object(sabctools, "tcp_info", return_value=None)
+        server = fake_server()
+        server.busy_threads = {FakeConnection(nntp=None)}
+
+        assert PipeliningMonitor.tcp_snapshot(server) is None
+
+    def test_a_server_with_nothing_connected_reports_nothing(self):
+        assert PipeliningMonitor.tcp_snapshot(fake_server()) is None
+
+    def test_logging_tolerates_the_fields_a_platform_cannot_supply(self):
+        log_tcp_info(
+            "news.example.com",
+            {
+                "source": "macos",
+                "rtt": 19000,
+                "min_rtt": None,
+                "rcv_wnd": 131712,
+                "bytes_reordered": 0,
+                "packets_reordered": None,
+                "bytes_retrans_out": 0,
+            },
+        )
