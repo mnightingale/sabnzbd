@@ -258,6 +258,17 @@
                                     <div class="col-sm-6">$T('Glitter-speed')</div>
                                     <div class="col-sm-6"><span data-bind="text: serverbps"></span>B/s</div>
                                 </div>
+                                <div class="row">
+                                    <div class="col-sm-6">$T('Glitter-pipelining')</div>
+                                    <div class="col-sm-6">
+                                        <span data-bind="text: serverpipelining"></span> /
+                                        <span data-bind="text: serverpipeliningmax"></span>
+                                        <!-- ko if: serverrtt() !== null -->
+                                        <br><span data-bind="text: serverrtt"></span> ms,
+                                        <span data-bind="text: servertransfertime"></span> ms/article
+                                        <!-- /ko -->
+                                    </div>
+                                </div>
                                 <div class="row" data-bind="visible: servererror()">
                                     <div class="col-sm-12">
                                         <div class="alert alert-danger">
