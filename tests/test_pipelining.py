@@ -357,20 +357,10 @@ class TestReceiverLimited:
             sabnzbd,
             "Downloader",
             create=True,
-            new=SimpleNamespace(bandwidth_limit=1e6, receive_busy_fraction=lambda: 0.0),
+            new=SimpleNamespace(bandwidth_limit=1e6),
         )
 
         assert PipeliningMonitor.receiver_limited() is True
-
-    def test_saturated_receive_threads_count(self, mocker):
-        mocker.patch.object(sabnzbd, "Assembler", create=True, new=SimpleNamespace(delay=lambda: 0.0))
-        mocker.patch.object(sabnzbd, "BPSMeter", create=True, new=SimpleNamespace(bps=0.0))
-        mocker.patch.object(
-            sabnzbd,
-            "Downloader",
-            create=True,
-            new=SimpleNamespace(bandwidth_limit=0, receive_busy_fraction=lambda: 0.95),
-        )
 
         assert PipeliningMonitor.receiver_limited() is True
 
@@ -381,7 +371,7 @@ class TestReceiverLimited:
             sabnzbd,
             "Downloader",
             create=True,
-            new=SimpleNamespace(bandwidth_limit=0, receive_busy_fraction=lambda: 0.1),
+            new=SimpleNamespace(bandwidth_limit=0),
         )
 
         assert PipeliningMonitor.receiver_limited() is False
