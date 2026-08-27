@@ -268,8 +268,6 @@ class Downloader(Thread):
         "server_restarts",
         "force_disconnect",
         "selector",
-        "select_time",
-        "receive_time",
         "servers",
         "timers",
         "last_max_chunk_size",
@@ -293,10 +291,6 @@ class Downloader(Thread):
 
         # Rate-limits the delay logging, which is otherwise once per pass
         self.next_delay_log: float = 0.0
-
-        # Time the last passes spent waiting for sockets against working them
-        self.select_time: float = 0.0
-        self.receive_time: float = 0.0
 
         # Used to see if we can add a slowdown to the Downloader-loop
         self.sleep_time: float = 0.0
@@ -716,10 +710,7 @@ class Downloader(Thread):
 
                 # Use select to find sockets ready for reading/writing
                 if self.selector.get_map():
-                    waited = time.monotonic()
-                    events = self.selector.select(timeout=1.0)
-                    self.select_time += time.monotonic() - waited
-                    if events:
+                    if events := self.selector.select(timeout=1.0):
                         for key, ev in events:
                             nw = key.data
                             process_nw_queue.put((nw, ev, nw.generation))
@@ -751,9 +742,7 @@ class Downloader(Thread):
                     continue
 
                 # Wait for socket operation completion
-                working = time.monotonic()
                 process_nw_queue.join()
-                self.receive_time += time.monotonic() - working
 
         except Exception:
             logging.error(T("Fatal error in Downloader"), exc_info=True)
@@ -854,14 +843,6 @@ class Downloader(Thread):
                 while self.bandwidth_limit and sabnzbd.BPSMeter.bps > self.bandwidth_limit:
                     time.sleep(0.01)
                     sabnzbd.BPSMeter.update()
-
-    def receive_busy_fraction(self) -> float:
-        """Share of the passes since last asked that went on working the sockets"""
-        total = self.select_time + self.receive_time
-        busy = self.receive_time / total if total else 0.0
-        self.select_time = 0.0
-        self.receive_time = 0.0
-        return busy
 
     def check_assembler_levels(self):
         """Sleep for part of this pass if the disk is behind what is being downloaded"""

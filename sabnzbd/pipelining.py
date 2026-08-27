@@ -60,9 +60,6 @@ DWELL = 15.0
 REPROBE_INTERVAL = 300.0
 # Throughput a probe has to gain to be kept
 REPROBE_GAIN = 0.03
-# Share of a downloader pass spent on the sockets above which the receive threads, not
-# the network, are what the connections are waiting for
-BUSY_FRACTION_LIMIT = 0.8
 
 
 @dataclass(slots=True)
@@ -250,9 +247,7 @@ class PipeliningMonitor:
         if sabnzbd.Assembler.delay() > 0:
             return True
         downloader = sabnzbd.Downloader
-        if downloader.bandwidth_limit and sabnzbd.BPSMeter.bps >= downloader.bandwidth_limit:
-            return True
-        return downloader.receive_busy_fraction() > BUSY_FRACTION_LIMIT
+        return bool(downloader.bandwidth_limit and sabnzbd.BPSMeter.bps >= downloader.bandwidth_limit)
 
     @staticmethod
     def tcp_snapshot(server) -> Optional[dict]:
