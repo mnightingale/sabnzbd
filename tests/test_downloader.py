@@ -27,6 +27,8 @@ from unittest import mock
 
 import sabnzbd.cfg
 from sabnzbd.downloader import Server, Downloader
+from selectors import EVENT_READ
+
 from sabnzbd.newswrapper import NewsWrapper
 from sabnzbd.get_addrinfo import AddrInfo
 
@@ -39,6 +41,7 @@ class FakeNNTPServer:
         self.port: int = port
         self.server_socket = None
         self.connections = []
+        self.commands = []
         self._stop = threading.Event()
         self._thread = None
 
@@ -71,6 +74,7 @@ class FakeNNTPServer:
                     data = conn.recv(1024)
                     if not data:
                         break
+                    self.commands.extend(line + b"\r\n" for line in data.split(b"\r\n") if line)
                     if data.startswith(b"QUIT"):
                         conn.sendall(b"205 Goodbye\r\n")
                         break
@@ -122,6 +126,7 @@ def mock_downloader(mocker):
     # Use real implementations for socket management
     downloader.add_socket = lambda nw: Downloader.add_socket(downloader, nw)
     downloader.remove_socket = lambda nw: Downloader.remove_socket(downloader, nw)
+    downloader.modify_socket = lambda nw, events: Downloader.modify_socket(downloader, nw, events)
     downloader.finish_connect_nw = lambda nw, resp: Downloader.finish_connect_nw(downloader, nw, resp)
     downloader.reset_nw = lambda nw, reset_msg=None, warn=False, wait=True, count_article_try=True, retry_article=True, article=None: Downloader.reset_nw(
         downloader, nw, reset_msg, warn, wait, count_article_try, retry_article, article
@@ -152,7 +157,7 @@ def test_server(request, fake_nntp_server, mocker):
         use_ssl=False,
         ssl_verify=0,
         ssl_ciphers="",
-        pipelining_requests=mocker.Mock(return_value=1),
+        pipelining_requests=mocker.Mock(return_value=params.get("pipelining_requests", 1)),
     )
     server.addrinfo = addrinfo
     return server
@@ -245,3 +250,133 @@ class TestConnectionStateMachine:
         assert nw.nntp is None
         assert nw.connected is False
         assert nw.ready is False
+
+
+class TestPipeliningDepth:
+    """How many requests a connection is allowed to have in flight at once"""
+
+    @staticmethod
+    def ready_connection(server, timeout: float = 5.0) -> NewsWrapper:
+        """A connected, authenticated NewsWrapper with the welcome banner consumed"""
+        nw = NewsWrapper(server, thrdnum=1)
+        server.idle_threads.add(nw)
+        nw.init_connect()
+
+        deadline = time.time() + timeout
+        while not nw.connected and time.time() < deadline:
+            time.sleep(0.01)
+        assert nw.connected
+
+        nw.nntp.sock.setblocking(True)
+        nw.nntp.sock.settimeout(2)
+        nw.read()
+        assert nw.ready
+        nw.nntp.sock.setblocking(False)
+        # What the downloader loop does once a connection has work for it
+        sabnzbd.Downloader.add_socket(nw)
+        return nw
+
+    @staticmethod
+    def offer(nw: NewsWrapper, count: int):
+        """Offer count requests, sending as many as the depth allows"""
+        for index in range(count):
+            nw.queue_command(b"DATE\r\n")
+            nw.write()
+
+    @staticmethod
+    def wait_for_commands(fake_server, count: int, timeout: float = 2.0):
+        deadline = time.time() + timeout
+        while len(fake_server.commands) < count and time.time() < deadline:
+            time.sleep(0.01)
+        return fake_server.commands
+
+    def test_welcome_banner_occupies_a_slot(self, test_server, mock_downloader):
+        nw = NewsWrapper(test_server, thrdnum=1)
+        test_server.idle_threads.add(nw)
+
+        nw.init_connect()
+
+        assert nw.decoder.expected == 1
+
+    @pytest.mark.parametrize("test_server", [{"pipelining_requests": 1}], indirect=True)
+    def test_depth_of_one_sends_one(self, test_server, fake_nntp_server, mock_downloader):
+        nw = self.ready_connection(test_server)
+
+        self.offer(nw, 4)
+
+        self.wait_for_commands(fake_nntp_server, 1)
+        assert fake_nntp_server.commands.count(b"DATE\r\n") == 1
+        assert nw.decoder.expected == 1
+
+    @pytest.mark.parametrize("test_server", [{"pipelining_requests": 3}], indirect=True)
+    def test_sends_up_to_the_configured_depth(self, test_server, fake_nntp_server, mock_downloader):
+        nw = self.ready_connection(test_server)
+
+        self.offer(nw, 6)
+
+        self.wait_for_commands(fake_nntp_server, 3)
+        assert fake_nntp_server.commands.count(b"DATE\r\n") == 3
+        assert nw.decoder.expected == 3
+
+    @pytest.mark.parametrize("test_server", [{"pipelining_requests": 2}], indirect=True)
+    def test_reaching_the_depth_stops_watching_for_write(self, test_server, fake_nntp_server, mock_downloader):
+        """Otherwise the socket stays writable and the loop spins on it"""
+        nw = self.ready_connection(test_server)
+
+        self.offer(nw, 4)
+
+        assert nw.selector_events == EVENT_READ
+
+    @pytest.mark.parametrize("test_server", [{"pipelining_requests": 3}], indirect=True)
+    def test_lowering_the_depth_stops_new_requests(self, test_server, fake_nntp_server, mock_downloader):
+        nw = self.ready_connection(test_server)
+        self.offer(nw, 1)
+        self.wait_for_commands(fake_nntp_server, 1)
+
+        test_server.effective_pipelining = 1
+        self.offer(nw, 3)
+
+        assert fake_nntp_server.commands.count(b"DATE\r\n") == 1
+
+    @pytest.mark.parametrize("test_server", [{"pipelining_requests": 1}], indirect=True)
+    def test_raising_the_depth_allows_more(self, test_server, fake_nntp_server, mock_downloader):
+        nw = self.ready_connection(test_server)
+        self.offer(nw, 2)
+        self.wait_for_commands(fake_nntp_server, 1)
+        assert fake_nntp_server.commands.count(b"DATE\r\n") == 1
+
+        test_server.effective_pipelining = 3
+        self.offer(nw, 2)
+
+        self.wait_for_commands(fake_nntp_server, 3)
+        assert fake_nntp_server.commands.count(b"DATE\r\n") == 3
+
+    @pytest.mark.parametrize("test_server", [{"pipelining_requests": 1}], indirect=True)
+    def test_failed_send_does_not_consume_a_slot(self, test_server, fake_nntp_server, mock_downloader, mocker):
+        """A send that has to be retried must not leave the depth permanently spent,
+        which at depth one would wedge the connection until it timed out"""
+        nw = self.ready_connection(test_server)
+        real_socket = nw.nntp.sock
+        refused = []
+
+        class RefuseFirstSend:
+            def __getattr__(self, name):
+                return getattr(real_socket, name)
+
+            def send(self, data):
+                if not refused:
+                    refused.append(data)
+                    raise BlockingIOError
+                return real_socket.send(data)
+
+        nw.nntp.sock = RefuseFirstSend()
+
+        nw.queue_command(b"DATE\r\n")
+        nw.write()
+
+        assert refused
+        assert nw.decoder.expected == 0
+        nw.write()
+
+        self.wait_for_commands(fake_nntp_server, 1)
+        assert fake_nntp_server.commands.count(b"DATE\r\n") == 1
