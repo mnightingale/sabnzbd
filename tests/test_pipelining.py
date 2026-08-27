@@ -19,10 +19,16 @@
 tests.test_pipelining - Test the pipelining depth controller
 """
 
+from itertools import pairwise
+from types import SimpleNamespace
+
 import pytest
+
+import sabnzbd
 
 from sabnzbd.pipelining import (
     DWELL,
+    PipeliningMonitor,
     EMA_ALPHA,
     LOWER_AFTER,
     REPROBE_INTERVAL,
@@ -134,7 +140,7 @@ class TestSteadiness:
         for index in range(LOWER_AFTER * 3):
             depths.append(controller.sample(make_sample(now=START + index * DWELL, transfer_time=3.0)))
 
-        steps = [abs(b - a) for a, b in zip(depths, depths[1:])]
+        steps = [abs(b - a) for a, b in pairwise(depths)]
         assert max(steps) <= 1
 
     def test_dwell_blocks_an_immediate_reversal(self):
@@ -143,9 +149,7 @@ class TestSteadiness:
         lowered = controller.depth
 
         for index in range(LOWER_AFTER):
-            controller.sample(
-                make_sample(now=controller.settled_at + 0.1 * index, transfer_time=0.01, round_trip=1.0)
-            )
+            controller.sample(make_sample(now=controller.settled_at + 0.1 * index, transfer_time=0.01, round_trip=1.0))
 
         assert controller.depth == lowered
 
@@ -243,3 +247,130 @@ class TestSmoothing:
 
         assert controller.transfer_time is None
         assert controller.round_trips == []
+
+
+class FakeConnection:
+    """Just the counters the sampler reads"""
+
+    def __init__(self, responses=20, transfer_total=1.5, idle_total=0.5, round_trip_total=0.32, round_trip_count=4):
+        self.responses_seen = responses
+        self.transfer_total = transfer_total
+        self.idle_total = idle_total
+        self.round_trip_total = round_trip_total
+        self.round_trip_count = round_trip_count
+
+
+def fake_server(configured=10, connections=()):
+    return SimpleNamespace(
+        id="server",
+        host="news.example.com",
+        addrinfo=SimpleNamespace(connection_time=0.02),
+        busy_threads=set(connections),
+        idle_threads=set(),
+        pipelining_requests=lambda: configured,
+        effective_pipelining=configured,
+        pipeline_controller=ServerPipelineController(configured),
+    )
+
+
+class TestMonitor:
+    def test_drains_the_connection_counters(self, mocker):
+        mocker.patch.object(sabnzbd, "BPSMeter", create=True, new=SimpleNamespace(server_bps={"server": 1e7}))
+        connection = FakeConnection()
+        server = fake_server(connections=[connection])
+
+        PipeliningMonitor().sample_server(server, now=START, limited=False)
+
+        assert connection.responses_seen == 0
+        assert connection.transfer_total == 0.0
+        assert connection.round_trip_count == 0
+
+    def test_a_window_of_measurements_reaches_the_controller(self, mocker):
+        mocker.patch.object(sabnzbd, "BPSMeter", create=True, new=SimpleNamespace(server_bps={"server": 1e7}))
+        server = fake_server(connections=[FakeConnection()])
+
+        PipeliningMonitor().sample_server(server, now=START, limited=False)
+
+        # 1.5 s of transfer over 20 responses, and 0.32 s of round trip over 4
+        assert server.pipeline_controller.transfer_time == pytest.approx(0.075)
+        assert server.pipeline_controller.round_trips == [(START, pytest.approx(0.08))]
+
+    def test_idle_fraction_is_of_the_time_the_connection_was_engaged(self, mocker):
+        mocker.patch.object(sabnzbd, "BPSMeter", create=True, new=SimpleNamespace(server_bps={"server": 1e7}))
+        server = fake_server(connections=[FakeConnection(transfer_total=1.5, idle_total=0.5)])
+
+        PipeliningMonitor().sample_server(server, now=START, limited=False)
+
+        assert server.pipeline_controller.idle_fraction == pytest.approx(0.25)
+
+    def test_a_server_with_no_traffic_is_left_alone(self, mocker):
+        mocker.patch.object(sabnzbd, "BPSMeter", create=True, new=SimpleNamespace(server_bps={}))
+        server = fake_server(connections=[FakeConnection(responses=0, transfer_total=0.0, round_trip_count=0)])
+
+        PipeliningMonitor().sample_server(server, now=START, limited=False)
+
+        assert server.effective_pipelining == 10
+        assert server.pipeline_controller.transfer_time is None
+
+    def test_the_depth_reaches_the_server(self, mocker):
+        mocker.patch.object(sabnzbd, "BPSMeter", create=True, new=SimpleNamespace(server_bps={"server": 1e7}))
+        server = fake_server(connections=[FakeConnection()])
+        monitor = PipeliningMonitor()
+
+        for index in range(120):
+            server.busy_threads = {FakeConnection(transfer_total=60.0, round_trip_total=0.04)}
+            monitor.sample_server(server, now=START + index * 2.0, limited=False)
+
+        assert server.effective_pipelining == 2
+
+    def test_a_limited_window_reaches_the_controller_as_such(self, mocker):
+        mocker.patch.object(sabnzbd, "BPSMeter", create=True, new=SimpleNamespace(server_bps={"server": 1e7}))
+        server = fake_server(connections=[FakeConnection(transfer_total=60.0)])
+
+        PipeliningMonitor().sample_server(server, now=START, limited=True)
+
+        assert server.effective_pipelining == 10
+        assert server.pipeline_controller.transfer_time is None
+
+
+class TestReceiverLimited:
+    def test_assembler_backpressure_counts(self, mocker):
+        mocker.patch.object(sabnzbd, "Assembler", create=True, new=SimpleNamespace(delay=lambda: 0.1))
+
+        assert PipeliningMonitor.receiver_limited() is True
+
+    def test_hitting_the_bandwidth_limit_counts(self, mocker):
+        mocker.patch.object(sabnzbd, "Assembler", create=True, new=SimpleNamespace(delay=lambda: 0.0))
+        mocker.patch.object(sabnzbd, "BPSMeter", create=True, new=SimpleNamespace(bps=1e7))
+        mocker.patch.object(
+            sabnzbd,
+            "Downloader",
+            create=True,
+            new=SimpleNamespace(bandwidth_limit=1e6, receive_busy_fraction=lambda: 0.0),
+        )
+
+        assert PipeliningMonitor.receiver_limited() is True
+
+    def test_saturated_receive_threads_count(self, mocker):
+        mocker.patch.object(sabnzbd, "Assembler", create=True, new=SimpleNamespace(delay=lambda: 0.0))
+        mocker.patch.object(sabnzbd, "BPSMeter", create=True, new=SimpleNamespace(bps=0.0))
+        mocker.patch.object(
+            sabnzbd,
+            "Downloader",
+            create=True,
+            new=SimpleNamespace(bandwidth_limit=0, receive_busy_fraction=lambda: 0.95),
+        )
+
+        assert PipeliningMonitor.receiver_limited() is True
+
+    def test_an_unconstrained_downloader_is_not_limited(self, mocker):
+        mocker.patch.object(sabnzbd, "Assembler", create=True, new=SimpleNamespace(delay=lambda: 0.0))
+        mocker.patch.object(sabnzbd, "BPSMeter", create=True, new=SimpleNamespace(bps=1e7))
+        mocker.patch.object(
+            sabnzbd,
+            "Downloader",
+            create=True,
+            new=SimpleNamespace(bandwidth_limit=0, receive_busy_fraction=lambda: 0.1),
+        )
+
+        assert PipeliningMonitor.receiver_limited() is False
