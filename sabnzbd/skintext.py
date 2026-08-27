@@ -583,6 +583,7 @@ SKIN_TEXT = {
         "Request multiple articles per connection without waiting for each response first.<br />"
         "This can improve download speeds, especially on connections with higher latency."
     ),
+    "Glitter-pipelining": TT("Articles in flight"),  #: Status page: articles requested at once
     "button-addServer": TT("Add Server"),  #: Button: Add server
     "button-delServer": TT("Remove Server"),  #: Button: Remove server
     "button-testServer": TT("Test Server"),  #: Button: Test server

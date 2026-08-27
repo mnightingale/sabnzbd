@@ -26,6 +26,7 @@ import logging
 import re
 import gc
 import socket
+import statistics
 import time
 import getpass
 import urllib.parse
@@ -1665,7 +1666,20 @@ def build_status(calculate_performance: bool = False, skip_dashboard: bool = Fal
             "serverpriority": server.priority,
             "serveroptional": server.optional,
             "serverbps": to_units(sabnzbd.BPSMeter.server_bps.get(server.id, 0)),
+            "serverpipelining": server.effective_pipelining,
+            "serverpipeliningmax": server.pipelining_requests(),
+            "serverrtt": None,
+            "servertransfertime": None,
+            "serveridlepercentage": None,
         }
+
+        controller = server.pipeline_controller
+        if controller.transfer_time is not None:
+            server_info["servertransfertime"] = round(controller.transfer_time * 1000)
+        if controller.round_trips:
+            server_info["serverrtt"] = round(statistics.median(value for _, value in controller.round_trips) * 1000)
+        if controller.idle_fraction is not None:
+            server_info["serveridlepercentage"] = round(controller.idle_fraction * 100)
 
         # Only add this information if we are connected
         if activeconn and server.addrinfo:
