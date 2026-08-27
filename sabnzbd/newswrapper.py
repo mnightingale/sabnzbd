@@ -659,6 +659,13 @@ class NNTP:
 
             self.sock.connect(self.addrinfo.sockaddr)
 
+            # Requests are far smaller than a segment, so waiting to coalesce them only
+            # delays them by up to the peer's delayed-ack timer
+            try:
+                self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except OSError:
+                logging.debug("%s@%s: Could not disable Nagle", self.nw.thrdnum, self.nw.server.host)
+
             # Secured or unsecured?
             if self.nw.server.ssl:
                 # Wrap socket and log SSL/TLS diagnostic info
