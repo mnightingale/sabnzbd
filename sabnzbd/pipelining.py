@@ -32,9 +32,16 @@ be. Below it, the connection sits idle between articles.
 import logging
 import math
 import statistics
+import threading
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+import sabnzbd
+from sabnzbd.decorators import synchronized
+
+# Seconds between reconsidering the depths
+SAMPLE_INTERVAL = 2.0
 # Weight of the newest reading in the smoothed figures
 EMA_ALPHA = 0.3
 # Responses a window needs before it is allowed to say anything
@@ -51,6 +58,9 @@ DWELL = 15.0
 REPROBE_INTERVAL = 300.0
 # Throughput a probe has to gain to be kept
 REPROBE_GAIN = 0.03
+# Share of a downloader pass spent on the sockets above which the receive threads, not
+# the network, are what the connections are waiting for
+BUSY_FRACTION_LIMIT = 0.8
 
 
 @dataclass(slots=True)
@@ -201,3 +211,95 @@ class ServerPipelineController:
         self.agreed = 0
         self.settled_at = sample.now
         return self.depth
+
+
+class PipeliningMonitor:
+    """Reads what the connections measured and tells each server what depth to hold"""
+
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.sampled_at: float = 0.0
+
+    @synchronized()
+    def sample(self):
+        """Called every downloader tick, acts on its own slower interval"""
+        now = time.monotonic()
+        if now - self.sampled_at < SAMPLE_INTERVAL:
+            return
+        self.sampled_at = now
+
+        limited = self.receiver_limited()
+        for server in sabnzbd.Downloader.servers:
+            self.sample_server(server, now, limited)
+
+    @synchronized()
+    def reset(self):
+        """Drop what was measured, for servers that stopped downloading"""
+        for server in sabnzbd.Downloader.servers:
+            server.pipeline_controller.reset()
+
+    @staticmethod
+    def receiver_limited() -> bool:
+        """Whether the downloader was holding the connections back itself.
+
+        Any of these inflate the measurements without the pipeline having anything to do
+        with it, so a window that saw one is not evidence either way."""
+        if sabnzbd.Assembler.delay() > 0:
+            return True
+        downloader = sabnzbd.Downloader
+        if downloader.bandwidth_limit and sabnzbd.BPSMeter.bps >= downloader.bandwidth_limit:
+            return True
+        return downloader.receive_busy_fraction() > BUSY_FRACTION_LIMIT
+
+    def sample_server(self, server, now: float, limited: bool):
+        """Take one window from a server's connections and apply the answer"""
+        responses = 0
+        transfer_total = 0.0
+        idle_total = 0.0
+        round_trips = []
+
+        for nw in tuple(server.busy_threads) + tuple(server.idle_threads):
+            # Read and clear rather than tracking deltas; a response landing between the
+            # two only costs this window a little accuracy
+            responses += nw.responses_seen
+            transfer_total += nw.transfer_total
+            idle_total += nw.idle_total
+            if nw.round_trip_count:
+                round_trips.append(nw.round_trip_total / nw.round_trip_count)
+            nw.responses_seen = 0
+            nw.transfer_total = 0.0
+            nw.idle_total = 0.0
+            nw.round_trip_total = 0.0
+            nw.round_trip_count = 0
+
+        engaged = transfer_total + idle_total
+        sample = PipelineSample(
+            now=now,
+            configured=server.pipelining_requests(),
+            responses=responses,
+            transfer_time=transfer_total / responses if responses else 0.0,
+            round_trips=round_trips,
+            connect_time=server.addrinfo.connection_time if server.addrinfo else None,
+            idle_fraction=idle_total / engaged if engaged else 0.0,
+            throughput=sabnzbd.BPSMeter.server_bps.get(server.id, 0.0),
+            receiver_limited=limited,
+        )
+
+        depth = server.pipeline_controller.sample(sample)
+        if depth != server.effective_pipelining:
+            logging.info(
+                "Pipelining depth for %s now %d of %d (round trip %s, article %s, idle %.0f%%)",
+                server.host,
+                depth,
+                sample.configured,
+                to_time(server.pipeline_controller.round_trip(sample)),
+                to_time(server.pipeline_controller.transfer_time),
+                (server.pipeline_controller.idle_fraction or 0.0) * 100,
+            )
+            server.effective_pipelining = depth
+
+
+def to_time(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "unknown"
+    return "%.0f ms" % (seconds * 1000)

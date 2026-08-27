@@ -71,6 +71,12 @@ class NewsWrapper:
         "force_login",
         "next_request",
         "selector_events",
+        "responses_seen",
+        "transfer_total",
+        "idle_total",
+        "round_trip_total",
+        "round_trip_count",
+        "last_complete_at",
         "lock",
         "generation",
         "tls_wants_write",
@@ -102,6 +108,14 @@ class NewsWrapper:
         # Command queue and concurrency
         self.next_request: Optional[tuple[bytes, Optional[sabnzbd.nzb.Article]]] = None
         self.selector_events = 0
+
+        # Totals since the last time the pipelining sampler took them
+        self.responses_seen: int = 0
+        self.transfer_total: float = 0.0
+        self.idle_total: float = 0.0
+        self.round_trip_total: float = 0.0
+        self.round_trip_count: int = 0
+        self.last_complete_at: float = 0.0
         self.tls_wants_write: bool = False
 
     @property
@@ -242,6 +256,7 @@ class NewsWrapper:
 
     def on_response(self, response: sabctools.NNTPResponse, article: Optional["sabnzbd.nzb.Article"]) -> None:
         """A response to a NNTP request is received"""
+        self.record_timing(response)
         server = self.server
         article_done = response.status_code in (220, 222) and article
 
@@ -313,6 +328,21 @@ class NewsWrapper:
 
             if sabnzbd.LOG_ALL:
                 logging.debug("Thread %s@%s: %s done", self.thrdnum, server.host, article.article)
+
+    def record_timing(self, response: sabctools.NNTPResponse) -> None:
+        """Fold this response into what the sampler will read next"""
+        if (sent_at := response.sent_at) is not None:
+            # Idle from whichever came last: this request going out, or the response
+            # ahead of it finishing and freeing the connection
+            if (gap := response.first_byte_at - max(sent_at, self.last_complete_at)) > 0:
+                self.idle_total += gap
+            if not response.depth_at_send:
+                self.round_trip_total += response.wait_time
+                self.round_trip_count += 1
+
+        self.last_complete_at = response.complete_at
+        self.transfer_total += response.transfer_time
+        self.responses_seen += 1
 
     def read(
         self,

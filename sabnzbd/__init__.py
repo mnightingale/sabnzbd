@@ -84,6 +84,7 @@ from sabnzbd.version import __version__, __baseline__
 import sabnzbd.misc as misc
 import sabnzbd.filesystem as filesystem
 import sabnzbd.writemonitor
+import sabnzbd.pipelining
 import sabnzbd.powersup as powersup
 import sabnzbd.encoding as encoding
 import sabnzbd.config as config
@@ -132,6 +133,7 @@ RSSReader: sabnzbd.rss.RSSReader
 Scheduler: sabnzbd.scheduler.Scheduler
 SessionStore: sabnzbd.sessionstore.SessionStore
 WriteMonitor: sabnzbd.writemonitor.WriteMonitor
+PipeliningMonitor: sabnzbd.pipelining.PipeliningMonitor
 
 # For backwards compatibility with pre-5.0 queue files
 sys.modules["sabnzbd.nzbstuff"] = sabnzbd.nzb
@@ -310,6 +312,7 @@ def initialize(pause_downloader=False, clean_up=False, repair=0):
     sabnzbd.Scheduler = sabnzbd.scheduler.Scheduler()
     sabnzbd.SessionStore = sabnzbd.sessionstore.SessionStore()
     sabnzbd.WriteMonitor = sabnzbd.writemonitor.WriteMonitor()
+    sabnzbd.PipeliningMonitor = sabnzbd.pipelining.PipeliningMonitor()
 
     # Run startup tasks
     sabnzbd.NzbQueue.read_queue(repair)

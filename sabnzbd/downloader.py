@@ -36,6 +36,7 @@ import sabnzbd
 from sabnzbd.constants import DOWNLOADER_TICK
 from sabnzbd.decorators import synchronized, NzbQueueLocker, DOWNLOADER_CV, DOWNLOADER_LOCK
 from sabnzbd.newswrapper import NewsWrapper, NNTPPermanentError
+from sabnzbd.pipelining import ServerPipelineController
 import sabnzbd.config as config
 import sabnzbd.cfg as cfg
 from sabnzbd.misc import from_units, helpful_warning, int_conv, MultiAddQueue, to_units
@@ -86,6 +87,7 @@ class Server:
         "password",
         "pipelining_requests",
         "effective_pipelining",
+        "pipeline_controller",
         "busy_threads",
         "next_busy_threads_check",
         "idle_threads",
@@ -142,6 +144,7 @@ class Server:
         self.pipelining_requests: Callable[[], int] = pipelining_requests
         # Requests allowed in flight per connection, never above what is configured
         self.effective_pipelining: int = pipelining_requests()
+        self.pipeline_controller = ServerPipelineController(self.effective_pipelining)
 
         self.busy_threads: set[NewsWrapper] = set()
         self.next_busy_threads_check: float = 0
@@ -265,6 +268,8 @@ class Downloader(Thread):
         "server_restarts",
         "force_disconnect",
         "selector",
+        "select_time",
+        "receive_time",
         "servers",
         "timers",
         "last_max_chunk_size",
@@ -288,6 +293,10 @@ class Downloader(Thread):
 
         # Rate-limits the delay logging, which is otherwise once per pass
         self.next_delay_log: float = 0.0
+
+        # Time the last passes spent waiting for sockets against working them
+        self.select_time: float = 0.0
+        self.receive_time: float = 0.0
 
         # Used to see if we can add a slowdown to the Downloader-loop
         self.sleep_time: float = 0.0
@@ -451,6 +460,7 @@ class Downloader(Thread):
             if self.no_active_jobs():
                 sabnzbd.BPSMeter.reset()
                 sabnzbd.WriteMonitor.forget_rate()
+                sabnzbd.PipeliningMonitor.reset()
             if cfg.autodisconnect():
                 self.disconnect()
 
@@ -706,7 +716,10 @@ class Downloader(Thread):
 
                 # Use select to find sockets ready for reading/writing
                 if self.selector.get_map():
-                    if events := self.selector.select(timeout=1.0):
+                    waited = time.monotonic()
+                    events = self.selector.select(timeout=1.0)
+                    self.select_time += time.monotonic() - waited
+                    if events:
                         for key, ev in events:
                             nw = key.data
                             process_nw_queue.put((nw, ev, nw.generation))
@@ -714,6 +727,7 @@ class Downloader(Thread):
                     events = []
                     BPSMeter.reset()
                     sabnzbd.WriteMonitor.forget_rate()
+                    sabnzbd.PipeliningMonitor.reset()
                     time.sleep(0.1)
                     self.max_chunk_size = _DEFAULT_CHUNK_SIZE
                     with DOWNLOADER_CV:
@@ -731,12 +745,15 @@ class Downloader(Thread):
                     next_bpsmeter_update = now + DOWNLOADER_TICK
                     self.check_assembler_levels()
                     sabnzbd.WriteMonitor.sample()
+                    sabnzbd.PipeliningMonitor.sample()
 
                 if not events:
                     continue
 
                 # Wait for socket operation completion
+                working = time.monotonic()
                 process_nw_queue.join()
+                self.receive_time += time.monotonic() - working
 
         except Exception:
             logging.error(T("Fatal error in Downloader"), exc_info=True)
@@ -837,6 +854,14 @@ class Downloader(Thread):
                 while self.bandwidth_limit and sabnzbd.BPSMeter.bps > self.bandwidth_limit:
                     time.sleep(0.01)
                     sabnzbd.BPSMeter.update()
+
+    def receive_busy_fraction(self) -> float:
+        """Share of the passes since last asked that went on working the sockets"""
+        total = self.select_time + self.receive_time
+        busy = self.receive_time / total if total else 0.0
+        self.select_time = 0.0
+        self.receive_time = 0.0
+        return busy
 
     def check_assembler_levels(self):
         """Sleep for part of this pass if the disk is behind what is being downloaded"""
