@@ -330,7 +330,14 @@ class NewsWrapper:
                 logging.debug("Thread %s@%s: %s done", self.thrdnum, server.host, article.article)
 
     def record_timing(self, response: sabctools.NNTPResponse) -> None:
-        """Fold this response into what the sampler will read next"""
+        """Fold this response into what the sampler will read next.
+
+        Only article responses. The welcome banner is expected before the socket has
+        even connected, so its wait covers the whole handshake, and it and the auth
+        replies are single lines rather than bodies."""
+        if not response.context:
+            return
+
         if (sent_at := response.sent_at) is not None:
             # Idle from whichever came last: this request going out, or the response
             # ahead of it finishing and freeing the connection

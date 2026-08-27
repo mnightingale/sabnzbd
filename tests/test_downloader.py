@@ -23,6 +23,7 @@ import socket
 import threading
 import pytest
 import time
+from types import SimpleNamespace
 from unittest import mock
 
 import sabnzbd.cfg
@@ -380,3 +381,65 @@ class TestPipeliningDepth:
 
         self.wait_for_commands(fake_nntp_server, 1)
         assert fake_nntp_server.commands.count(b"DATE\r\n") == 1
+
+
+def fake_response(context="article", sent_at=100.0, first_byte_at=100.05, complete_at=100.2, depth_at_send=0):
+    return SimpleNamespace(
+        context=context,
+        sent_at=sent_at,
+        first_byte_at=first_byte_at,
+        complete_at=complete_at,
+        depth_at_send=depth_at_send,
+        wait_time=None if sent_at is None else first_byte_at - sent_at,
+        transfer_time=complete_at - first_byte_at,
+    )
+
+
+class TestRecordTiming:
+    """What the pipelining sampler is handed for each response"""
+
+    def test_an_article_is_counted(self, test_server, mock_downloader):
+        nw = NewsWrapper(test_server, thrdnum=1)
+
+        nw.record_timing(fake_response())
+
+        assert nw.responses_seen == 1
+        assert nw.transfer_total == pytest.approx(0.15)
+        assert nw.round_trip_count == 1
+        assert nw.round_trip_total == pytest.approx(0.05)
+
+    def test_the_welcome_banner_is_not_counted(self, test_server, mock_downloader):
+        """It is expected before the socket connects, so its wait is the handshake and
+        its body is one line, and both would skew what an article looks like"""
+        nw = NewsWrapper(test_server, thrdnum=1)
+
+        nw.record_timing(fake_response(context=None, sent_at=100.0, first_byte_at=100.4, complete_at=100.4001))
+
+        assert nw.responses_seen == 0
+        assert nw.transfer_total == 0.0
+        assert nw.round_trip_count == 0
+
+    def test_a_pipelined_response_is_no_round_trip_measurement(self, test_server, mock_downloader):
+        nw = NewsWrapper(test_server, thrdnum=1)
+
+        nw.record_timing(fake_response(depth_at_send=2))
+
+        assert nw.responses_seen == 1
+        assert nw.round_trip_count == 0
+
+    def test_a_busy_connection_records_no_idle_time(self, test_server, mock_downloader):
+        """The next response was already arriving when the previous one finished"""
+        nw = NewsWrapper(test_server, thrdnum=1)
+
+        nw.record_timing(fake_response(sent_at=100.0, first_byte_at=100.05, complete_at=100.2))
+        nw.record_timing(fake_response(sent_at=100.01, first_byte_at=100.2, complete_at=100.35, depth_at_send=1))
+
+        assert nw.idle_total == pytest.approx(0.05)
+
+    def test_a_drained_connection_records_the_wait(self, test_server, mock_downloader):
+        nw = NewsWrapper(test_server, thrdnum=1)
+
+        nw.record_timing(fake_response(sent_at=100.0, first_byte_at=100.05, complete_at=100.2))
+        nw.record_timing(fake_response(sent_at=100.2, first_byte_at=100.25, complete_at=100.4))
+
+        assert nw.idle_total == pytest.approx(0.10)
