@@ -85,6 +85,7 @@ class Server:
         "username",
         "password",
         "pipelining_requests",
+        "effective_pipelining",
         "busy_threads",
         "next_busy_threads_check",
         "idle_threads",
@@ -139,6 +140,8 @@ class Server:
         self.username: Optional[str] = username
         self.password: Optional[str] = password
         self.pipelining_requests: Callable[[], int] = pipelining_requests
+        # Requests allowed in flight per connection, never above what is configured
+        self.effective_pipelining: int = pipelining_requests()
 
         self.busy_threads: set[NewsWrapper] = set()
         self.next_busy_threads_check: float = 0
