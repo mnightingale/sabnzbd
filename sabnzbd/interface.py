@@ -981,7 +981,6 @@ SPECIAL_BOOL_LIST = (
     "direct_decode",
 )
 SPECIAL_VALUE_LIST = (
-    "downloader_sleep_time",
     "size_limit",
     "nomedia_marker",
     "max_url_retries",
