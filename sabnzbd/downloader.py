@@ -258,6 +258,7 @@ class Downloader(Thread):
         "shutdown",
         "server_restarts",
         "force_disconnect",
+        "check_servers",
         "selector",
         "servers",
         "timers",
@@ -280,6 +281,9 @@ class Downloader(Thread):
 
         # Rate-limits the delay logging, which is otherwise once per pass
         self.next_delay_log: float = 0.0
+
+        # Set when idle connections may have work waiting for them
+        self.check_servers: bool = True
 
         self.paused_for_postproc: bool = False
         self.shutdown: bool = False
@@ -398,6 +402,7 @@ class Downloader(Thread):
             nw.server.busy_threads.discard(nw)
             nw.server.idle_threads.add(nw)
             nw.timeout = None
+            self.check_servers = True
             try:
                 self.selector.unregister(nw.nntp.fileno)
                 nw.selector_events = 0
@@ -566,6 +571,7 @@ class Downloader(Thread):
         BPSMeter = sabnzbd.BPSMeter
         BPSMeter.update()
         next_bpsmeter_update = 0
+        next_server_scan = 0
 
         # Check server expiration dates
         check_server_expiration()
@@ -581,79 +587,83 @@ class Downloader(Thread):
         try:
             while 1:
                 now = time.time()
-                for server in self.servers:
-                    # Skip this server if there's no point searching for new stuff to do
-                    if server.addrinfo and not server.busy_threads and server.next_article_search > now:
-                        continue
-
-                    if server.next_busy_threads_check < now:
-                        server.next_busy_threads_check = now + _SERVER_CHECK_DELAY
-                        for nw in server.busy_threads.copy():
-                            if (nw.nntp and nw.nntp.error_msg) or (nw.timeout and now > nw.timeout):
-                                if nw.nntp and nw.nntp.error_msg:
-                                    # Already showed error
-                                    self.reset_nw(nw)
-                                else:
-                                    self.reset_nw(nw, "Timed out", warn=True)
-                                server.bad_cons += 1
-                                self.maybe_block_server(server)
-
-                    if server.restart:
-                        if not server.busy_threads:
-                            server.stop()
-                            self.servers.remove(server)
-                            if newid := server.newid:
-                                self.init_server(None, newid)
-                            self.server_restarts -= 1
-                            # Have to leave this loop, because we removed element
-                            break
-                        else:
-                            # Restart pending, don't add new articles
+                if self.check_servers or now > next_server_scan:
+                    self.check_servers = False
+                    next_server_scan = now + _SERVER_CHECK_DELAY
+                    for server in self.servers:
+                        # Skip this server if there's no point searching for new stuff to do
+                        if server.addrinfo and not server.busy_threads and server.next_article_search > now:
                             continue
 
-                    if (
-                        not server.idle_threads
-                        or self.no_active_jobs()
-                        or self.shutdown
-                        or self.paused_for_postproc
-                        or not server.active
-                    ):
-                        continue
+                        if server.next_busy_threads_check < now:
+                            server.next_busy_threads_check = now + _SERVER_CHECK_DELAY
+                            for nw in server.busy_threads.copy():
+                                if (nw.nntp and nw.nntp.error_msg) or (nw.timeout and now > nw.timeout):
+                                    if nw.nntp and nw.nntp.error_msg:
+                                        # Already showed error
+                                        self.reset_nw(nw)
+                                    else:
+                                        self.reset_nw(nw, "Timed out", warn=True)
+                                    server.bad_cons += 1
+                                    self.maybe_block_server(server)
 
-                    for nw in server.idle_threads.copy():
-                        if nw.timeout:
-                            if now < nw.timeout:
-                                continue
+                        if server.restart:
+                            if not server.busy_threads:
+                                server.stop()
+                                self.servers.remove(server)
+                                if newid := server.newid:
+                                    self.init_server(None, newid)
+                                self.server_restarts -= 1
+                                # Have to leave this loop, because we removed element
+                                self.check_servers = True
+                                break
                             else:
-                                nw.timeout = None
+                                # Restart pending, don't add new articles
+                                continue
 
-                        if not server.addrinfo:
-                            # Only request info if there's stuff in the queue
-                            if not sabnzbd.NzbQueue.is_empty():
-                                self.maybe_block_server(server)
-                                server.request_addrinfo()
-                            break
+                        if (
+                            not server.idle_threads
+                            or self.no_active_jobs()
+                            or self.shutdown
+                            or self.paused_for_postproc
+                            or not server.active
+                        ):
+                            continue
 
-                        if not server.get_article(peek=True):
-                            break
+                        for nw in server.idle_threads.copy():
+                            if nw.timeout:
+                                if now < nw.timeout:
+                                    continue
+                                else:
+                                    nw.timeout = None
 
-                        if nw.connected:
-                            # Assign a request immediately if NewsWrapper is ready, if we wait until the socket is
-                            # selected all idle connections will be activated when there may only be one request
-                            nw.prepare_request()
-                            self.add_socket(nw)
-                        elif not nw.nntp:
-                            try:
-                                logging.info("%s@%s: Initiating connection", nw.thrdnum, server.host)
-                                nw.init_connect()
-                            except Exception:
-                                logging.error(
-                                    T("Failed to initialize %s@%s with reason: %s"),
-                                    nw.thrdnum,
-                                    server.host,
-                                    sys.exc_info()[1],
-                                )
-                                self.reset_nw(nw, "Failed to initialize", warn=True)
+                            if not server.addrinfo:
+                                # Only request info if there's stuff in the queue
+                                if not sabnzbd.NzbQueue.is_empty():
+                                    self.maybe_block_server(server)
+                                    server.request_addrinfo()
+                                break
+
+                            if not server.get_article(peek=True):
+                                break
+
+                            if nw.connected:
+                                # Assign a request immediately if NewsWrapper is ready, if we wait until the socket is
+                                # selected all idle connections will be activated when there may only be one request
+                                nw.prepare_request()
+                                self.add_socket(nw)
+                            elif not nw.nntp:
+                                try:
+                                    logging.info("%s@%s: Initiating connection", nw.thrdnum, server.host)
+                                    nw.init_connect()
+                                except Exception:
+                                    logging.error(
+                                        T("Failed to initialize %s@%s with reason: %s"),
+                                        nw.thrdnum,
+                                        server.host,
+                                        sys.exc_info()[1],
+                                    )
+                                    self.reset_nw(nw, "Failed to initialize", warn=True)
 
                 if self.force_disconnect or self.shutdown:
                     for server in self.servers:
