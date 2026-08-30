@@ -48,5 +48,9 @@ ignore = [
 markers = [
     "config",
     "platform",
-    "fake_fs"
+    "fake_fs",
+    "visual"
 ]
+# The visual harness photographs the interface rather than asserting on it, and is only
+# meaningful when its output is compared against another run, so it is opt-in
+addopts = "-m 'not visual'"

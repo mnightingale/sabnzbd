@@ -33,6 +33,7 @@ SABnzbd-*/
 # Testing folders
 tests/cache
 tests/cache_gw*
+tests/output
 
 # General junk
 *.keep

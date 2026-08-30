@@ -98,7 +98,7 @@ def _find_free_port(host: str = SAB_HOST) -> int:
         return sock.getsockname()[1]
 
 
-SAB_PORT = _find_free_port()
+SAB_PORT = int(os.environ.get("SAB_TEST_PORT") or 0) or _find_free_port()
 SAB_APIKEY = "apikey"
 SAB_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SAB_CACHE_DIR = os.path.join(SAB_BASE_DIR, "cache" + _WORKER_SUFFIX)
