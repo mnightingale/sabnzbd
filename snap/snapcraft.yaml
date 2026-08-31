@@ -45,6 +45,7 @@ parts:
       - python3-dev
       - libssl-dev
       - cargo
+      - curl
       - rsync
     override-pull: |
       craftctl default
@@ -61,11 +62,21 @@ parts:
       craftctl default
       mv pyproject.toml.snapcraft-backup pyproject.toml
       python3 tools/make_mo.py
+      # core24 carries Node 18, which Vite does not support
+      NODE_VERSION=$(tr -d 'v \n' < frontend/.nvmrc)
+      NODE_ARCH=$(dpkg --print-architecture | sed 's/amd64/x64/')
+      NODE_DIR="node-v${NODE_VERSION}-linux-${NODE_ARCH}"
+      curl -sSL "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_DIR}.tar.xz" | tar -xJ -C "${CRAFT_PART_BUILD}"
+      export PATH="${CRAFT_PART_BUILD}/${NODE_DIR}/bin:${PATH}"
+      npm --prefix frontend ci
+      npm --prefix frontend run build
       rsync -av --mkpath \
         --exclude=.git \
         --exclude=.github \
         --exclude=builder \
+        --exclude=frontend \
         --exclude=macos \
+        --exclude=node-v* \
         --exclude=po \
         --exclude=snap \
         --exclude=tests \
