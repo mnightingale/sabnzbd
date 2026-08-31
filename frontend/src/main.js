@@ -2,8 +2,11 @@ import { checkAllFiles, displayDateTime, hideCompletedFiles, keepOpen, localStor
 import { ViewModel } from "./viewmodel.js";
 import "./knockout-extensions.js";
 
+const translations = document.getElementById("sab-translations");
+
 // Knockout binding expressions and inline handlers in the templates resolve against the window
 Object.assign(window, {
+    glitterTranslate: translations ? JSON.parse(translations.textContent) : {},
     checkAllFiles,
     displayDateTime,
     hideCompletedFiles,

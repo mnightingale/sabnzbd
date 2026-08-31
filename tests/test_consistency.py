@@ -49,13 +49,18 @@ class TestSkintext:
                         data = myfile.read().replace("\n", "")
                     combined_files = combined_files + data
 
+        # Glitter's texts are translated into a JSON payload instead of the template
+        with open(os.path.join("sabnzbd", "api.py"), "r") as myfile:
+            combined_files = combined_files + myfile.read().replace("\n", "")
+
         # Items to ignore, we might use them in the future!
         to_ignore = ("sch-", "hours", "removeNZB", "purgeNZBs", "purgeQueue", "menu-home")
 
         # Search for translation function
         not_found = []
         for key in SKIN_TEXT:
-            if "T('" + key not in combined_files and 'T("' + key not in combined_files:
+            calls = ("T('" + key, 'T("' + key, "Tjson('" + key, 'Tjson("' + key)
+            if not any(call in combined_files for call in calls):
                 if not key.startswith(to_ignore):
                     not_found.append(key)
 
