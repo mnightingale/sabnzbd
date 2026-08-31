@@ -1943,10 +1943,110 @@ def Ttemplate(txt: str) -> str:
     return result
 
 
+_TRANSLATIONS_JSON: str = ""
+
+
+def Tjson(txt: str) -> str:
+    """Translation for the JSON payload, where the quoting is left to json.dumps"""
+    return T(SKIN_TEXT.get(txt, txt)).replace("\n", "").replace("\r", "")
+
+
+def glitter_translations() -> str:
+    """The texts Glitter's scripts need, as a JSON payload for the page"""
+    global _TRANSLATIONS_JSON
+    if _TRANSLATIONS_JSON:
+        return _TRANSLATIONS_JSON
+
+    translations = {
+        "paused": Tjson("post-Paused"),
+        "left": Tjson("Glitter-left"),
+        "clearOrphanWarning": Tjson("Glitter-clearOrphanWarning"),
+        "pausePromptFail": Tjson("Glitter-pausePromptFail"),
+        "pauseFor": Tjson("pauseFor"),
+        "minutes": Tjson("mins"),
+        "shutdown": Tjson("shutdownOK?"),
+        "restart": re.sub(r"<br\s*/?>", "\n", f"{Tjson('explain-Restart')} {Tjson('explain-needNewLogin')}"),
+        "repair": Tjson("explain-Repair").replace("<br />", "\n"),
+        "confirm": Tjson("confirm"),
+        "markComplete": Tjson("button-mark-completed"),
+        "renameAbort": f"{Tjson('Glitter-confirmAbortDirectUnpack')}\n{Tjson('confirm')}",
+        "retryAll": f"{Tjson('link-retryAll')}?",
+        "fetch": Tjson("Glitter-fetch"),
+        "checking": Tjson("post-Checking"),
+        "misingArt": Tjson("missingArt"),
+        "fetchingURL": Tjson("Glitter-addFromURL"),
+        "chooseFile": Tjson("Glitter-chooseFile"),
+        "orphanedJobsMsg": Tjson("explain-orphans"),
+        "useCache": Tjson("explain-cache_limitstr").replace("64M", "256M").replace("128M", "512M"),
+        "noLocalStorage": Tjson("Glitter-noLocalStorage"),
+        "glitterTips": Tjson("Glitter-glitterTips"),
+        "updateAvailable": Tjson("Glitter-updateAvailable"),
+        "defaultText": Tjson("default"),
+        "noneText": Tjson("None"),
+        "moreText": Tjson("Glitter-more"),
+        "column": {
+            "category": Tjson("category"),
+            "priority": Tjson("priority"),
+            "processing": Tjson("swtag-pp"),
+            "scripts": Tjson("eoq-scripts"),
+            "age": Tjson("nzo-age"),
+            "size": Tjson("size"),
+            "speed": Tjson("Glitter-speed"),
+        },
+        "status": {
+            "DirectUnpack": Tjson("opt-direct_unpack"),
+            "Completed": Tjson("post-Completed"),
+            "Failed": Tjson("post-Failed"),
+            "Queued": Tjson("post-Queued"),
+            "Repairing...": Tjson("post-Repairing"),
+            "Extracting...": Tjson("post-Extracting"),
+            "Moving...": Tjson("post-Moving"),
+            "Running script...": Tjson("post-Running"),
+            "Fetching extra blocks...": Tjson("post-Fetching"),
+            "Quick Check...": Tjson("post-QuickCheck"),
+            "Verifying...": Tjson("post-Verifying"),
+            "Checking": Tjson("post-Checking"),
+            "Download": Tjson("stage-download"),
+            "Repair": Tjson("stage-repair"),
+            "Filejoin": Tjson("stage-filejoin"),
+            "Unpack": Tjson("stage-unpack"),
+            "Deobfuscate": Tjson("stage-deobfuscate"),
+            "Script": Tjson("stage-script"),
+            "RSS": Tjson("stage-rss"),
+            "Source": Tjson("stage-source"),
+            "Servers": Tjson("stage-servers"),
+            "INFO": Tjson("log-info").replace("+", "", 1).upper(),
+            "WARNING": Tjson("Glitter-warning"),
+            "ERROR": Tjson("Glitter-error"),
+        },
+        "pp": {
+            "Download": Tjson("pp-none"),
+            "+Repair": Tjson("pp-repair"),
+            "+Unpack": Tjson("pp-unpack"),
+            "+Delete": Tjson("pp-delete"),
+        },
+        "priority": {
+            "Force": Tjson("pr-force"),
+            "High": Tjson("pr-high"),
+            "Normal": Tjson("pr-normal"),
+            "Low": Tjson("pr-low"),
+            "Stop": Tjson("pr-stop"),
+        },
+    }
+
+    payload = json.dumps(translations)
+    if isinstance(payload, bytes):
+        payload = payload.decode()
+    # A translation holding </script> would otherwise end the block early
+    _TRANSLATIONS_JSON = payload.replace("<", "\\u003c")
+    return _TRANSLATIONS_JSON
+
+
 def clear_trans_cache():
     """Clean cache for skin translations"""
-    global _SKIN_CACHE
+    global _SKIN_CACHE, _TRANSLATIONS_JSON
     _SKIN_CACHE = {}
+    _TRANSLATIONS_JSON = ""
     sabnzbd.WEBUI_READY = True
 
 
@@ -2019,6 +2119,7 @@ def build_header(
 
         header["uptime"] = calc_age(sabnzbd.START)
         header["bundle_file"] = bundle_file()
+        header["translations"] = glitter_translations()
         header["color_scheme"] = sabnzbd.WEB_COLOR or ""
         color_scheme_file = "Night" if sabnzbd.WEB_COLOR == "Auto" else sabnzbd.WEB_COLOR
         header["color_scheme_file"] = f"{color_scheme_file}.css" if color_scheme_file not in ("", "Light") else ""

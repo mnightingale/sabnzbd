@@ -305,7 +305,7 @@ def template_filtered_response(file: str, search_list: dict[str, Any], status_co
     # We need a copy, because otherwise source-dicts might be modified
     search_list_copy = copy.deepcopy(search_list)
     # 'filters' is excluded because the RSS-filters are listed twice
-    recursive_html_escape(search_list_copy, exclude_items=("webdir", "filters"))
+    recursive_html_escape(search_list_copy, exclude_items=("webdir", "filters", "translations"))
     return HTMLResponse(
         Template(file=file, searchList=[search_list_copy], compilerSettings=CHEETAH_DIRECTIVES).respond(),
         status_code=status_code,
