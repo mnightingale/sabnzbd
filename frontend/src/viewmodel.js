@@ -1,3 +1,9 @@
+import { isMobile, hasLocalStorage, localStorageSetItem, localStorageGetItem, callAPI, convertHTMLtoText, rewriteTime, displayDateTime, showOrphans, showNotification, hideNotification } from "./basic.js";
+import { search_query_parse } from "./search-query-parser.js";
+import { QueueListModel } from "./queue.js";
+import { HistoryListModel } from "./history.js";
+import { Fileslisting } from "./filelist.js";
+
 /**
     Define main view model
 **/
@@ -1310,3 +1316,5 @@ function ViewModel() {
         $('[data-tooltip="true"]').tooltip({ trigger: 'hover', container: 'body' })
     }
 }
+
+export { ViewModel };

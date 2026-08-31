@@ -222,3 +222,4 @@ function hideNotification() {
     // Hide the box with effect
     $('.main-notification-box').fadeOut()
 }
+export { isMobile, hasLocalStorage, localStorageSetItem, localStorageGetItem, callAPI, fixPercentages, convertHTMLtoText, rewriteTime, displayDateTime, keepOpen, showDetails, checkAllFiles, setCheckAllState, checkShiftRange, hideCompletedFiles, showOrphans, showNotification, hideNotification };

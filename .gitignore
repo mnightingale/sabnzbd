@@ -46,3 +46,7 @@ tests/cache_gw*
 
 # Apple
 .DS_Store
+
+# Frontend build
+node_modules/
+interfaces/*/templates/static/bundle/

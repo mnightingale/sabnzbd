@@ -1,3 +1,6 @@
+import { callAPI, displayDateTime, keepOpen, setCheckAllState, checkShiftRange, showNotification, hideNotification } from "./basic.js";
+import { paginationModel } from "./filelist.js";
+
 /**
     Model for the whole History with all its items
 **/
@@ -647,3 +650,5 @@ function HistoryModel(parent, data) {
         })
     }
 }
+
+export { HistoryListModel, HistoryModel };

@@ -1,3 +1,5 @@
+import { callAPI, fixPercentages, localStorageGetItem, checkAllFiles, setCheckAllState, checkShiftRange } from "./basic.js";
+
 // For the file-list
 function Fileslisting(parent) {
     var self = this;
@@ -374,3 +376,4 @@ function paginationModel(parent) {
         parent.parent.refresh(true);
     }
 }
+export { Fileslisting, FileslistingModel, paginationModel };
