@@ -1,0 +1,127 @@
+name: Visual Regression
+
+# Photographs the interface twice, once as this branch renders it and once as its merge base
+# does, and reports the difference. Nothing is stored between runs: the comparison is always
+# against the code this branch is actually changing, so there are no baselines to refresh.
+
+on:
+  pull_request:
+    paths:
+      - 'interfaces/**'
+      - 'sabnzbd/interface.py'
+      - 'sabnzbd/api.py'
+      - 'tests/test_visual.py'
+      - 'tests/visual/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    name: Capture (${{ matrix.side }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        side: [base, head]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # The base is captured with this branch's harness against the merge base's
+      # application, so a change to the harness itself cannot show up as a visual difference.
+      # Everything is rolled back rather than a list of directories: a half-rolled-back tree
+      # pairs new code at the repo root with old modules underneath it.
+      - name: Roll the application back to the merge base
+        if: matrix.side == 'base'
+        run: |
+          BASE=$(git merge-base HEAD origin/${{ github.event.pull_request.base.ref }})
+          echo "Comparing against $BASE"
+          git checkout "$BASE" -- .
+          git checkout HEAD -- tests
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: "**/requirements.txt"
+
+      - name: Install system dependencies
+        run: sudo apt-get install -y unrar 7zip par2
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip wheel
+          pip install -r requirements.txt --no-dependencies
+          pip install --upgrade -r tests/requirements.txt
+
+      - name: Install Playwright browser
+        run: python -m playwright install chromium --with-deps
+
+      - name: Capture
+        env:
+          SAB_TEST_PORT: 8099
+        run: pytest tests/test_visual.py -m visual -q
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: screenshots-${{ matrix.side }}
+          path: tests/output/screenshots/
+          retention-days: 3
+
+  compare:
+    name: Compare
+    runs-on: ubuntu-latest
+    needs: capture
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - run: pip install Pillow
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: screenshots-base
+          path: before
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: screenshots-head
+          path: after
+
+      - name: Compare
+        id: compare
+        run: |
+          # Without pipefail the exit status would be tee's, so a difference would pass
+          set -o pipefail
+          echo "## Visual changes" >> "$GITHUB_STEP_SUMMARY"
+          python -m tests.visual.compare before after diff | tee -a "$GITHUB_STEP_SUMMARY"
+        continue-on-error: true
+
+      - uses: actions/upload-artifact@v7
+        if: steps.compare.outcome == 'failure'
+        with:
+          name: screenshots-diff
+          path: diff/
+          retention-days: 3
+
+      # An intentional change is fine, it just has to be acknowledged rather than slip through
+      - name: Require intentional changes to be labelled
+        if: steps.compare.outcome == 'failure'
+        run: |
+          if ${{ contains(github.event.pull_request.labels.*.name, 'visual-approved') }}; then
+            echo "Labelled visual-approved, differences accepted."
+          else
+            echo "::error::The interface renders differently. Check the screenshots-diff artifact," \
+                 "then add the visual-approved label if the change is intended."
+            exit 1
+          fi

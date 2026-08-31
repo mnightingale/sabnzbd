@@ -18,3 +18,4 @@ black
 pytest-mock
 pytest-asyncio
 pytest-xdist
+Pillow
