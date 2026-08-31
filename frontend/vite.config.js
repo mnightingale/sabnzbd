@@ -5,13 +5,14 @@ export default defineConfig({
         target: "esnext",
         outDir: "../interfaces/Glitter/templates/static/bundle",
         emptyOutDir: true,
+        manifest: true,
         minify: true,
         sourcemap: false,
         rollupOptions: {
             input: "src/main.js",
             output: {
                 format: "iife",
-                entryFileNames: "glitter.js",
+                entryFileNames: "glitter-[hash].js",
                 assetFileNames: "[name][extname]",
             },
         },
