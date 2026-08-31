@@ -1,3 +1,6 @@
+import { callAPI, rewriteTime, keepOpen, setCheckAllState, checkShiftRange, showNotification, hideNotification } from "./basic.js";
+import { paginationModel } from "./filelist.js";
+
 /**
     Model for the whole Queue with all it's items
 **/
@@ -828,3 +831,5 @@ function QueueModel(parent, data) {
 
 
 }
+
+export { QueueListModel, QueueModel };
