@@ -1143,7 +1143,7 @@ def main():
     sabnzbd.WEB_DIR_CONFIG = identify_web_template(None, DEF_STD_CONFIG, "")
     sabnzbd.WIZARD_DIR = os.path.join(sabnzbd.DIR_INTERFACES, "wizard")
 
-    if not os.path.exists(os.path.join(sabnzbd.WEB_DIR, "static", "bundle", "glitter.js")):
+    if not os.path.exists(os.path.join(sabnzbd.WEB_DIR, "static", "bundle", ".vite", "manifest.json")):
         helpful_warning(T("Web interface scripts are missing, run: cd frontend && npm ci && npm run build"))
 
     sabnzbd.WEB_COLOR = check_template_scheme(sabnzbd.cfg.web_color(), sabnzbd.WEB_DIR)
