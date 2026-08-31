@@ -134,7 +134,9 @@
         <script type="text/javascript" src="$url('static/javascripts/knockout-sortable.js', v=$cache_buster)"></script>
         <script type="text/javascript" src="$url('static/javascripts/knockout.mapping.js', v=$cache_buster)"></script>
         <script type="text/javascript" src="$url('staticcfg/bootstrap/js/bootstrap.min.js', v=$cache_buster)"></script>
-        <script type="text/javascript" src="$url('static/bundle/glitter.js', v=$cache_buster)"></script>
+        <!--#if $bundle_file#-->
+        <script type="text/javascript" src="$url('static/bundle/' + $bundle_file)"></script>
+        <!--#end if#-->
         <!--#if active_lang != 'en'#-->
         <script type="text/javascript" src="$url('static/javascripts/momentjs_locale/' + $active_lang + '.js', v=$cache_buster)"></script>
         <!--#end if#-->

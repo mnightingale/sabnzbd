@@ -1902,6 +1902,33 @@ def Tspec(txt: str) -> str:
 _SKIN_CACHE = {}  # Stores pre-translated acronyms
 
 
+_BUNDLE_MANIFEST: tuple[float, str] = (0.0, "")
+
+
+def bundle_file() -> str:
+    """Name of the built Glitter bundle, read from the manifest Vite writes beside it.
+
+    The name carries a hash of the contents, so a rebuild is picked up without a restart.
+    """
+    global _BUNDLE_MANIFEST
+    if not sabnzbd.WEB_DIR:
+        return ""
+
+    manifest_path = os.path.join(sabnzbd.WEB_DIR, "static", "bundle", ".vite", "manifest.json")
+    try:
+        manifest_mtime = os.path.getmtime(manifest_path)
+    except OSError:
+        return ""
+
+    if _BUNDLE_MANIFEST[0] != manifest_mtime:
+        try:
+            with open(manifest_path) as manifest:
+                _BUNDLE_MANIFEST = (manifest_mtime, json.loads(manifest.read())["src/main.js"]["file"])
+        except (OSError, ValueError, KeyError):
+            return ""
+    return _BUNDLE_MANIFEST[1]
+
+
 def Ttemplate(txt: str) -> str:
     """Translation function for skin template texts, passed as $T in Cheetah templates."""
     global _SKIN_CACHE
@@ -1991,6 +2018,7 @@ def build_header(
             header["url"] = url_for
 
         header["uptime"] = calc_age(sabnzbd.START)
+        header["bundle_file"] = bundle_file()
         header["color_scheme"] = sabnzbd.WEB_COLOR or ""
         color_scheme_file = "Night" if sabnzbd.WEB_COLOR == "Auto" else sabnzbd.WEB_COLOR
         header["color_scheme_file"] = f"{color_scheme_file}.css" if color_scheme_file not in ("", "Light") else ""

@@ -65,7 +65,7 @@ EXTRA_FILES = [
     "COPYRIGHT.txt",
     "ISSUES.txt",
 ]
-FRONTEND_BUNDLE = os.path.join("interfaces", "Glitter", "templates", "static", "bundle", "glitter.js")
+FRONTEND_BUNDLE = os.path.join("interfaces", "Glitter", "templates", "static", "bundle", ".vite", "manifest.json")
 
 EXTRA_FOLDERS = [
     "scripts/",
