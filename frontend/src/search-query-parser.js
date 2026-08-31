@@ -315,3 +315,5 @@ function search_query_parse(string, options) {
 
 }
 
+
+export { search_query_parse };
