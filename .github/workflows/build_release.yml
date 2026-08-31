@@ -30,6 +30,7 @@ jobs:
     timeout-minutes: 15
     steps:
     - uses: actions/checkout@v7
+    - uses: ./.github/actions/build-frontend
     - name: Set up Python
       uses: actions/setup-python@v7
       with:
@@ -121,6 +122,7 @@ jobs:
       ARCHFLAGS: -arch x86_64 -arch arm64
     steps:
     - uses: actions/checkout@v7
+    - uses: ./.github/actions/build-frontend
     - name: Set up Python
       # Only use this for the caching of pip packages!
       uses: actions/setup-python@v7

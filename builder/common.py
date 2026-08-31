@@ -64,6 +64,8 @@ EXTRA_FILES = [
     "GPL3.txt",
     "COPYRIGHT.txt",
 ]
+FRONTEND_BUNDLE = os.path.join("interfaces", "Glitter", "templates", "static", "bundle", "glitter.js")
+
 EXTRA_FOLDERS = [
     "scripts/",
     "licenses/",

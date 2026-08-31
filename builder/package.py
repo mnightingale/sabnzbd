@@ -46,6 +46,7 @@ from common import (
     RELEASE_SRC,
     EXTRA_FILES,
     EXTRA_FOLDERS,
+    FRONTEND_BUNDLE,
     APPDATA_FILE,
     RELEASE_VERSION_BASE,
     pe_has_authenticode_signature,
@@ -275,6 +276,10 @@ if __name__ == "__main__":
 
     # Check if we have correct appdata file
     verify_appdata()
+
+    # The frontend bundle is built, not committed
+    if not os.path.exists(FRONTEND_BUNDLE):
+        raise FileNotFoundError(f"Missing {FRONTEND_BUNDLE}, run: cd frontend && npm ci && npm run build")
 
     # Patch release file
     patch_version_file(RELEASE_VERSION)
@@ -545,12 +550,17 @@ if __name__ == "__main__":
         safe_remove(RELEASE_SRC)
 
         # Add extra files and folders need for source dist
-        EXTRA_FOLDERS.extend(["sabnzbd/", "po/", "linux/", "tools/", "tests/"])
+        EXTRA_FOLDERS.extend(["sabnzbd/", "po/", "linux/", "tools/", "tests/", "frontend/"])
         EXTRA_FILES.extend(["SABnzbd.py", "requirements.txt"])
 
         # Copy all folders and files to the new folder
         for source_folder in EXTRA_FOLDERS:
-            shutil.copytree(source_folder, os.path.join(src_folder, source_folder), dirs_exist_ok=True)
+            shutil.copytree(
+                source_folder,
+                os.path.join(src_folder, source_folder),
+                dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns("node_modules", ".vite"),
+            )
 
         # Copy all files
         for source_file in EXTRA_FILES:
