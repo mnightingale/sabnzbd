@@ -28,7 +28,6 @@ from unittest.mock import Mock, patch
 from starlette.requests import Request
 from starlette.datastructures import Headers, Address, QueryParams
 import uvicorn
-from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from uvicorn.lifespan import on as lifespan_on
 from uvicorn.protocols.http import h11_impl, httptools_impl
 from uvicorn.server import ServerState
@@ -52,14 +51,14 @@ from tests.testhelper import run_async
 
 
 def resolve_client(remote_ip: str, xff_header: str | None = None, remote_port: int = 12345) -> Address:
-    """Pass a connection through uvicorn's ProxyHeadersMiddleware, configured
-    exactly like SABnzbd.py does, and return the resulting effective client."""
+    """Pass a connection through ConfiguredProxyHeadersMiddleware and return the
+    resulting effective client."""
     captured = {}
 
     async def asgi_app(scope, receive, send):
         captured["client"] = scope.get("client")
 
-    middleware = ProxyHeadersMiddleware(asgi_app, trusted_hosts=xff_trusted_networks())
+    middleware = interface.ConfiguredProxyHeadersMiddleware(asgi_app)
     headers = []
     if xff_header:
         headers.append((b"x-forwarded-for", xff_header.encode("latin1")))
@@ -197,10 +196,9 @@ class TestInterfaceFunctions:
         monkeypatch,
     ):
         def _func():
-            # With verify_xff_header enabled, SABnzbd.py runs uvicorn with
-            # proxy_headers=True, so the XFF chain is resolved into the
-            # effective client before check_access ever sees the request.
-            # With it disabled the header is ignored entirely.
+            # With verify_xff_header enabled, ConfiguredProxyHeadersMiddleware
+            # resolves the XFF chain into the effective client before check_access
+            # ever sees the request. With it disabled the header is ignored entirely.
             if verify_xff_header:
                 client = resolve_client(remote_ip=remote_ip, xff_header=xff_header)
                 result = result_with_xff
@@ -296,7 +294,7 @@ class TestInterfaceFunctions:
     def test_effective_client_from_xff(self, local_ranges, xff_ips, expected_result):
         def _func():
             # The effective client IP (used for access
-            # checks) is selected by uvicorn's ProxyHeadersMiddleware: the last
+            # checks) is selected by ConfiguredProxyHeadersMiddleware: the last
             # XFF entry that is not a trusted (local) proxy, or the first entry
             # when the whole chain is trusted. Connect from loopback, which is
             # always a trusted peer.
@@ -532,8 +530,8 @@ class TestUseSecureCookies:
 
     @pytest.mark.config({"enable_https": False})
     def test_scheme_from_trusted_proxy(self):
-        """X-Forwarded-Proto from a trusted proxy is resolved into the scope by
-        uvicorn, so a proxy terminating TLS still gets the Secure attribute."""
+        """X-Forwarded-Proto from a trusted proxy is resolved into the scope, so a
+        proxy terminating TLS still gets the Secure attribute."""
 
         captured = {}
 
@@ -541,7 +539,7 @@ class TestUseSecureCookies:
             captured["secure"] = security.use_secure_cookies(Request(scope))
 
         def run(remote_ip: str):
-            middleware = ProxyHeadersMiddleware(asgi_app, trusted_hosts=xff_trusted_networks())
+            middleware = interface.ConfiguredProxyHeadersMiddleware(asgi_app)
             scope = {
                 "type": "http",
                 "method": "GET",

@@ -32,6 +32,7 @@ import functools
 import copy
 
 import uvicorn
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import MultiDict, MutableHeaders, QueryParams
@@ -60,6 +61,7 @@ from sabnzbd.misc import (
     recursive_html_escape,
     is_none,
     get_cpu_name,
+    xff_trusted_networks,
 )
 from sabnzbd.filesystem import (
     real_path,
@@ -2278,6 +2280,32 @@ def config_notify_save(request: Request):
 ##############################################################################
 
 
+class ConfiguredProxyHeadersMiddleware:
+    """Resolve X-Forwarded-For and X-Forwarded-Proto using uvicorn's own middleware,
+    but with the trusted networks taken from the current configuration. Uvicorn reads
+    those once at start-up, so running it here instead lets verify_xff_header and
+    local_ranges take effect without a restart.
+
+    The wrapped middleware is rebuilt only when the trusted networks change, so its
+    address-lookup cache survives in between. Runs on the event-loop thread, and the
+    first await comes after the rebuild, so no locking is needed."""
+
+    def __init__(self, app):
+        self.app = app
+        self.trusted_networks: list[str] = []
+        self.proxy_app = ProxyHeadersMiddleware(app, trusted_hosts=[])
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "lifespan" or not cfg.verify_xff_header():
+            return await self.app(scope, receive, send)
+
+        if (trusted_networks := xff_trusted_networks()) != self.trusted_networks:
+            self.trusted_networks = trusted_networks
+            self.proxy_app = ProxyHeadersMiddleware(self.app, trusted_hosts=trusted_networks)
+
+        await self.proxy_app(scope, receive, send)
+
+
 class XFrameOptionsMiddleware:
     """Add X-Frame-Options to every response when cfg.x_frame_options is enabled,
     mitigating clickjacking. Applied as middleware rather than in secured_expose so
@@ -2572,6 +2600,8 @@ def create_app() -> Starlette:
     routes.append(Mount("/", routes=interface_routes))
 
     middleware = [
+        # First, so every check further down sees the effective client address
+        Middleware(ConfiguredProxyHeadersMiddleware),
         Middleware(XFrameOptionsMiddleware),
         Middleware(HostnameCheckMiddleware),
         Middleware(RequestLoggingMiddleware),

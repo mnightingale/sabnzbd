@@ -1400,12 +1400,12 @@ def is_local_addr(ip: str) -> bool:
 
 def xff_trusted_networks() -> list[str]:
     """Networks from which the X-Forwarded-For header may be trusted, for use as
-    uvicorn's forwarded_allow_ips. Mirrors is_loopback_addr plus is_local_addr:
-    loopback and the user-defined local_ranges, or the private LAN address space
-    when no local_ranges are set.
+    the trusted hosts of ConfiguredProxyHeadersMiddleware. Mirrors is_loopback_addr
+    plus is_local_addr: loopback and the user-defined local_ranges, or the private
+    LAN address space when no local_ranges are set.
 
-    Uvicorn compares the raw peer address without normalization, so for every
-    IPv4 entry the IPv4-mapped IPv6 form (::ffff:a.b.c.d) is added as well.
+    The comparison is against the raw peer address, without normalization, so for
+    every IPv4 entry the IPv4-mapped IPv6 form (::ffff:a.b.c.d) is added as well.
     """
     networks = ["127.0.0.0/8", "::1"]
     if local_ranges := cfg.local_ranges():

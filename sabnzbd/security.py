@@ -104,10 +104,9 @@ def check_access(request: Request, access_type: int = 4, warn_user: bool = False
     if access_type <= cfg.inet_exposure():
         return True
 
-    # X-Forwarded-For is resolved by uvicorn's ProxyHeadersMiddleware (see the
-    # uvicorn.Config in SABnzbd.py): when verify_xff_header is enabled and the
-    # connecting peer is a trusted local proxy, request.client already holds the
-    # effective client address taken from the XFF chain.
+    # X-Forwarded-For is resolved by ConfiguredProxyHeadersMiddleware: when
+    # verify_xff_header is enabled and the connecting peer is a trusted local proxy,
+    # request.client already holds the effective client address taken from the XFF chain.
     remote_ip = client_address(request).host
 
     # Check if the client IP is a loopback address or considered local
