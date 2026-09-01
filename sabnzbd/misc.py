@@ -25,6 +25,7 @@ import platform
 import ssl
 import sys
 import logging
+import logging.handlers
 import urllib.request
 import urllib.parse
 import re
@@ -1601,6 +1602,20 @@ def run_script(script: str):
             logging.info("Output of script %s: \n%s", script, script_output)
         except Exception:
             logging.info("Failed script %s, Traceback: ", script, exc_info=True)
+
+
+def relocate_log_handler(
+    logger: logging.Logger, handler: logging.Handler, new_file: str
+) -> logging.handlers.RotatingFileHandler:
+    """Replace a file handler with one writing to new_file, keeping level and format"""
+    new_handler = logging.handlers.RotatingFileHandler(new_file, "a+", cfg.log_size(), cfg.log_backups())
+    new_handler.setLevel(handler.level)
+    new_handler.setFormatter(handler.formatter)
+    # Added before the old one is dropped, so no record can fall between the two
+    logger.addHandler(new_handler)
+    logger.removeHandler(handler)
+    handler.close()
+    return new_handler
 
 
 def set_socks5_proxy():

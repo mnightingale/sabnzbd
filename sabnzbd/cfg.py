@@ -20,6 +20,7 @@ sabnzbd.cfg - Configuration Parameters
 """
 
 import logging
+import logging.handlers
 import os
 import re
 import argparse
@@ -53,6 +54,8 @@ from sabnzbd.constants import (
     DEF_HTTPS_CERT_FILE,
     DEF_HTTPS_KEY_FILE,
     DEF_DOWNLOAD_FREE,
+    DEF_LOG_FILE,
+    DEF_LOG_ACCESSFILE,
 )
 from sabnzbd.filesystem import same_directory, real_path, is_valid_script, is_network_path
 
@@ -776,6 +779,31 @@ def new_storage_dir():
     """Callback for download directory changes"""
     if sabnzbd.__INITIALIZED__:
         sabnzbd.WriteMonitor.reset()
+
+
+def guard_log_dir():
+    """Callback for log_dir changes, moving the logfiles to the new directory.
+    The option only accepts a directory it could create, so it exists by now."""
+    new_log_dir = log_dir.get_path()
+    try:
+        if sabnzbd.LOG_HANDLER:
+            sabnzbd.LOGFILE = os.path.join(new_log_dir, DEF_LOG_FILE)
+            sabnzbd.LOG_HANDLER = sabnzbd.misc.relocate_log_handler(
+                logging.getLogger(""), sabnzbd.LOG_HANDLER, sabnzbd.LOGFILE
+            )
+
+        if sabnzbd.WEBLOGFILE:
+            sabnzbd.WEBLOGFILE = os.path.join(new_log_dir, DEF_LOG_ACCESSFILE)
+            access_logger = logging.getLogger("uvicorn.access")
+            for handler in list(access_logger.handlers):
+                if isinstance(handler, logging.handlers.RotatingFileHandler):
+                    sabnzbd.misc.relocate_log_handler(access_logger, handler, sabnzbd.WEBLOGFILE)
+    except OSError:
+        logging.error("%s: %s", T("Cannot write to logfile"), new_log_dir)
+        logging.info("Traceback: ", exc_info=True)
+        return
+
+    logging.info("Now logging to %s", new_log_dir)
 
 
 def guard_restart():

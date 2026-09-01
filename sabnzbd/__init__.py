@@ -17,6 +17,7 @@
 
 import os
 import logging
+import logging.handlers
 import datetime
 import ctypes.util
 import time
@@ -158,6 +159,7 @@ LINUX_POWER = powersup.HAVE_DBUS
 LOGFILE = None
 WEBLOGFILE = None
 GUIHANDLER = None
+LOG_HANDLER: Optional[logging.handlers.RotatingFileHandler] = None
 LOG_ALL = False
 WEB_SERVER: Optional[sabnzbd.interface.ThreadedServer] = None
 WIN_SERVICE = None  # Instance of our Win32 Service Class
@@ -256,12 +258,12 @@ def initialize(pause_downloader=False, clean_up=False, repair=0):
     cfg.cache_limit.callback(cfg.new_limit)
     cfg.direct_write.callback(cfg.new_direct_write)
     cfg.download_dir.callback(cfg.new_storage_dir)
+    cfg.log_dir.callback(cfg.guard_log_dir)
     cfg.web_host.callback(cfg.guard_restart)
     cfg.web_port.callback(cfg.guard_restart)
     cfg.web_dir.callback(cfg.guard_restart)
     cfg.web_color.callback(cfg.guard_restart)
     cfg.url_base.callback(trigger_restart)
-    cfg.log_dir.callback(cfg.guard_restart)
     cfg.https_port.callback(cfg.guard_restart)
     cfg.https_cert.callback(cfg.guard_restart)
     cfg.https_key.callback(cfg.guard_restart)

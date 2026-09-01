@@ -1082,14 +1082,14 @@ def main():
     try:
         if not no_file_log:
             sabnzbd.LOGFILE = os.path.join(logdir, DEF_LOG_FILE)
-            rollover_log = logging.handlers.RotatingFileHandler(
+            sabnzbd.LOG_HANDLER = logging.handlers.RotatingFileHandler(
                 sabnzbd.LOGFILE, "a+", sabnzbd.cfg.log_size(), sabnzbd.cfg.log_backups()
             )
             # Set the level here as well as on the logger, so records that were
             # created at a higher level and lowered afterwards are also dropped
-            rollover_log.setLevel(LOGLEVELS[logging_level + 1])
-            rollover_log.setFormatter(logging.Formatter(logformat))
-            logger.addHandler(rollover_log)
+            sabnzbd.LOG_HANDLER.setLevel(LOGLEVELS[logging_level + 1])
+            sabnzbd.LOG_HANDLER.setFormatter(logging.Formatter(logformat))
+            logger.addHandler(sabnzbd.LOG_HANDLER)
 
     except IOError:
         print("Error:")
@@ -1318,8 +1318,8 @@ def main():
             logger.setLevel(level)
             if console_logging:
                 console.setLevel(level)
-            if not no_file_log:
-                rollover_log.setLevel(level)
+            if sabnzbd.LOG_HANDLER:
+                sabnzbd.LOG_HANDLER.setLevel(level)
 
         # 300 sec polling tasks
         if not timer % 100:
