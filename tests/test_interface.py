@@ -928,10 +928,16 @@ class TestChangeWebDir:
 
     @pytest.fixture(autouse=True)
     def interfaces_dir(self, monkeypatch):
+        """Start from a template and colour that are not the ones the tests switch to,
+        so setting them is an actual change and the callback fires"""
         interfaces = os.path.join(SAB_BASE_DIR, "..", "interfaces")
         monkeypatch.setattr(sabnzbd, "DIR_INTERFACES", os.path.abspath(interfaces))
         monkeypatch.setattr(sabnzbd, "WEB_DIR", None)
         monkeypatch.setattr(sabnzbd, "WEB_COLOR", None)
+        cfg.web_dir.set("SomeOtherTemplate")
+        cfg.web_color.set("Night")
+        cfg.web_dir.callback(cfg.guard_web_dir)
+        cfg.web_color.callback(cfg.guard_web_dir)
         return interfaces
 
     def test_applies_template_and_color(self):
@@ -946,13 +952,13 @@ class TestChangeWebDir:
         assert interface.change_web_dir("Glitter - NoSuchScheme") is None
 
         assert sabnzbd.WEB_COLOR == ""
-        assert cfg.web_color() == ""
+        assert cfg.web_color() == "NoSuchScheme"
 
     def test_unknown_template_is_refused(self):
         assert interface.change_web_dir("NoSuchTemplate - Auto")
 
         assert sabnzbd.WEB_DIR is None
-        assert cfg.web_dir() == cfg.web_dir.default
+        assert cfg.web_dir() == "SomeOtherTemplate"
 
     def test_static_files_follow_the_template(self):
         static_files = interface.CachedStaticFiles(lambda: os.path.join(sabnzbd.WEB_DIR, "static"))

@@ -40,7 +40,7 @@ import time
 import re
 import gc
 import threading
-from typing import Any
+from typing import Any, Optional
 
 try:
     import sabctools
@@ -128,6 +128,9 @@ except ImportError:
 
 # Global for this module, signaling loglevel change
 LOG_FLAG = False
+
+# The address the web server was last started on, so a failed restart can fall back to it
+ACTIVE_WEB_ADDRESS: tuple = ()
 
 
 def guard_loglevel():
@@ -812,6 +815,115 @@ def get_f_option(opts):
         return None
 
 
+def prepare_https() -> tuple[bool, str, str, Optional[str]]:
+    """Return whether HTTPS can be served and the certificate files to use, generating
+    self-signed ones when they are missing and turning HTTPS off when they are unusable"""
+    enable_https = sabnzbd.cfg.enable_https()
+    https_cert = sabnzbd.cfg.https_cert.get_path()
+    https_key = sabnzbd.cfg.https_key.get_path()
+    https_chain = sabnzbd.cfg.https_chain.get_path()
+    if not (sabnzbd.cfg.https_chain() and os.path.exists(https_chain)):
+        https_chain = None
+
+    if enable_https:
+        # If either the HTTPS certificate or key do not exist, make some self-signed ones.
+        if not (https_cert and os.path.exists(https_cert)) or not (https_key and os.path.exists(https_key)):
+            create_https_certificates(https_cert, https_key)
+
+        if not (os.path.exists(https_cert) and os.path.exists(https_key)):
+            logging.warning(T("Disabled HTTPS because of missing CERT and KEY files"))
+            enable_https = False
+            sabnzbd.cfg.enable_https.set(False)
+
+        # So the cert and key files do exist, now let's check if they are valid:
+        trialcontext = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        try:
+            trialcontext.load_cert_chain(https_cert, https_key)
+            logging.info("HTTPS keys are OK")
+        except Exception:
+            logging.warning(T("Disabled HTTPS because of invalid CERT and KEY files"))
+            logging.info("Traceback: ", exc_info=True)
+            enable_https = False
+            sabnzbd.cfg.enable_https.set(False)
+
+    return enable_https, https_cert, https_key, https_chain
+
+
+def start_web_server(web_host: str, web_port: int, https_port: int, browserhost: str):
+    """Claim the address and start serving the web-interface on it.
+
+    Raises PermissionError or HostNotAvailableError when the address cannot be used,
+    OSError when the port is taken and RuntimeError when the server does not come up.
+    """
+    global ACTIVE_WEB_ADDRESS
+
+    enable_https, https_cert, https_key, https_chain = prepare_https()
+
+    # The Windows binary requires numeric localhost as primary address
+    if web_host == "localhost":
+        web_host = all_localhosts()[0]
+
+    if enable_https and https_port:
+        # Separate HTTPS port: switch the main server to the HTTPS port
+        web_port = https_port
+
+    logging.info("Starting web-interface on %s:%s", web_host, web_port)
+
+    # Claim the port here rather than letting uvicorn do it, because this is the
+    # first point where the host and port are final. Everything before this was
+    # only picking a port, and anything could still have taken it since.
+    web_socket = bind_web_socket(web_host, web_port)
+
+    server_config = uvicorn.Config(
+        sabnzbd.interface.create_app(),
+        host=web_host,
+        port=web_port,
+        # Catch logging using SABnzbd handlers
+        log_config=sabnzbd.interface.uvicorn_logging_config(sabnzbd.WEBLOGFILE),
+        ssl_keyfile=https_key if enable_https else None,
+        ssl_certfile=https_cert if enable_https else None,
+        ssl_ca_certs=https_chain if enable_https else None,
+        # Handled by ConfiguredProxyHeadersMiddleware, which reads the config per request
+        proxy_headers=False,
+    )
+    sabnzbd.WEB_SERVER = sabnzbd.interface.ThreadedServer(config=server_config, sockets=[web_socket])
+    sabnzbd.WEB_SERVER.run_in_thread()
+    ACTIVE_WEB_ADDRESS = (web_host, web_port, https_port, browserhost)
+
+    # Set URL for browser
+    if enable_https:
+        sabnzbd.BROWSER_URL = "https://%s:%s%s" % (browserhost, web_port, sabnzbd.cfg.url_base())
+    else:
+        sabnzbd.BROWSER_URL = "http://%s:%s%s" % (browserhost, web_port, sabnzbd.cfg.url_base())
+
+
+def restart_web_server():
+    """Apply changed web-interface settings by restarting only the web server, leaving
+    the rest of SABnzbd running. Falls back to the address that was being served when
+    the new one cannot be used, rather than leaving the user without a web-interface."""
+    previous_address = ACTIVE_WEB_ADDRESS
+    web_host, web_port, browserhost, https_port = get_webhost(None, None, None)
+
+    logging.info("Restarting web-interface")
+    sabnzbd.WEB_SERVER.stop()
+
+    try:
+        start_web_server(web_host, web_port, https_port, browserhost)
+    except Exception as err:
+        logging.error(T("Failed to start web-interface") + " : " + str(err))
+        logging.info("Traceback: ", exc_info=True)
+        try:
+            start_web_server(*previous_address)
+            logging.warning(T("Kept the web-interface on %s:%s"), previous_address[0], previous_address[1])
+        except Exception:
+            # Neither address works, so only a full restart can still get us a web-interface
+            logging.error(T("Failed to start web-interface: "), exc_info=True)
+            sabnzbd.trigger_restart()
+            return
+
+    sabnzbd.restart_broadcast()
+
+
 def main():
     global LOG_FLAG
     import sabnzbd  # Due to ApplePython bug
@@ -1156,46 +1268,6 @@ def main():
     sabnzbd.newsunpack.find_programs(sabnzbd.DIR_PROG)
     print_modules()
 
-    # HTTPS certificate generation
-    https_cert = sabnzbd.cfg.https_cert.get_path()
-    https_key = sabnzbd.cfg.https_key.get_path()
-    https_chain = sabnzbd.cfg.https_chain.get_path()
-    if not (sabnzbd.cfg.https_chain() and os.path.exists(https_chain)):
-        https_chain = None
-
-    if enable_https:
-        # If either the HTTPS certificate or key do not exist, make some self-signed ones.
-        if not (https_cert and os.path.exists(https_cert)) or not (https_key and os.path.exists(https_key)):
-            create_https_certificates(https_cert, https_key)
-
-        if not (os.path.exists(https_cert) and os.path.exists(https_key)):
-            logging.warning(T("Disabled HTTPS because of missing CERT and KEY files"))
-            enable_https = False
-            sabnzbd.cfg.enable_https.set(False)
-
-        # So the cert and key files do exist, now let's check if they are valid:
-        trialcontext = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        try:
-            trialcontext.load_cert_chain(https_cert, https_key)
-            logging.info("HTTPS keys are OK")
-        except Exception:
-            logging.warning(T("Disabled HTTPS because of invalid CERT and KEY files"))
-            logging.info("Traceback: ", exc_info=True)
-            enable_https = False
-            sabnzbd.cfg.enable_https.set(False)
-
-    # Starting of the webserver
-    # Determine if this system has multiple definitions for 'localhost'
-    hosts = all_localhosts()
-
-    # The Windows binary requires numeric localhost as primary address
-    if web_host == "localhost":
-        web_host = hosts[0]
-
-    if enable_https and https_port:
-        # Separate HTTPS port: switch the main server to the HTTPS port
-        web_port = https_port
-
     if no_login:
         sabnzbd.cfg.username.set("")
         sabnzbd.cfg.password.set("")
@@ -1204,60 +1276,31 @@ def main():
     if inet_exposure:
         sabnzbd.cfg.inet_exposure.set(inet_exposure)
 
-    logging.info("Starting web-interface on %s:%s", web_host, web_port)
-
     sabnzbd.cfg.log_level.callback(guard_loglevel)
-
-    # Create a record of the active cert/key/chain files, for use with config.create_config_backup()
-    if enable_https:
-        for setting in CONFIG_BACKUP_HTTPS.values():
-            if full_path := getattr(sabnzbd.cfg, setting).get_path():
-                sabnzbd.CONFIG_BACKUP_HTTPS_OK.append(full_path)
 
     # Do we want web-server access logging? Cannot be done via the config
     if weblogging:
         sabnzbd.WEBLOGFILE = os.path.join(logdir, DEF_LOG_ACCESSFILE)
 
-    # Catch logging using SABnzbd handlers
-    uvicorn_logging_config = sabnzbd.interface.uvicorn_logging_config(sabnzbd.WEBLOGFILE)
-
-    # Claim the port here rather than letting uvicorn do it, because this is the
-    # first point where the host and port are final. Everything before this was
-    # only picking a port, and anything could still have taken it since.
     try:
-        web_socket = bind_web_socket(web_host, web_port)
+        start_web_server(web_host, web_port, https_port, browserhost)
     except (PermissionError, HostNotAvailableError) as err:
         abort_for_unusable_address(browserhost, web_port, err)
-    except OSError as err:
-        logging.error(T("Failed to start web-interface: "), exc_info=True)
-        abort_and_show_error(browserhost, web_port, err)
-
-    server_config = uvicorn.Config(
-        sabnzbd.interface.create_app(),
-        host=web_host,
-        port=web_port,
-        log_config=uvicorn_logging_config,
-        ssl_keyfile=https_key if enable_https else None,
-        ssl_certfile=https_cert if enable_https else None,
-        ssl_ca_certs=https_chain if enable_https else None,
-        # Handled by ConfiguredProxyHeadersMiddleware, which reads the config per request
-        proxy_headers=False,
-    )
-    sabnzbd.WEB_SERVER = sabnzbd.interface.ThreadedServer(config=server_config, sockets=[web_socket])
-    try:
-        sabnzbd.WEB_SERVER.run_in_thread()
-    except Exception:
+    except Exception as err:
         # The webserver runs in a separate thread; if it fails to start (bad cert,
         # unusable TLS material) surface the error and abort instead of hanging.
         # Details are also shown on the console.
         logging.error(T("Failed to start web-interface: "), exc_info=True)
-        abort_and_show_error(browserhost, web_port)
+        abort_and_show_error(browserhost, web_port, err)
 
-    # Set URL for browser
-    if enable_https:
-        sabnzbd.BROWSER_URL = "https://%s:%s%s" % (browserhost, web_port, sabnzbd.cfg.url_base())
-    else:
-        sabnzbd.BROWSER_URL = "http://%s:%s%s" % (browserhost, web_port, sabnzbd.cfg.url_base())
+    # Anything the start-up itself had to correct is already in effect
+    sabnzbd.WEB_SERVER_RESTART_REQ = False
+
+    # Create a record of the active cert/key/chain files, for use with config.create_config_backup()
+    if sabnzbd.cfg.enable_https():
+        for setting in CONFIG_BACKUP_HTTPS.values():
+            if full_path := getattr(sabnzbd.cfg, setting).get_path():
+                sabnzbd.CONFIG_BACKUP_HTTPS_OK.append(full_path)
 
     if sabnzbd.WINDOWS:
         # Write URL for uploads and version check directly to registry
@@ -1333,6 +1376,12 @@ def main():
                 sabnzbd.TRIGGER_RESTART = True
 
         # 3 sec polling tasks
+        # Web-interface settings changed, which only the web server has to pick up.
+        # Cleared afterwards, so anything the restart itself changed is not repeated.
+        if sabnzbd.WEB_SERVER_RESTART_REQ and not sabnzbd.TRIGGER_RESTART:
+            restart_web_server()
+            sabnzbd.WEB_SERVER_RESTART_REQ = False
+
         # Check for auto-restart request
         # Or special restart cases like Mac and WindowsService
         if sabnzbd.TRIGGER_RESTART:

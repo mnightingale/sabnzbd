@@ -56,6 +56,7 @@ from sabnzbd.constants import (
     DEF_DOWNLOAD_FREE,
     DEF_LOG_FILE,
     DEF_LOG_ACCESSFILE,
+    DEF_MAIN_TMPL,
 )
 from sabnzbd.filesystem import same_directory, real_path, is_valid_script, is_network_path
 
@@ -806,9 +807,26 @@ def guard_log_dir():
     logging.info("Now logging to %s", new_log_dir)
 
 
+def guard_web_dir():
+    """Callback for web template changes, applying them to the running web-interface"""
+    template_dir = real_path(sabnzbd.DIR_INTERFACES, web_dir())
+    if not os.path.exists(real_path(template_dir, DEF_MAIN_TMPL)):
+        logging.info("Cannot find web template: %s", template_dir)
+        return
+    sabnzbd.WEB_DIR = real_path(template_dir, "templates")
+    sabnzbd.WEB_COLOR = sabnzbd.misc.check_template_scheme(web_color(), sabnzbd.WEB_DIR)
+
+
 def guard_restart():
     """Callback for config options requiring a restart"""
     sabnzbd.RESTART_REQ = True
+
+
+def guard_web_server_restart():
+    """Callback for config options that only the web server has to pick up. Handled
+    by the main loop on its next pass, so a save that changes several of them is
+    applied in one go, after the reply reached the browser."""
+    sabnzbd.WEB_SERVER_RESTART_REQ = True
 
 
 def guard_top_only():

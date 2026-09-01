@@ -62,7 +62,6 @@ from sabnzbd.misc import (
     is_none,
     get_cpu_name,
     xff_trusted_networks,
-    check_template_scheme,
 )
 from sabnzbd.filesystem import (
     real_path,
@@ -1031,7 +1030,10 @@ def config_special_save(request: Request):
             return report(request_params(request), error=msg)
 
     config.save_config()
-    return report(request_params(request))
+    return report(
+        request_params(request),
+        data={"success": True, "web_restart_req": sabnzbd.WEB_SERVER_RESTART_REQ},
+    )
 
 
 ##############################################################################
@@ -1109,7 +1111,14 @@ def config_general_save(request: Request):
             return report(request_params(request), error=msg)
 
     config.save_config()
-    return report(request_params(request), data={"success": True, "restart_req": sabnzbd.RESTART_REQ})
+    return report(
+        request_params(request),
+        data={
+            "success": True,
+            "restart_req": sabnzbd.RESTART_REQ,
+            "web_restart_req": sabnzbd.WEB_SERVER_RESTART_REQ,
+        },
+    )
 
 
 @secured_expose(route="/config/general/upload_config", check_configlock=True, methods=["POST"])
@@ -1136,11 +1145,9 @@ def change_web_dir(web_dir: str) -> Optional[str]:
         logging.info("Cannot find web template: %s", web_dir_path)
         return "Cannot find web template: %s" % web_dir_path
 
+    # Applied to the running interface by cfg.guard_web_dir
     cfg.web_dir.set(web_dir)
-    # Templates and static files are resolved from these on every request
-    sabnzbd.WEB_DIR = real_path(web_dir_path, "templates")
-    sabnzbd.WEB_COLOR = check_template_scheme(web_color, sabnzbd.WEB_DIR)
-    cfg.web_color.set(sabnzbd.WEB_COLOR)
+    cfg.web_color.set(web_color)
     return None
 
 
