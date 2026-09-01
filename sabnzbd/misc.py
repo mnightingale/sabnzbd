@@ -1604,6 +1604,16 @@ def run_script(script: str):
             logging.info("Failed script %s, Traceback: ", script, exc_info=True)
 
 
+def check_template_scheme(color: str, web_dir: str) -> str:
+    """Return the color-scheme if the web template has it, otherwise the template default"""
+    colorschemes = os.path.join(web_dir, "static", "stylesheets", "colorschemes")
+    if color and (
+        os.path.exists(os.path.join(colorschemes, color + ".css")) or os.path.exists(os.path.join(colorschemes, color))
+    ):
+        return color
+    return ""
+
+
 def relocate_log_handler(
     logger: logging.Logger, handler: logging.Handler, new_file: str
 ) -> logging.handlers.RotatingFileHandler:

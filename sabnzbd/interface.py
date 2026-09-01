@@ -62,6 +62,7 @@ from sabnzbd.misc import (
     is_none,
     get_cpu_name,
     xff_trusted_networks,
+    check_template_scheme,
 )
 from sabnzbd.filesystem import (
     real_path,
@@ -78,6 +79,7 @@ import sabnzbd.newsunpack
 import sabnzbd.utils.ssdp
 from sabnzbd.get_addrinfo import get_fastest_addrinfo
 from sabnzbd.constants import (
+    DEF_MAIN_TMPL,
     DEF_STD_CONFIG,
     DEFAULT_PRIORITY,
     CHEETAH_DIRECTIVES,
@@ -1130,13 +1132,16 @@ def change_web_dir(web_dir: str) -> Optional[str]:
     web_dir, web_color = web_dir.split(" - ")
     web_dir_path = real_path(sabnzbd.DIR_INTERFACES, web_dir)
 
-    if not os.path.exists(web_dir_path):
+    if not os.path.exists(real_path(web_dir_path, DEF_MAIN_TMPL)):
         logging.info("Cannot find web template: %s", web_dir_path)
         return "Cannot find web template: %s" % web_dir_path
-    else:
-        cfg.web_dir.set(web_dir)
-        cfg.web_color.set(web_color)
-        return None
+
+    cfg.web_dir.set(web_dir)
+    # Templates and static files are resolved from these on every request
+    sabnzbd.WEB_DIR = real_path(web_dir_path, "templates")
+    sabnzbd.WEB_COLOR = check_template_scheme(web_color, sabnzbd.WEB_DIR)
+    cfg.web_color.set(sabnzbd.WEB_COLOR)
+    return None
 
 
 ##############################################################################
@@ -2566,7 +2571,20 @@ async def not_found_redirect(request: Request, exc):
 
 
 class CachedStaticFiles(StaticFiles):
-    """Static files the browser may hold indefinitely, as $url() versions every reference"""
+    """Static files the browser may hold indefinitely, as $url() versions every reference.
+    The directory is resolved per request, so a changed web template applies at once."""
+
+    def __init__(self, directory_getter: Callable[[], str]):
+        self.directory_getter = directory_getter
+        super().__init__()
+
+    @property
+    def all_directories(self) -> list[str]:
+        return [self.directory_getter()]
+
+    @all_directories.setter
+    def all_directories(self, _value):
+        """Discard the single directory StaticFiles resolved at start-up"""
 
     def file_response(self, *args, **kwargs) -> Response:
         response = super().file_response(*args, **kwargs)
@@ -2578,15 +2596,15 @@ def create_app() -> Starlette:
     """Build the Starlette application"""
     interface_routes = [
         *INTERFACE_ROUTES,
-        Mount("/static", app=CachedStaticFiles(directory=os.path.join(sabnzbd.WEB_DIR, "static")), name="static"),
+        Mount("/static", app=CachedStaticFiles(lambda: os.path.join(sabnzbd.WEB_DIR, "static")), name="static"),
         Mount(
             "/staticcfg",
-            app=CachedStaticFiles(directory=os.path.join(sabnzbd.WEB_DIR_CONFIG, "staticcfg")),
+            app=CachedStaticFiles(lambda: os.path.join(sabnzbd.WEB_DIR_CONFIG, "staticcfg")),
             name="staticcfg",
         ),
         Mount(
             "/wizard/static",
-            app=CachedStaticFiles(directory=os.path.join(sabnzbd.WIZARD_DIR, "static")),
+            app=CachedStaticFiles(lambda: os.path.join(sabnzbd.WIZARD_DIR, "static")),
             name="wizard_static",
         ),
     ]

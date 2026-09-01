@@ -22,6 +22,7 @@ tests.test_interface - Testing functions in interface.py
 import inspect
 import logging
 import logging.config
+import os
 from typing import Optional
 import pytest
 from unittest.mock import Mock, patch
@@ -47,7 +48,7 @@ from tests.test_security import (
 )
 from sabnzbd.misc import is_local_addr, is_loopback_addr, xff_trusted_networks
 
-from tests.testhelper import run_async
+from tests.testhelper import SAB_BASE_DIR, run_async
 
 
 def resolve_client(remote_ip: str, xff_header: str | None = None, remote_port: int = 12345) -> Address:
@@ -920,3 +921,47 @@ class TestRenderedToken:
         rendered = self._rendered(None)
         request = page_post(None, csrf=rendered)
         assert config_save_middleware().denied_response(request) is None
+
+
+class TestChangeWebDir:
+    """Switching the web template takes effect without a restart"""
+
+    @pytest.fixture(autouse=True)
+    def interfaces_dir(self, monkeypatch):
+        interfaces = os.path.join(SAB_BASE_DIR, "..", "interfaces")
+        monkeypatch.setattr(sabnzbd, "DIR_INTERFACES", os.path.abspath(interfaces))
+        monkeypatch.setattr(sabnzbd, "WEB_DIR", None)
+        monkeypatch.setattr(sabnzbd, "WEB_COLOR", None)
+        return interfaces
+
+    def test_applies_template_and_color(self):
+        assert interface.change_web_dir("Glitter - Auto") is None
+
+        assert sabnzbd.WEB_DIR == os.path.join(sabnzbd.DIR_INTERFACES, "Glitter", "templates")
+        assert sabnzbd.WEB_COLOR == "Auto"
+        assert cfg.web_dir() == "Glitter"
+        assert cfg.web_color() == "Auto"
+
+    def test_unknown_color_falls_back(self):
+        assert interface.change_web_dir("Glitter - NoSuchScheme") is None
+
+        assert sabnzbd.WEB_COLOR == ""
+        assert cfg.web_color() == ""
+
+    def test_unknown_template_is_refused(self):
+        assert interface.change_web_dir("NoSuchTemplate - Auto")
+
+        assert sabnzbd.WEB_DIR is None
+        assert cfg.web_dir() == cfg.web_dir.default
+
+    def test_static_files_follow_the_template(self):
+        static_files = interface.CachedStaticFiles(lambda: os.path.join(sabnzbd.WEB_DIR, "static"))
+
+        interface.change_web_dir("Glitter - Auto")
+        full_path, stat_result = static_files.lookup_path("javascripts/glitter.main.js")
+        assert stat_result
+        assert full_path.startswith(os.path.join(sabnzbd.DIR_INTERFACES, "Glitter"))
+
+        # No such file in the wizard template, so the lookup follows along
+        sabnzbd.WEB_DIR = os.path.join(sabnzbd.DIR_INTERFACES, "wizard", "templates")
+        assert static_files.lookup_path("javascripts/glitter.main.js") == ("", None)

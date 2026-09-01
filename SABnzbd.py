@@ -98,6 +98,7 @@ from sabnzbd.misc import (
     is_localhost,
     helpful_warning,
     set_https_verification,
+    check_template_scheme,
 )
 from sabnzbd.filesystem import get_ext, real_path, long_path, globber_full, remove_file
 from sabnzbd.panic import panic_tmpl, panic_port, panic_port_permission, panic_host, panic, launch_a_browser
@@ -356,16 +357,6 @@ def identify_web_template(key, defweb, wdir):
 
     logging.info("Template location for %s is %s", defweb, full_dir)
     return real_path(full_dir, "templates")
-
-
-def check_template_scheme(color, web_dir):
-    """Check existence of color-scheme"""
-    if color and os.path.exists(os.path.join(web_dir, "static", "stylesheets", "colorschemes", color + ".css")):
-        return color
-    elif color and os.path.exists(os.path.join(web_dir, "static", "stylesheets", "colorschemes", color)):
-        return color
-    else:
-        return ""
 
 
 def fix_webname(name):
