@@ -19,10 +19,17 @@
 tests.test_cfg - Testing functions in cfg.py
 """
 
+import logging
+import logging.handlers
+import os
 import sys
+from unittest import mock
+
 import pytest
 
+import sabnzbd
 import sabnzbd.cfg as cfg
+from sabnzbd.constants import DEF_LOG_ACCESSFILE, DEF_LOG_FILE
 
 
 class TestValidators:
@@ -248,3 +255,63 @@ class TestValidators:
         assert not cfg.validate_host("0.0.0.0.")[1]  # Trailing dot
         assert not cfg.validate_host("kajkdjflkjasd")[1]  # does not resolve
         assert not cfg.validate_host("100")[1]  # just a number
+
+
+class TestGuardLogDir:
+    """Changing log_dir moves the logfiles instead of asking for a restart"""
+
+    @pytest.fixture
+    def logging_setup(self, tmp_path):
+        """Root logger and uvicorn access logger, writing to a starting directory"""
+        start_dir = tmp_path / "logs"
+        start_dir.mkdir()
+        root_logger = logging.getLogger("test_guard_log_dir")
+        access_logger = logging.getLogger("uvicorn.access")
+
+        sabnzbd.LOGFILE = os.path.join(start_dir, DEF_LOG_FILE)
+        sabnzbd.LOG_HANDLER = logging.handlers.RotatingFileHandler(sabnzbd.LOGFILE, "a+")
+        sabnzbd.LOG_HANDLER.setLevel(logging.INFO)
+        root_logger.addHandler(sabnzbd.LOG_HANDLER)
+
+        sabnzbd.WEBLOGFILE = os.path.join(start_dir, DEF_LOG_ACCESSFILE)
+        access_handler = logging.handlers.RotatingFileHandler(sabnzbd.WEBLOGFILE, "a+")
+        access_logger.addHandler(access_handler)
+
+        cfg.log_dir.set_root(str(tmp_path))
+        cfg.log_dir.set("logs")
+        cfg.log_dir.callback(cfg.guard_log_dir)
+
+        with mock.patch("logging.getLogger", side_effect=lambda name="": root_logger if not name else access_logger):
+            yield tmp_path
+
+        for logger in (root_logger, access_logger):
+            for handler in list(logger.handlers):
+                logger.removeHandler(handler)
+                handler.close()
+        sabnzbd.LOG_HANDLER = None
+        sabnzbd.LOGFILE = None
+        sabnzbd.WEBLOGFILE = None
+
+    def test_moves_both_logfiles(self, logging_setup):
+        assert cfg.log_dir.set("other_logs") is None
+
+        assert sabnzbd.LOGFILE == os.path.join(logging_setup, "other_logs", DEF_LOG_FILE)
+        assert sabnzbd.WEBLOGFILE == os.path.join(logging_setup, "other_logs", DEF_LOG_ACCESSFILE)
+        assert os.path.exists(sabnzbd.LOGFILE)
+        assert os.path.exists(sabnzbd.WEBLOGFILE)
+
+    def test_keeps_level_and_format(self, logging_setup):
+        formatter = logging.Formatter("%(message)s")
+        sabnzbd.LOG_HANDLER.setFormatter(formatter)
+        assert cfg.log_dir.set("other_logs") is None
+
+        assert sabnzbd.LOG_HANDLER.level == logging.INFO
+        assert sabnzbd.LOG_HANDLER.formatter is formatter
+        assert sabnzbd.LOG_HANDLER.baseFilename == sabnzbd.LOGFILE
+
+    def test_old_handler_is_replaced(self, logging_setup):
+        old_handler = sabnzbd.LOG_HANDLER
+        assert cfg.log_dir.set("other_logs") is None
+
+        assert sabnzbd.LOG_HANDLER is not old_handler
+        assert old_handler not in logging.getLogger("").handlers
