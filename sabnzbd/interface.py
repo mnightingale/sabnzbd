@@ -1147,8 +1147,8 @@ def change_web_dir(web_dir: str) -> Optional[str]:
     web_dir_path = real_path(sabnzbd.DIR_INTERFACES, web_dir)
 
     if not os.path.exists(real_path(web_dir_path, DEF_MAIN_TMPL)):
-        logging.info("Cannot find web template: %s", web_dir_path)
-        return "Cannot find web template: %s" % web_dir_path
+        logging.info("Cannot find web template: %s", clip_path(web_dir_path))
+        return "Cannot find web template: %s" % clip_path(web_dir_path)
 
     # Applied to the running interface by cfg.guard_web_dir
     cfg.web_dir.set(web_dir)

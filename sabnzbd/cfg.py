@@ -58,7 +58,7 @@ from sabnzbd.constants import (
     DEF_LOG_ACCESSFILE,
     DEF_MAIN_TMPL,
 )
-from sabnzbd.filesystem import same_directory, real_path, is_valid_script, is_network_path
+from sabnzbd.filesystem import same_directory, real_path, is_valid_script, is_network_path, clip_path
 
 # Validators currently only are made for string/list-of-strings
 # and return those on success or an error message.
@@ -800,18 +800,18 @@ def guard_log_dir():
                 if isinstance(handler, logging.handlers.RotatingFileHandler):
                     sabnzbd.misc.relocate_log_handler(access_logger, handler, sabnzbd.WEBLOGFILE)
     except OSError:
-        logging.error("%s: %s", T("Cannot write to logfile"), new_log_dir)
+        logging.error("%s: %s", T("Cannot write to logfile"), clip_path(new_log_dir))
         logging.info("Traceback: ", exc_info=True)
         return
 
-    logging.info("Now logging to %s", new_log_dir)
+    logging.info("Now logging to %s", clip_path(new_log_dir))
 
 
 def guard_web_dir():
     """Callback for web template changes, applying them to the running web-interface"""
     template_dir = real_path(sabnzbd.DIR_INTERFACES, web_dir())
     if not os.path.exists(real_path(template_dir, DEF_MAIN_TMPL)):
-        logging.info("Cannot find web template: %s", template_dir)
+        logging.info("Cannot find web template: %s", clip_path(template_dir))
         return
     sabnzbd.WEB_DIR = real_path(template_dir, "templates")
     sabnzbd.WEB_COLOR = sabnzbd.misc.check_template_scheme(web_color(), sabnzbd.WEB_DIR)

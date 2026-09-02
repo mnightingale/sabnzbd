@@ -46,6 +46,7 @@ from tests.test_security import (
     set_csrf_header,
     store_session,
 )
+from sabnzbd.filesystem import clip_path
 from sabnzbd.misc import is_local_addr, is_loopback_addr, xff_trusted_networks
 
 from tests.testhelper import SAB_BASE_DIR, run_async
@@ -943,7 +944,8 @@ class TestChangeWebDir:
     def test_applies_template_and_color(self):
         assert interface.change_web_dir("Glitter - Auto") is None
 
-        assert sabnzbd.WEB_DIR == os.path.join(sabnzbd.DIR_INTERFACES, "Glitter", "templates")
+        # Clipped, because real_path hands back the long-path form on Windows
+        assert clip_path(sabnzbd.WEB_DIR) == os.path.join(sabnzbd.DIR_INTERFACES, "Glitter", "templates")
         assert sabnzbd.WEB_COLOR == "Auto"
         assert cfg.web_dir() == "Glitter"
         assert cfg.web_color() == "Auto"
@@ -966,7 +968,7 @@ class TestChangeWebDir:
         interface.change_web_dir("Glitter - Auto")
         full_path, stat_result = static_files.lookup_path("javascripts/glitter.main.js")
         assert stat_result
-        assert full_path.startswith(os.path.join(sabnzbd.DIR_INTERFACES, "Glitter"))
+        assert clip_path(full_path).startswith(os.path.join(sabnzbd.DIR_INTERFACES, "Glitter"))
 
         # No such file in the wizard template, so the lookup follows along
         sabnzbd.WEB_DIR = os.path.join(sabnzbd.DIR_INTERFACES, "wizard", "templates")

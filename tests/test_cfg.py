@@ -30,6 +30,7 @@ import pytest
 import sabnzbd
 import sabnzbd.cfg as cfg
 from sabnzbd.constants import DEF_LOG_ACCESSFILE, DEF_LOG_FILE
+from sabnzbd.filesystem import clip_path
 
 
 class TestValidators:
@@ -295,8 +296,9 @@ class TestGuardLogDir:
     def test_moves_both_logfiles(self, logging_setup):
         assert cfg.log_dir.set("other_logs") is None
 
-        assert sabnzbd.LOGFILE == os.path.join(logging_setup, "other_logs", DEF_LOG_FILE)
-        assert sabnzbd.WEBLOGFILE == os.path.join(logging_setup, "other_logs", DEF_LOG_ACCESSFILE)
+        # Clipped, because get_path() hands back the long-path form on Windows
+        assert clip_path(sabnzbd.LOGFILE) == os.path.join(logging_setup, "other_logs", DEF_LOG_FILE)
+        assert clip_path(sabnzbd.WEBLOGFILE) == os.path.join(logging_setup, "other_logs", DEF_LOG_ACCESSFILE)
         assert os.path.exists(sabnzbd.LOGFILE)
         assert os.path.exists(sabnzbd.WEBLOGFILE)
 
