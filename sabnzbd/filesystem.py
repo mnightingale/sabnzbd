@@ -1222,7 +1222,7 @@ class RestrictedUnpickler(pickle.Unpickler):
         raise pickle.UnpicklingError("Refusing to unpickle %s.%s" % (module, name))
 
 
-def save_data(data: Any, _id: str, path: str, do_pickle: bool = True, silent: bool = False):
+def save_data(data: Any, _id: str, path: str, silent: bool = False):
     """Save data to a diskfile"""
     if not silent:
         logging.debug("[%s] Saving data for %s in %s", sabnzbd.misc.caller_name(), _id, path)
@@ -1232,10 +1232,7 @@ def save_data(data: Any, _id: str, path: str, do_pickle: bool = True, silent: bo
     for t in range(3):
         try:
             with open(path, "wb") as data_file:
-                if do_pickle:
-                    pickle.dump(data, data_file, protocol=pickle.HIGHEST_PROTOCOL)
-                else:
-                    data_file.write(data)
+                pickle.dump(data, data_file, protocol=pickle.HIGHEST_PROTOCOL)
             break
         except Exception:
             if silent:
@@ -1249,14 +1246,7 @@ def save_data(data: Any, _id: str, path: str, do_pickle: bool = True, silent: bo
                 time.sleep(0.1)
 
 
-def load_data(
-    data_id: str,
-    path: str,
-    remove: bool = True,
-    do_pickle: bool = True,
-    silent: bool = False,
-    mutable: bool = False,
-) -> Any:
+def load_data(data_id: str, path: str, remove: bool = True, silent: bool = False) -> Any:
     """Read data from disk file"""
     path = os.path.join(path, data_id)
 
@@ -1269,9 +1259,53 @@ def load_data(
 
     try:
         with open(path, "rb") as data_file:
-            if do_pickle:
-                data = RestrictedUnpickler(data_file, encoding=sabnzbd.encoding.CODEPAGE).load()
-            elif mutable:
+            data = RestrictedUnpickler(data_file, encoding=sabnzbd.encoding.CODEPAGE).load()
+
+        if remove:
+            remove_file(path)
+    except Exception:
+        logging.error(T("Loading %s failed"), path)
+        logging.info("Traceback: ", exc_info=True)
+        return None
+
+    return data
+
+
+def save_file_bytes(data: bytes, _id: str, path: str, silent: bool = False):
+    """Write opaque bytes to a file in the admin folder"""
+    if not silent:
+        logging.debug("[%s] Saving bytes for %s in %s", sabnzbd.misc.caller_name(), _id, path)
+    path = os.path.join(path, _id)
+
+    # We try 3 times, to avoid any access problems
+    for t in range(3):
+        try:
+            with open(path, "wb") as data_file:
+                data_file.write(data)
+            break
+        except Exception:
+            if silent:
+                # This can happen, probably a removed folder
+                pass
+            elif t == 2:
+                logging.error(T("Saving %s failed"), path)
+                logging.info("Traceback: ", exc_info=True)
+            else:
+                # Wait a tiny bit before trying again
+                time.sleep(0.1)
+
+
+def load_file_bytes(_id: str, path: str, remove: bool = True, mutable: bool = False) -> Optional[bytes]:
+    """Read opaque bytes from a file in the admin folder"""
+    path = os.path.join(path, _id)
+
+    if not os.path.exists(path):
+        logging.info("[%s] %s missing", sabnzbd.misc.caller_name(), path)
+        return None
+
+    try:
+        with open(path, "rb") as data_file:
+            if mutable:
                 data = bytearray(os.fstat(data_file.fileno()).st_size)
                 data_file.readinto(data)
             else:

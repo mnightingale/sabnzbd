@@ -201,9 +201,7 @@ class ArticleCache(threading.Thread):
                 logging.debug("Failed to load %s from cache, probably already deleted", article)
                 return data
         elif article.art_id:
-            data = sabnzbd.filesystem.load_data(
-                article.art_id, nzo.admin_path, remove=True, do_pickle=False, silent=True, mutable=True
-            )
+            data = sabnzbd.filesystem.load_file_bytes(article.art_id, nzo.admin_path, remove=True, mutable=True)
         with nzo.lock:
             nzo.saved_articles.discard(article)
         return data
@@ -243,6 +241,4 @@ class ArticleCache(threading.Thread):
             return
 
         # Fallback to disk cache
-        sabnzbd.filesystem.save_data(
-            data, article.get_art_id(), article.nzf.nzo.admin_path, do_pickle=False, silent=True
-        )
+        sabnzbd.filesystem.save_file_bytes(data, article.get_art_id(), article.nzf.nzo.admin_path, silent=True)
