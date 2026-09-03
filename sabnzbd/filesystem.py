@@ -62,6 +62,7 @@ from sabnzbd.constants import (
     ADMIN_MAGIC,
     ADMIN_EXT,
     ADMIN_CONTAINER_VERSION,
+    NZO_TAG,
 )
 from sabnzbd.encoding import correct_unknown_encoding, unicode_nfc_normalize, utob, limit_encoded_length
 import rarfile
@@ -1226,10 +1227,29 @@ class RestrictedUnpickler(pickle.Unpickler):
         raise pickle.UnpicklingError("Refusing to unpickle %s.%s" % (module, name))
 
 
+def _encode_unknown(obj: Any) -> dict:
+    """Convert the types msgpack cannot carry, tagged so the reader knows what to rebuild"""
+    # Imported here because sabnzbd.nzb depends on this module
+    import sabnzbd.nzb.serializer
+
+    if isinstance(obj, sabnzbd.nzb.NzbObject):
+        return {NZO_TAG: sabnzbd.nzb.serializer.encode_nzo(obj)}
+    raise TypeError("No msgpack encoder for %s" % type(obj).__name__)
+
+
+def _decode_tagged(obj: dict) -> Any:
+    """Rebuild the types _encode_unknown tagged, every other mapping passes through"""
+    if NZO_TAG in obj:
+        import sabnzbd.nzb.serializer
+
+        return sabnzbd.nzb.serializer.decode_nzo(obj[NZO_TAG])
+    return obj
+
+
 def _pack_admin(data: Any) -> Optional[bytes]:
     """Encode data in the versioned container, None when the type has no msgpack encoder"""
     try:
-        return ADMIN_MAGIC + msgpack.packb({"v": ADMIN_CONTAINER_VERSION, "d": data})
+        return ADMIN_MAGIC + msgpack.packb({"v": ADMIN_CONTAINER_VERSION, "d": data}, default=_encode_unknown)
     except TypeError:
         logging.debug("No msgpack encoder for %s, writing only pickle", type(data).__name__)
         return None
@@ -1237,7 +1257,7 @@ def _pack_admin(data: Any) -> Optional[bytes]:
 
 def _unpack_admin(body: bytes) -> Any:
     """Decode the versioned container, raises when it is newer than we understand"""
-    container = msgpack.unpackb(body, strict_map_key=True)
+    container = msgpack.unpackb(body, strict_map_key=True, object_hook=_decode_tagged)
     if container["v"] > ADMIN_CONTAINER_VERSION:
         raise ValueError("Container version %s is newer than %s" % (container["v"], ADMIN_CONTAINER_VERSION))
     return container["d"]

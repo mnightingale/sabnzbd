@@ -57,6 +57,9 @@ REPAIR_REQUEST = "repair-all.sab"
 ADMIN_MAGIC = b"SABD"
 ADMIN_EXT = ".mpk"
 ADMIN_CONTAINER_VERSION = 1
+NZO_SCHEMA_VERSION = 1
+# Marks an encoded job inside an admin document
+NZO_TAG = "__nzo__"
 
 SABCTOOLS_VERSION_REQUIRED = "9.7.1"
 

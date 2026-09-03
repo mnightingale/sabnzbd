@@ -38,6 +38,7 @@ from sabnzbd.constants import (
     QUEUE_FILE_NAME,
     QUEUE_VERSION,
     FUTURE_Q_FOLDER,
+    ADMIN_EXT,
     JOB_ADMIN,
     LOW_PRIORITY,
     HIGH_PRIORITY,
@@ -124,6 +125,9 @@ class NzbQueue:
             # Handle any lost future jobs
             for item in globber_full(os.path.join(cfg.admin_dir.get_path(), FUTURE_Q_FOLDER)):
                 path, nzo_id = os.path.split(item)
+                # The msgpack copy is loaded through its base name, not as a job of its own
+                if nzo_id.endswith(ADMIN_EXT):
+                    continue
                 if nzo_id not in self.__nzo_table:
                     if nzo_id.startswith("SABnzbd_nzo"):
                         nzo = sabnzbd.filesystem.load_data(nzo_id, path, remove=True)

@@ -219,6 +219,25 @@ class TestNzbQueue:
         # Must not raise RuntimeError: dictionary changed size during iteration
         q.stop_idle_jobs()
 
+    def test_repair_adds_a_future_job_once(self, mocker, monkeypatch, tmp_path):
+        """Both copies of the job sit in the future folder, but it is one job"""
+        monkeypatch.setattr(HistoryDB, "db_path", str(tmp_path / "history1.db"))
+        monkeypatch.setattr(HistoryDB, "startup_done", False)
+        mocker.patch.object(sabnzbd, "PostProcessor", create=True)
+        sabnzbd.PostProcessor.get_queue.return_value = []
+
+        # Constructed after admin_dir is redirected, so it creates the future folder there
+        queue = NzbQueue()
+        nzo = NzbObject("future-job", futuretype=True)
+        nzo.nzo_id = "SABnzbd_nzo_future"
+        save_data(nzo, nzo.nzo_id, nzo.admin_path)
+        assert len(os.listdir(nzo.admin_path)) == 2
+
+        with FakeHistoryDB(str(tmp_path / "history1.db")):
+            queue.read_queue(1)
+
+        assert len(queue.queue_info()[3]) == 1
+
     def test_read_queue_tolerates_added_fields(self):
         """A newer release may append to the queue file, this one must still load the jobs"""
         q = NzbQueue()
