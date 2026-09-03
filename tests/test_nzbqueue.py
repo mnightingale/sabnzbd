@@ -278,6 +278,16 @@ class TestNzbQueue:
         assert nzo.files
         assert not nzo.finished_files
 
+    def test_nzo_reuse_ignores_ondisk_of_another_version(self, make_nzb_workdir):
+        wdir = make_nzb_workdir("basic_rar5", {"testfile.rar": [False]})
+        admin_dir = os.path.join(wdir, JOB_ADMIN)
+        save_data((ONDISK_VERSION + 1, {"testfile.rar": [False]}), ONDISK_FILE, admin_dir)
+
+        nzo_id = sabnzbd.NzbQueue.repair_job(wdir, None, None)
+        assert nzo_id
+        # The bitmap is discarded, so testfile.rar counts as complete and the job skips the queue
+        assert not sabnzbd.NzbQueue.get_nzo(nzo_id)
+
     def test_nzo_reuse_failed_articles_renamed(self, make_nzb_workdir):
         wdir = make_nzb_workdir(
             "basic_rar5",

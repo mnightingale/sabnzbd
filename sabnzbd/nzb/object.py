@@ -50,6 +50,7 @@ from sabnzbd.constants import (
     DuplicateStatus,
     NZO_FILE,
     ONDISK_FILE,
+    ONDISK_VERSION,
 )
 from sabnzbd.misc import (
     to_units,
@@ -875,8 +876,11 @@ class NzbObject(TryList):
         # Mapping of filename to bitmap of articles already on disk
         on_disk_lookup: dict[str, list[bool]] = {}
         if cfg.direct_write() and (on_disk_data := load_data(ONDISK_FILE, self.admin_path, remove=True)):
-            _, mapping = on_disk_data
-            on_disk_lookup: dict[str, list[bool]] = mapping
+            # Read the version before anything else, a future one can hold a different shape
+            if on_disk_data[0] == ONDISK_VERSION:
+                on_disk_lookup = on_disk_data[1]
+            else:
+                logging.info("Ignoring %s of version %s, expected %s", ONDISK_FILE, on_disk_data[0], ONDISK_VERSION)
 
         # Flag files from NZB that already exist as finished
         for existing_filename in existing_files[:]:
