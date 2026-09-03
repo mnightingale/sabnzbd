@@ -22,13 +22,18 @@ tests.test_nzb_serializer - Round trip of the NzbObject graph
 import datetime
 import os
 
+import msgpack
+
 import pytest
 
 import sabnzbd
 from sabnzbd.constants import ADMIN_EXT, NZO_FILE
 from sabnzbd.filesystem import load_data, save_data
 from sabnzbd.nzb import NzbObject
-from sabnzbd.nzb.serializer import encode_nzo
+from sabnzbd.nzb.article import ArticleSaver
+from sabnzbd.nzb.file import NzbFileSaver
+from sabnzbd.nzb.object import NzbObjectSaver
+from sabnzbd.nzb.serializer import ARTICLE_FIELDS, NZF_STRUCTURAL, NZO_STRUCTURAL, encode_nzo
 from sabnzbd.par2file import FilePar2Info
 from tests.test_nzbqueue import make_dummy_nzo, nzbqueue_env  # noqa: F401
 
@@ -66,6 +71,57 @@ def build_job(name: str = "job") -> NzbObject:
     first.decodetable[1].crc32 = 0xDEADBEEF
     first.decodetable[2].failed = True
     return nzo
+
+
+@pytest.mark.usefixtures("nzbqueue_env")
+class TestSchemaCoverage:
+    """A field added to a Saver tuple is encoded automatically, unless it holds an object
+    reference or a type msgpack cannot carry. These pin that split so the miss is caught here
+    rather than by silently dropping the msgpack copy."""
+
+    def test_structural_names_still_exist(self):
+        """A renamed field would leave a stale entry behind and start encoding a reference"""
+        assert NZO_STRUCTURAL <= set(NzbObjectSaver)
+        assert NZF_STRUCTURAL <= set(NzbFileSaver)
+        assert set(ARTICLE_FIELDS) < set(ArticleSaver)
+
+    def check_encodable(self, record, saver, structural, owner):
+        for field in saver:
+            if field in structural:
+                continue
+            try:
+                msgpack.packb(record[field] if isinstance(record, dict) else getattr(record, field))
+            except TypeError as err:
+                pytest.fail(
+                    "%s field %r cannot be carried by msgpack (%s). Add it to the structural set "
+                    "and convert it in the encoder and decoder." % (owner, field, err)
+                )
+
+    def test_every_job_field_is_encodable(self):
+        document = encode_nzo(build_job())
+        self.check_encodable(document["nzo"], NzbObjectSaver, NZO_STRUCTURAL, "NzbObjectSaver")
+        for record in document["files"] + document["finished_files"]:
+            self.check_encodable(record, NzbFileSaver, NZF_STRUCTURAL, "NzbFileSaver")
+        # The whole document has to pack, which also covers the hand-converted fields
+        msgpack.packb(document)
+
+    def test_every_job_field_round_trips(self, tmp_path):
+        """Catches a field that encodes but is never read back"""
+        nzo = build_job()
+        save_data(nzo, NZO_FILE, str(tmp_path))
+        os.remove(tmp_path / NZO_FILE)
+        back = load_data(NZO_FILE, str(tmp_path), remove=False)
+
+        for field in NzbObjectSaver:
+            if field not in NZO_STRUCTURAL:
+                assert getattr(back, field) == getattr(nzo, field), field
+        for restored, original in zip(back.files, nzo.files):
+            for field in NzbFileSaver:
+                if field not in NZF_STRUCTURAL:
+                    assert getattr(restored, field) == getattr(original, field), field
+            for restored_article, original_article in zip(restored.decodetable, original.decodetable):
+                for field in ARTICLE_FIELDS:
+                    assert getattr(restored_article, field) == getattr(original_article, field), field
 
 
 @pytest.mark.usefixtures("nzbqueue_env")

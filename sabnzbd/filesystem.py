@@ -1251,7 +1251,9 @@ def _pack_admin(data: Any) -> Optional[bytes]:
     try:
         return ADMIN_MAGIC + msgpack.packb({"v": ADMIN_CONTAINER_VERSION, "d": data}, default=_encode_unknown)
     except TypeError:
-        logging.debug("No msgpack encoder for %s, writing only pickle", type(data).__name__)
+        # Every payload we write should encode, so this is a missing encoder rather than a data problem
+        logging.warning("No msgpack encoder for %s, writing only pickle", type(data).__name__)
+        logging.info("Traceback: ", exc_info=True)
         return None
 
 
