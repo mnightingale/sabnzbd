@@ -70,15 +70,19 @@ class TryList:
         """Clean the list"""
         self.try_list = set()
 
+    def restore_try_list(self, servers_ids):
+        """Resolve saved server ids against the servers configured now"""
+        self.try_list = set()
+        for server in sabnzbd.Downloader.servers:
+            if server.id in servers_ids:
+                self.add_to_try_list(server)
+
     def __getstate__(self):
         """Save the servers"""
         return {server.id for server in self.try_list}
 
     def __setstate__(self, servers_ids: list[str]):
-        self.try_list = set()
-        for server in sabnzbd.Downloader.servers:
-            if server.id in servers_ids:
-                self.add_to_try_list(server)
+        self.restore_try_list(servers_ids)
 
 
 ##############################################################################

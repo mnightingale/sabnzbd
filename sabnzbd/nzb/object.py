@@ -1783,7 +1783,10 @@ class NzbObject(TryList):
                 setattr(self, item, None)
         self.lock = threading.RLock()
         super().__setstate__(dict_.get("try_list", []))
+        self.finalize_restored_job()
 
+    def finalize_restored_job(self):
+        """Reset the values that do not survive a save, shared by every reader so they cannot drift"""
         # Set non-transferable values
         self.pp_active = False
         self.avg_stamp = time.mktime(self.avg_date.timetuple())
