@@ -46,6 +46,7 @@ try:
 except ImportError:
     pass
 
+import msgpack
 import sabctools
 import sabnzbd
 from sabnzbd.decorators import synchronized, conditional_cache
@@ -58,6 +59,9 @@ from sabnzbd.constants import (
     DEF_LOG_FILE,
     DEX_FILE_EXTENSION_MAX,
     MEBI,
+    ADMIN_MAGIC,
+    ADMIN_EXT,
+    ADMIN_CONTAINER_VERSION,
 )
 from sabnzbd.encoding import correct_unknown_encoding, unicode_nfc_normalize, utob, limit_encoded_length
 import rarfile
@@ -1222,6 +1226,23 @@ class RestrictedUnpickler(pickle.Unpickler):
         raise pickle.UnpicklingError("Refusing to unpickle %s.%s" % (module, name))
 
 
+def _pack_admin(data: Any) -> Optional[bytes]:
+    """Encode data in the versioned container, None when the type has no msgpack encoder"""
+    try:
+        return ADMIN_MAGIC + msgpack.packb({"v": ADMIN_CONTAINER_VERSION, "d": data})
+    except TypeError:
+        logging.debug("No msgpack encoder for %s, writing only pickle", type(data).__name__)
+        return None
+
+
+def _unpack_admin(body: bytes) -> Any:
+    """Decode the versioned container, raises when it is newer than we understand"""
+    container = msgpack.unpackb(body, strict_map_key=True)
+    if container["v"] > ADMIN_CONTAINER_VERSION:
+        raise ValueError("Container version %s is newer than %s" % (container["v"], ADMIN_CONTAINER_VERSION))
+    return container["d"]
+
+
 def _write_admin_file(path: str, writer: Callable[[BinaryIO], None], silent: bool) -> bool:
     """Write through a temporary file so a failure cannot truncate the previous copy"""
     tmp_path = path + ".tmp"
@@ -1243,7 +1264,6 @@ def _write_admin_file(path: str, writer: Callable[[BinaryIO], None], silent: boo
             else:
                 # Wait a tiny bit before trying again
                 time.sleep(0.1)
-
     try:
         os.remove(tmp_path)
     except Exception:
@@ -1251,38 +1271,49 @@ def _write_admin_file(path: str, writer: Callable[[BinaryIO], None], silent: boo
     return False
 
 
-def save_data(data: Any, _id: str, path: str, silent: bool = False):
-    """Save data to a diskfile"""
+def save_data(data: Any, _id: str, path: str, silent: bool = False, write_msgpack: bool = True):
+    """Save data to a diskfile as pickle, with a msgpack copy alongside it"""
     if not silent:
         logging.debug("[%s] Saving data for %s in %s", sabnzbd.misc.caller_name(), _id, path)
-    path = os.path.join(path, _id)
+    target = os.path.join(path, _id)
 
-    _write_admin_file(path, lambda data_file: pickle.dump(data, data_file, protocol=pickle.HIGHEST_PROTOCOL), silent)
+    if write_msgpack and (encoded := _pack_admin(data)) is not None:
+        _write_admin_file(target + ADMIN_EXT, lambda data_file: data_file.write(encoded), silent)
+
+    _write_admin_file(target, lambda data_file: pickle.dump(data, data_file, protocol=pickle.HIGHEST_PROTOCOL), silent)
 
 
 def load_data(data_id: str, path: str, remove: bool = True, silent: bool = False) -> Any:
-    """Read data from disk file"""
-    path = os.path.join(path, data_id)
+    """Read data from an admin file, preferring the msgpack copy"""
+    target = os.path.join(path, data_id)
+    sources = [source for source in (target + ADMIN_EXT, target) if os.path.exists(source)]
 
-    if not os.path.exists(path):
-        logging.info("[%s] %s missing", sabnzbd.misc.caller_name(), path)
+    if not sources:
+        logging.info("[%s] %s missing", sabnzbd.misc.caller_name(), target)
         return None
 
-    if not silent:
-        logging.debug("[%s] Loading data for %s from %s", sabnzbd.misc.caller_name(), data_id, path)
-
-    try:
-        with open(path, "rb") as data_file:
-            data = RestrictedUnpickler(data_file, encoding=sabnzbd.encoding.CODEPAGE).load()
+    for source in sources:
+        if not silent:
+            logging.debug("[%s] Loading data for %s from %s", sabnzbd.misc.caller_name(), data_id, source)
+        try:
+            with open(source, "rb") as data_file:
+                # The format is taken from the content, so a file under the wrong name is still read correctly
+                if data_file.read(len(ADMIN_MAGIC)) == ADMIN_MAGIC:
+                    data = _unpack_admin(data_file.read())
+                else:
+                    data_file.seek(0)
+                    data = RestrictedUnpickler(data_file, encoding=sabnzbd.encoding.CODEPAGE).load()
+        except Exception:
+            # Fall through to the other copy, if there is one
+            logging.warning(T("Loading %s failed"), source)
+            logging.info("Traceback: ", exc_info=True)
+            continue
 
         if remove:
-            remove_file(path)
-    except Exception:
-        logging.error(T("Loading %s failed"), path)
-        logging.info("Traceback: ", exc_info=True)
-        return None
+            remove_data(data_id, path)
+        return data
 
-    return data
+    return None
 
 
 def save_file_bytes(data: bytes, _id: str, path: str, silent: bool = False):
@@ -1336,13 +1367,14 @@ def load_file_bytes(_id: str, path: str, remove: bool = True, mutable: bool = Fa
 
 
 def remove_data(_id: str, path: str):
-    """Remove admin file"""
-    path = os.path.join(path, _id)
-    try:
-        if os.path.exists(path):
-            remove_file(path)
-    except Exception:
-        logging.debug("Failed to remove %s", path)
+    """Remove admin file and its msgpack copy"""
+    target = os.path.join(path, _id)
+    for source in (target, target + ADMIN_EXT):
+        try:
+            if os.path.exists(source):
+                remove_file(source)
+        except Exception:
+            logging.debug("Failed to remove %s", source)
 
 
 def save_admin(data: Any, data_id: str):

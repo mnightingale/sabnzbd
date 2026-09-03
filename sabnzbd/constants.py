@@ -53,6 +53,11 @@ ATTRIB_FILE = "SABnzbd_attrib"
 NZO_FILE = "SABnzbd_nzo_data"
 REPAIR_REQUEST = "repair-all.sab"
 
+# Admin files are pickle, with a msgpack copy written alongside under ADMIN_EXT
+ADMIN_MAGIC = b"SABD"
+ADMIN_EXT = ".mpk"
+ADMIN_CONTAINER_VERSION = 1
+
 SABCTOOLS_VERSION_REQUIRED = "9.7.1"
 
 DB_HISTORY_VERSION = 1

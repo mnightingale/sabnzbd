@@ -37,6 +37,9 @@ from unittest import mock
 import pytest
 from pyfakefs.helpers import set_uid
 
+import msgpack
+
+from sabnzbd.constants import ADMIN_CONTAINER_VERSION, ADMIN_EXT, ADMIN_MAGIC
 from tests.testhelper import SAB_DATA_DIR
 
 import sabnzbd
@@ -1369,6 +1372,110 @@ class TestRenamer:
 
         # Cleanup working directory
         shutil.rmtree(dirname)
+
+
+def as_lists(value):
+    """msgpack has no tuple type, so compare against the list equivalent"""
+    if isinstance(value, (tuple, list)):
+        return [as_lists(item) for item in value]
+    if isinstance(value, dict):
+        return {key: as_lists(item) for key, item in value.items()}
+    return value
+
+
+class TestAdminFormat:
+    # The payloads every save_data caller actually writes
+    PAYLOADS = [
+        (10, ["job-a/id-1", "job-b/id-2"], []),
+        {"cat": "tv", "pp": 3, "script": None, "priority": -100, "final_name": "x", "password": None, "url": ""},
+        {"setname": True, "": False},
+        (1, {"file.rar": [True, False, True]}),
+        {"obfuscated.rar": "real.rar"},
+        ("/watched", {"a.nzb": 1.5}, {"b.nzb": 2}),
+        (1, {"tokenhash": {"expires": 1700000000.0, "user": "me"}}),
+        (3, [("nzo-id", "job/SABnzbd_nzo_data")]),
+        {b"\x01\x02\x03": "file.rar"},
+    ]
+
+    @pytest.mark.parametrize("payload", PAYLOADS)
+    def test_both_copies_decode_to_the_same_data(self, tmp_path, payload):
+        filesystem.save_data(payload, "d", str(tmp_path))
+
+        # Each copy is readable on its own, so a downgrade reads the same job
+        from_msgpack = filesystem.load_data("d", str(tmp_path), remove=False)
+        os.remove(tmp_path / ("d" + ADMIN_EXT))
+        from_pickle = filesystem.load_data("d", str(tmp_path), remove=False)
+
+        assert from_msgpack == as_lists(payload)
+        assert from_pickle == payload
+
+    def test_save_data_writes_both_copies(self, tmp_path):
+        filesystem.save_data("payload", "d", str(tmp_path))
+
+        assert (tmp_path / ("d" + ADMIN_EXT)).read_bytes()[:4] == ADMIN_MAGIC
+        assert (tmp_path / "d").read_bytes()[:1] == b"\x80"
+
+    def test_write_msgpack_false_writes_only_pickle(self, tmp_path):
+        filesystem.save_data([["article-id", 100]], "nzf", str(tmp_path), write_msgpack=False)
+
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["nzf"]
+
+    def test_unencodable_payload_still_saves_as_pickle(self, tmp_path):
+        # NzbObject has no msgpack encoder until the graph schema lands
+        payload = {"articles": {1, 2, 3}}
+        filesystem.save_data(payload, "d", str(tmp_path))
+
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["d"]
+        assert filesystem.load_data("d", str(tmp_path), remove=False) == payload
+
+    def test_format_is_taken_from_content_not_the_name(self, tmp_path):
+        filesystem.save_data("payload", "d", str(tmp_path))
+        # A restored backup landing under the legacy name is still read correctly
+        shutil.copyfile(tmp_path / ("d" + ADMIN_EXT), tmp_path / "d")
+        os.remove(tmp_path / ("d" + ADMIN_EXT))
+
+        assert filesystem.load_data("d", str(tmp_path), remove=False) == "payload"
+
+    def test_corrupt_msgpack_falls_back_to_pickle(self, tmp_path):
+        filesystem.save_data("payload", "d", str(tmp_path))
+        (tmp_path / ("d" + ADMIN_EXT)).write_bytes(ADMIN_MAGIC + b"truncated")
+
+        assert filesystem.load_data("d", str(tmp_path), remove=False) == "payload"
+
+    def test_newer_container_version_falls_back_to_pickle(self, tmp_path):
+        filesystem.save_data("payload", "d", str(tmp_path))
+        newer = ADMIN_MAGIC + msgpack.packb({"v": ADMIN_CONTAINER_VERSION + 1, "d": "from the future"})
+        (tmp_path / ("d" + ADMIN_EXT)).write_bytes(newer)
+
+        assert filesystem.load_data("d", str(tmp_path), remove=False) == "payload"
+
+    def test_newer_container_version_without_pickle_returns_none(self, tmp_path):
+        newer = ADMIN_MAGIC + msgpack.packb({"v": ADMIN_CONTAINER_VERSION + 1, "d": "from the future"})
+        (tmp_path / ("d" + ADMIN_EXT)).write_bytes(newer)
+
+        assert filesystem.load_data("d", str(tmp_path), remove=False) is None
+
+    def test_missing_file_returns_none(self, tmp_path):
+        assert filesystem.load_data("nothing", str(tmp_path), remove=False) is None
+
+    @pytest.mark.parametrize("remover", [filesystem.remove_data, None])
+    def test_both_copies_are_removed(self, tmp_path, remover):
+        filesystem.save_data("payload", "d", str(tmp_path))
+        if remover:
+            remover("d", str(tmp_path))
+        else:
+            filesystem.load_data("d", str(tmp_path), remove=True)
+
+        assert not list(tmp_path.iterdir())
+
+    def test_a_failed_write_leaves_the_previous_copy_intact(self, tmp_path):
+        filesystem.save_data("first", "d", str(tmp_path))
+
+        with mock.patch("os.replace", side_effect=OSError("no space left on device")):
+            filesystem.save_data("second", "d", str(tmp_path))
+
+        assert filesystem.load_data("d", str(tmp_path), remove=False) == "first"
+        assert not list(tmp_path.glob("*.tmp"))
 
 
 class TestRestrictedUnpickler:

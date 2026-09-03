@@ -131,7 +131,7 @@ class NzbFile(TryList):
         # Any articles left?
         if raw_article_db:
             # Save the rest
-            save_data(raw_article_db, self.nzf_id, nzo.admin_path)
+            save_data(raw_article_db, self.nzf_id, nzo.admin_path, write_msgpack=False)
         else:
             # All imported
             self.import_finished = True
