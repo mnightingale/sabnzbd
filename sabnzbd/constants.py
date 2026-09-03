@@ -61,6 +61,10 @@ NZO_SCHEMA_VERSION = 1
 # Marks an encoded job inside an admin document
 NZO_TAG = "__nzo__"
 
+# Reading a pickle can execute code, so support for it is time-boxed rather than open-ended.
+# Writing them continues for as long as we support downgrading to a release that only reads pickles.
+PICKLE_REMOVAL_VERSION = "6.0.0"
+
 SABCTOOLS_VERSION_REQUIRED = "9.7.1"
 
 DB_HISTORY_VERSION = 1

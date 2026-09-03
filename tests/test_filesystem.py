@@ -23,6 +23,7 @@ import datetime
 import errno
 import io
 import pickle
+import re
 import stat
 import sys
 import os
@@ -39,7 +40,7 @@ from pyfakefs.helpers import set_uid
 
 import msgpack
 
-from sabnzbd.constants import ADMIN_CONTAINER_VERSION, ADMIN_EXT, ADMIN_MAGIC
+from sabnzbd.constants import ADMIN_CONTAINER_VERSION, ADMIN_EXT, ADMIN_MAGIC, PICKLE_REMOVAL_VERSION
 from tests.testhelper import SAB_DATA_DIR
 
 import sabnzbd
@@ -1467,6 +1468,16 @@ class TestAdminFormat:
             filesystem.load_data("d", str(tmp_path), remove=True)
 
         assert not list(tmp_path.iterdir())
+
+    def test_pickle_support_is_time_boxed(self):
+        """Reading pickles is a code-execution surface, so the deadline lives in code, not in a plan"""
+        current = tuple(int(part) for part in re.match(r"(\d+)\.(\d+)\.(\d+)", sabnzbd.__version__).groups())
+        deadline = tuple(int(part) for part in PICKLE_REMOVAL_VERSION.split("."))
+
+        assert current < deadline, (
+            "Admin pickle reading was scheduled for removal in %s. Remove it, or move "
+            "PICKLE_REMOVAL_VERSION deliberately." % PICKLE_REMOVAL_VERSION
+        )
 
     def test_a_failed_write_leaves_the_previous_copy_intact(self, tmp_path):
         filesystem.save_data("first", "d", str(tmp_path))
