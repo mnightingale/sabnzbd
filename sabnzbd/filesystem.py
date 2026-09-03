@@ -37,7 +37,7 @@ import ctypes
 import random
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Iterable, Optional, BinaryIO
+from typing import Any, Callable, Iterable, Optional, BinaryIO
 
 try:
     import win32api
@@ -1222,18 +1222,17 @@ class RestrictedUnpickler(pickle.Unpickler):
         raise pickle.UnpicklingError("Refusing to unpickle %s.%s" % (module, name))
 
 
-def save_data(data: Any, _id: str, path: str, silent: bool = False):
-    """Save data to a diskfile"""
-    if not silent:
-        logging.debug("[%s] Saving data for %s in %s", sabnzbd.misc.caller_name(), _id, path)
-    path = os.path.join(path, _id)
-
+def _write_admin_file(path: str, writer: Callable[[BinaryIO], None], silent: bool) -> bool:
+    """Write through a temporary file so a failure cannot truncate the previous copy"""
+    tmp_path = path + ".tmp"
     # We try 3 times, to avoid any dict or access problems
     for t in range(3):
         try:
-            with open(path, "wb") as data_file:
-                pickle.dump(data, data_file, protocol=pickle.HIGHEST_PROTOCOL)
-            break
+            with open(tmp_path, "wb") as data_file:
+                writer(data_file)
+                data_file.flush()
+            os.replace(tmp_path, path)
+            return True
         except Exception:
             if silent:
                 # This can happen, probably a removed folder
@@ -1244,6 +1243,21 @@ def save_data(data: Any, _id: str, path: str, silent: bool = False):
             else:
                 # Wait a tiny bit before trying again
                 time.sleep(0.1)
+
+    try:
+        os.remove(tmp_path)
+    except Exception:
+        pass
+    return False
+
+
+def save_data(data: Any, _id: str, path: str, silent: bool = False):
+    """Save data to a diskfile"""
+    if not silent:
+        logging.debug("[%s] Saving data for %s in %s", sabnzbd.misc.caller_name(), _id, path)
+    path = os.path.join(path, _id)
+
+    _write_admin_file(path, lambda data_file: pickle.dump(data, data_file, protocol=pickle.HIGHEST_PROTOCOL), silent)
 
 
 def load_data(data_id: str, path: str, remove: bool = True, silent: bool = False) -> Any:
