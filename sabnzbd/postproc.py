@@ -155,7 +155,7 @@ class PostProcessor(Thread):
         if data is None:
             return
         try:
-            version, history_queue = data
+            version, history_queue = data[:2]
             if version == 2:
                 # A list of NzbObject
                 self.history_queue = [nzo for nzo in history_queue if os.path.exists(nzo.download_path)]

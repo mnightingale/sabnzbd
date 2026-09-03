@@ -20,13 +20,15 @@ tests.test_nzbobject - Testing functions in nzbobject.py
 """
 
 import os
+from unittest import mock
+
 import pytest
 from tests.testhelper import SAB_CACHE_DIR, create_and_read_nzb_fp
 
 from sabnzbd.nzb import NzbObject
 from sabnzbd.config import ConfigCat
-from sabnzbd.constants import NORMAL_PRIORITY, MAX_BAD_ARTICLES
-from sabnzbd.filesystem import globber, sanitize_filename, create_all_dirs
+from sabnzbd.constants import NORMAL_PRIORITY, MAX_BAD_ARTICLES, ATTRIB_FILE
+from sabnzbd.filesystem import globber, sanitize_filename, create_all_dirs, save_data
 
 
 @pytest.mark.usefixtures("clean_cache_dir")
@@ -132,6 +134,23 @@ class TestNZO:
             hostile_name,
             resolved,
         )
+
+
+class TestLoadAttribs:
+    @pytest.mark.parametrize("attribs", [{}, {"cat": "tv"}, {"cat": "tv", "pp": 3}, {"pp": 3, "script": "x.py"}])
+    def test_missing_keys_do_not_raise(self, tmp_path, attribs):
+        """save_attribs writes every key, but a truncated or hand-edited file must not abort the job"""
+        nzo = NzbObject.__new__(NzbObject)
+        nzo.final_name = "job"
+        nzo.password = None
+        save_data(attribs, ATTRIB_FILE, str(tmp_path))
+
+        with mock.patch.object(NzbObject, "admin_path", str(tmp_path)):
+            cat, pp, script = nzo.load_attribs()
+
+        assert cat == attribs.get("cat")
+        assert pp == attribs.get("pp")
+        assert script == attribs.get("script")
 
 
 class TestCheckAvailabilityRatio:

@@ -30,10 +30,19 @@ from unittest import mock
 import pytest
 
 import sabnzbd
-from sabnzbd.constants import NORMAL_PRIORITY, JOB_ADMIN, ONDISK_VERSION, ONDISK_FILE, RENAMES_FILE, Status
+from sabnzbd.constants import (
+    NORMAL_PRIORITY,
+    JOB_ADMIN,
+    ONDISK_VERSION,
+    ONDISK_FILE,
+    RENAMES_FILE,
+    QUEUE_VERSION,
+    QUEUE_FILE_NAME,
+    Status,
+)
 from sabnzbd.database import HistoryDB
 from sabnzbd.downloader import Server
-from sabnzbd.filesystem import save_compressed, save_data
+from sabnzbd.filesystem import save_compressed, save_data, save_admin
 from sabnzbd.nzb import NzbFile, NzbObject
 from sabnzbd.nzbqueue import NzbQueue
 from tests.testhelper import (
@@ -209,6 +218,18 @@ class TestNzbQueue:
 
         # Must not raise RuntimeError: dictionary changed size during iteration
         q.stop_idle_jobs()
+
+    def test_read_queue_tolerates_added_fields(self):
+        """A newer release may append to the queue file, this one must still load the jobs"""
+        q = NzbQueue()
+        q.add(make_dummy_nzo("a"))
+        nzo_ids = [os.path.join(nzo.work_name, nzo.nzo_id) for nzo in q.queue_info()[3]]
+        save_admin((QUEUE_VERSION, nzo_ids, [], "a field from the future"), QUEUE_FILE_NAME)
+
+        restored = NzbQueue()
+        restored.read_queue(0)
+
+        assert [nzo.final_name for nzo in restored.queue_info()[3]] == ["job-a"]
 
     @pytest.mark.skipif(not sabnzbd.WINDOWS, reason="Legacy 3.0.0 queue fixture contains Windows-specific paths")
     def test_restore_legacy_queue_format_3_0_0(self, tmp_path, monkeypatch):

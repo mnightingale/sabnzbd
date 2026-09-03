@@ -53,7 +53,7 @@ class SessionStore:
         self._sessions = {}
         try:
             if data := load_admin(SESSIONS_FILE_NAME, silent=True):
-                version, sessions = data
+                version, sessions = data[:2]
                 if version == SESSIONS_VERSION:
                     now = int(time.time())
                     self._sessions = {token: s for token, s in sessions.items() if s["expires"] > now}

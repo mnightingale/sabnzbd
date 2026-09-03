@@ -80,7 +80,7 @@ class NzbQueue:
             try:
                 data = sabnzbd.filesystem.load_admin(QUEUE_FILE_NAME)
                 if data:
-                    queue_vers, nzo_ids, _ = data
+                    queue_vers, nzo_ids = data[:2]
                     if not queue_vers == QUEUE_VERSION:
                         nzo_ids = []
                         logging.error(T("Incompatible queuefile found, cannot proceed"))

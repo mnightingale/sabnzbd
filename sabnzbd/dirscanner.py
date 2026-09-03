@@ -84,7 +84,7 @@ class DirScanner(threading.Thread):
         cfg.dirscan_speed.callback(self.newspeed)
 
         try:
-            dirscan_dir, self.ignored, self.suspected = sabnzbd.filesystem.load_admin(SCAN_FILE_NAME)
+            dirscan_dir, self.ignored, self.suspected = sabnzbd.filesystem.load_admin(SCAN_FILE_NAME)[:3]
             if dirscan_dir != self.dirscan_dir:
                 self.ignored = {}
                 self.suspected = {}
