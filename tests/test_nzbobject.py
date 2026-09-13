@@ -355,6 +355,33 @@ class TestBlockAccounting:
         nzo.prospective_add(nzo.finished_files[0])
         assert sorted(nzf.blocks for nzf in nzo.files) == [1, 2]
 
+    def test_damage_no_set_describes(self):
+        """A file the packs do not name is damage the accounting cannot locate."""
+        nzo = self._make_nzo()
+        assert nzo.unmapped_damage() is False
+
+        obfuscated = self._make_nzf(nzo, "abc123def.bin", failed_articles=(0, 1, 2, 3))
+        nzo.finished_files.append(obfuscated)
+        assert nzo.unmapped_damage() is True
+        # It counts against no set, so the exact number cannot see it
+        assert nzo.blocks_destroyed("myset") == 0
+
+    def test_prospective_add_covers_damage_no_set_describes(self):
+        """Regression: an unnamed file reads as undamaged and must not fetch nothing."""
+        nzo = self._make_nzo()
+        obfuscated = self._make_nzf(nzo, "abc123def.bin", failed_articles=(0, 1, 2, 3))
+        nzo.finished_files.append(obfuscated)
+        nzo.bad_articles = 4
+
+        nzo.prospective_add(obfuscated)
+        assert sorted(nzf.blocks for nzf in nzo.files) == [1, 2, 4]
+
+    def test_undamaged_file_the_packs_do_not_name(self):
+        """Only a file that lost articles leaves damage unaccounted for."""
+        nzo = self._make_nzo()
+        nzo.finished_files.append(self._make_nzf(nzo, "abc123def.bin"))
+        assert nzo.unmapped_damage() is False
+
     def test_prospective_add_falls_back_to_bad_articles(self):
         nzo = self._make_nzo(failed_articles=(1,))
         nzo.par2packs.clear()

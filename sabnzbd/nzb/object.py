@@ -791,6 +791,19 @@ class NzbObject(TryList):
         return destroyed
 
     @synchronized()
+    def unmapped_damage(self) -> bool:
+        """Whether a finished file lost articles that no par2 set accounts for.
+
+        Obfuscation can leave a file still unmatched to its par2 entry, and a file the
+        sets do not describe cannot be repaired from them at all. Either way its damage
+        counts against no set, so the block accounting is short by an unknown amount.
+        """
+        described = set()
+        for par2pack in self.par2packs.values():
+            described.update(par2pack)
+        return any(nzf.bytes_left and not nzf.is_par2 and nzf.filename not in described for nzf in self.finished_files)
+
+    @synchronized()
     def recovery_blocks(self) -> int:
         """Recovery blocks the NZB holds, downloaded or not"""
         parfiles = {id(nzf): nzf for nzf in self.files + self.finished_files if nzf.is_par2}
@@ -1211,6 +1224,7 @@ class NzbObject(TryList):
         """Add par2 files to compensate for missing articles"""
         # Get some blocks!
         if not nzf.is_par2:
+            unmapped = self.unmapped_damage()
             for parset in self.extrapars:
                 # Due to strong obfuscation on article-level the parset could have a different name
                 # than the files. Because of that we just add the required number of par2-blocks
@@ -1219,6 +1233,10 @@ class NzbObject(TryList):
                 if needed is None:
                     # No block geometry for this set, so fall back to counting articles
                     needed = self.bad_articles
+                elif unmapped:
+                    # Some of the damage counts against no set, so the exact number is
+                    # short by an unknown amount and the old guess may well be larger
+                    needed = max(needed, self.bad_articles)
                 # Count what was asked for already, so repeated calls top up rather than stack
                 blocks_have = sum(
                     parfile.blocks
