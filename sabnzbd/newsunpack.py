@@ -1360,7 +1360,10 @@ def _consumed_extra_files(session, joinables: list[str]) -> list[str]:
 
     Must be called before repair(), which applies the renames and clears the state.
     """
+    # A file of the set is reported under the name the set records, which is not
+    # always the name it has on disk, so both spellings count as a target.
     targets = {os.path.basename(entry["target"]) for entry in session.repairer.files}
+    targets |= {os.path.basename(entry["name"]) for entry in session.repairer.files}
     renamed = {os.path.basename(path) for path in session.repairer.renames}
     joinable_names = {os.path.basename(path) for path in joinables}
 
