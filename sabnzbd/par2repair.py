@@ -79,6 +79,11 @@ def memory_limit() -> int:
     return max(limit, PAR2_MINIMUM_MEMORY)
 
 
+def _about(filename: str) -> str:
+    """The file a par2 error or warning concerns, where it names one."""
+    return " (%s)" % filename if filename else ""
+
+
 class RepairSession:
     """A par2 set being verified and repaired, and the repairer working on it."""
 
@@ -125,6 +130,8 @@ class RepairSession:
         )
         self.repairer.progress_callback = self._on_progress
         self.repairer.file_done_callback = self._on_file_done
+        self.repairer.error_callback = self._on_error
+        self.repairer.warning_callback = self._on_warning
 
         # par2 pulls in sibling volume files by name during load()
         self.loaded_parfiles.add(os.path.abspath(self.parfile))
@@ -252,11 +259,34 @@ class RepairSession:
         return result
 
     @property
+    def last_error(self) -> Optional["sabctools.Par2LastError"]:
+        """Why the last call failed, or None where it did not."""
+        return self.repairer.last_error if self.repairer else None
+
+    @property
     def block_shortfall(self) -> int:
         """How many more recovery blocks would make this repairable."""
         return max(0, self.repairer.missing_block_count - self.repairer.recovery_block_count)
 
     # -- progress ----------------------------------------------------------------
+
+    def _on_error(self, code: sabctools.Par2ErrorCode, message: str, filename: str):
+        """Called from par2's worker threads once per error, as it is found.
+
+        The operation may carry on and may still succeed, so this only records what
+        went wrong; the Par2Result decides whether the job failed.
+        """
+        try:
+            logging.info("par2 error in %s: %s: %s%s", self.setname, code.name, message, _about(filename))
+        except Exception:
+            logging.debug("Failed to report a par2 error", exc_info=True)
+
+    def _on_warning(self, code: sabctools.Par2WarningCode, message: str, filename: str):
+        """Called from par2's worker threads once per warning, as it is found."""
+        try:
+            logging.info("par2 warning in %s: %s: %s%s", self.setname, code.name, message, _about(filename))
+        except Exception:
+            logging.debug("Failed to report a par2 warning", exc_info=True)
 
     def _on_file_done(self, filename: str, blocks_found: int, blocks_total: int):
         """One call per file par2 finishes scanning."""

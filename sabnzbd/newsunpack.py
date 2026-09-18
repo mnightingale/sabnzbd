@@ -1329,7 +1329,7 @@ def par2_verify_and_repair(
         par2repair.discard(nzo, setname)
         return True, False, used_joinables, used_for_repair
 
-    _report_repair_failure(nzo, setname, result)
+    _report_repair_failure(nzo, setname, result, session)
     par2repair.discard(nzo, setname)
     return False, False, [], []
 
@@ -1422,19 +1422,36 @@ def _request_more_blocks(nzo: NzbObject, setname: str, session) -> tuple[bool, b
     return False, False, [], []
 
 
-def _report_repair_failure(nzo: NzbObject, setname: str, result):
+def _report_repair_failure(nzo: NzbObject, setname: str, result, session):
     """Turn a non-success Par2Result into the message the user sees."""
-    if result == sabctools.Par2Result.FILE_IO_ERROR:
+    error = session.last_error
+
+    # Only a write par2 could not finish points at a full disk
+    if error and error["code"] in (
+        sabctools.Par2ErrorCode.FILE_CREATE_FAILED,
+        sabctools.Par2ErrorCode.FILE_WRITE_FAILED,
+    ):
         msg = T("Repairing failed, %s") % T("Disk full")
     elif result == sabctools.Par2Result.MEMORY_ERROR:
         msg = T("Repairing failed, %s") % T("Out of memory")
+    elif error and error["message"]:
+        msg = T("Repairing failed, %s") % error["message"]
     else:
         msg = T("Repairing failed, %s") % result.name
 
     nzo.fail_msg = msg
     nzo.set_unpack_info("Repair", msg, setname)
     nzo.status = Status.FAILED
-    logging.info("Repair of %s failed: %s", setname, result.name)
+    if error:
+        logging.info(
+            "Repair of %s failed: %s: %s%s",
+            setname,
+            result.name,
+            error["message"],
+            " (%s)" % error["filename"] if error["filename"] else "",
+        )
+    else:
+        logging.info("Repair of %s failed: %s", setname, result.name)
 
 
 def create_env(nzo: Optional[NzbObject] = None, extra_env_fields: dict[str, Any] = {}) -> Optional[dict[str, Any]]:
