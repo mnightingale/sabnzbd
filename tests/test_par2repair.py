@@ -24,6 +24,7 @@ import sys
 from unittest import mock
 
 import pytest
+import sabctools
 
 import sabnzbd.cfg as cfg
 from sabnzbd.constants import GIGI, MEBI, PAR2_MINIMUM_MEMORY, PAR2_RESERVED_MEMORY
@@ -289,3 +290,23 @@ class TestPar2Threads:
     def test_file_threads_are_left_to_par2(self, tmp_path):
         """This one is about I/O concurrency, not CPU count - par2's 2 stands"""
         assert "file_threads" not in self.opened_with(tmp_path)
+
+
+class TestPar2SetLoaded:
+    @pytest.mark.parametrize(
+        "creator, expected",
+        [
+            ("Created by par2cmdline-turbo version 1.1.1.", "(Created by par2cmdline-turbo version 1.1.1.)"),
+            ("", "(creator unknown)"),
+        ],
+    )
+    def test_logs_the_client_that_created_the_set(self, tmp_path, caplog, creator, expected):
+        parfile = tmp_path / "test.par2"
+        parfile.write_bytes(b"")
+        session = RepairSession(mock.Mock(), "test", str(parfile))
+        with mock.patch("sabnzbd.par2repair.sabctools.Par2Repairer") as repairer:
+            repairer.return_value.load.return_value = sabctools.Par2Result.SUCCESS
+            repairer.return_value.creator = creator
+            with caplog.at_level("INFO"):
+                session.open([])
+        assert any(record.getMessage().endswith(expected) for record in caplog.records)

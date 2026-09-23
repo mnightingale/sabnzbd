@@ -140,11 +140,12 @@ class RepairSession:
         result = self.repairer.load()
         if result == sabctools.Par2Result.SUCCESS:
             logging.info(
-                "Loaded par2 set %s: %s recoverable files, %s source blocks, %s recovery blocks",
+                "Loaded par2 set %s: %s recoverable files, %s source blocks, %s recovery blocks (%s)",
                 self.setname,
                 self.repairer.recoverable_file_count,
                 self.repairer.source_block_count,
                 self.repairer.recovery_block_count,
+                self.repairer.creator or "creator unknown",
             )
         return result
 
