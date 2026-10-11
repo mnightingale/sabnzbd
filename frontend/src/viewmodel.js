@@ -3,6 +3,7 @@ import { search_query_parse } from "./search-query-parser.js";
 import { QueueListModel } from "./queue.js";
 import { HistoryListModel } from "./history.js";
 import { Fileslisting } from "./filelist.js";
+import { NzbSearchModel } from "./nzbsearch.js";
 
 /**
     Define main view model

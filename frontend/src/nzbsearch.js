@@ -1,3 +1,5 @@
+import { callAPI } from "./basic.js";
+
 /**
     Model behind the newznab indexer search modal (#modal-nzbsearch)
 **/
@@ -120,3 +122,5 @@ function NzbSearchResult(data) {
         }).modal('show');
     };
 }
+
+export { NzbSearchModel };
