@@ -214,6 +214,7 @@ class TestPar2Repair:
             extrapars={"test": []},
             par2packs={"test": None},
             par2_sessions={},
+            finished_files=[],
         )
 
         for file in glob.glob(test_dir + "/*.par2"):
@@ -377,6 +378,7 @@ class TestPar2RepairResume:
         nzo.par2packs = {"par2test": None}
         nzo.par2_sessions = {}
         nzo.files = []
+        nzo.finished_files = []
         nzo.get_extra_blocks.return_value = 5
         return nzo
 
