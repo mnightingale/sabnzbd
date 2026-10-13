@@ -21,6 +21,9 @@ tests.test_nzbobject - Testing functions in nzbobject.py
 
 import os
 import pytest
+from unittest import mock
+
+import sabnzbd
 from tests.testhelper import SAB_CACHE_DIR, create_and_read_nzb_fp
 
 from sabnzbd.nzb import NzbObject
@@ -132,6 +135,20 @@ class TestNZO:
             hostile_name,
             resolved,
         )
+
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+    def test_purge_releases_par2_sessions(self):
+        ConfigCat("*", {"pp": 3, "script": "None", "priority": NORMAL_PRIORITY})
+        nzo = NzbObject("test_purge_sessions")
+        session = mock.Mock()
+        nzo.par2_sessions = {"test": session}
+        with (
+            mock.patch.object(sabnzbd, "ArticleCache", create=True),
+            mock.patch.object(sabnzbd, "Assembler", create=True),
+        ):
+            nzo.purge_data()
+        session.close.assert_called_once()
+        assert nzo.par2_sessions == {}
 
 
 class TestCheckAvailabilityRatio:
