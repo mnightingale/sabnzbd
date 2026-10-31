@@ -883,8 +883,9 @@ def parring(nzo: NzbObject) -> tuple[bool, bool]:
         # This can happen even if par2 is present, it is always performed
         # so that in the next section the try_rar_check can be used if no
         # par2 check was performed in the previous part
+        # Or they kept their RAR-extension, but each volume got its own obfuscated name
         _, rars, _, _, _ = build_filelists(nzo.download_path, check_rar=False, extra_dirs=nzo.sub_directories())
-        if not rars:
+        if not rars or rar_sets_missing_first_volume(nzo.download_path, rars):
             # Returns number of renamed RAR's
             rar_renamer(nzo)
 
@@ -1005,6 +1006,35 @@ def try_rar_check(nzo: NzbObject, rars: list[str]) -> bool:
     else:
         # No rar-files, so just continue
         return True
+
+
+def rar_sets_missing_first_volume(download_path: str, rars: list[str]) -> bool:
+    """Check if any ".partXX.rar" or ".rar/.rXX" set directly inside download_path lacks its first volume,
+    either because no file is named as the first volume or because its RAR-header says it is a later volume
+    """
+    first_volumes: dict[str, Optional[str]] = {}
+    for rar in rars:
+        # rar_renamer() only looks at download_path itself
+        if os.path.dirname(rar) != download_path:
+            continue
+        setname, vol = sabnzbd.directunpacker.analyze_rar_filename(rar)
+        # Other formats (".001", ".s01", ...) are skipped
+        if setname is None:
+            continue
+        if vol == 1:
+            first_volumes[setname] = rar
+        else:
+            first_volumes.setdefault(setname, None)
+
+    for setname, first_volume in first_volumes.items():
+        if not first_volume:
+            logging.info("RAR set %s has no file named as its first volume", setname)
+            return True
+        rar_vol, _ = rarvolinfo.get_rar_extension(first_volume)
+        if rar_vol > 1:
+            logging.info("RAR set %s starts with %s, but its RAR-header says volume %s", setname, first_volume, rar_vol)
+            return True
+    return False
 
 
 def rename_rar_file(filename: str, setname: str, download_path: str, extension: str) -> None:
