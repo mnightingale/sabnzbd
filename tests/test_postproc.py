@@ -36,6 +36,7 @@ from sabnzbd.deobfuscate_filenames import deobfuscate
 from sabnzbd.filesystem import clip_path, globber_full
 from sabnzbd.misc import sort_to_opts
 from sabnzbd.nzb import NzbObject
+from sabnzbd.utils import rarvolinfo
 from tests.testhelper import SAB_CACHE_DIR, SAB_DATA_DIR, make_mock_nzo
 
 
@@ -125,6 +126,53 @@ class TestPostProc:
         expected_filename_matches = {"*.rar": 0, "*-*-*-*-*": 6}
         # 0 files should have been renamed
         assert self._deobfuscate_dir(sourcedir, expected_filename_matches) == 0
+
+    @pytest.fixture
+    def single_rar_set_dir(self):
+        """Copy of the obfuscated single rar set, with each file mapped to its volume number"""
+        workingdir = os.path.join(SAB_CACHE_DIR, "workingdir_test_rar_sets")
+        shutil.copytree(os.path.join(SAB_DATA_DIR, "obfuscated_single_rar_set"), workingdir)
+        volumes = {}
+        for filename in os.listdir(workingdir):
+            volumes[filename] = rarvolinfo.get_rar_extension(os.path.join(workingdir, filename))[0]
+        yield workingdir, volumes
+        shutil.rmtree(workingdir)
+
+    @staticmethod
+    def _rename_rar_set(workingdir, volumes, name_for_volume):
+        rars = []
+        for filename, vol in volumes.items():
+            new_path = os.path.join(workingdir, name_for_volume(filename, vol))
+            os.rename(os.path.join(workingdir, filename), new_path)
+            rars.append(new_path)
+        return rars
+
+    def test_rar_sets_missing_first_volume_named_set(self, single_rar_set_dir):
+        workingdir, volumes = single_rar_set_dir
+        rars = self._rename_rar_set(workingdir, volumes, lambda _, vol: "set.part%03d.rar" % vol)
+        assert not postproc.rar_sets_missing_first_volume(workingdir, rars)
+
+    def test_rar_sets_missing_first_volume_obfuscated_names_with_extension(self, single_rar_set_dir):
+        workingdir, volumes = single_rar_set_dir
+        rars = self._rename_rar_set(workingdir, volumes, lambda filename, vol: "%s.part%03d.rar" % (filename, vol))
+        assert postproc.rar_sets_missing_first_volume(workingdir, rars)
+
+        nzo = make_mock_nzo(final_name="somedownloadname", download_path=workingdir)
+        assert postproc.rar_renamer(nzo) == 7
+        assert len(globber_full(workingdir, "somedownloadname.part*.rar")) == 7
+
+    def test_rar_sets_missing_first_volume_obfuscated_names_all_rar(self, single_rar_set_dir):
+        workingdir, volumes = single_rar_set_dir
+        rars = self._rename_rar_set(workingdir, volumes, lambda filename, _: "%s.rar" % filename)
+        assert postproc.rar_sets_missing_first_volume(workingdir, rars)
+
+    def test_rar_sets_missing_first_volume_ignores_sub_directories(self, single_rar_set_dir):
+        workingdir, volumes = single_rar_set_dir
+        os.mkdir(os.path.join(workingdir, "subdir"))
+        rars = self._rename_rar_set(
+            workingdir, volumes, lambda filename, vol: os.path.join("subdir", "%s.part%03d.rar" % (filename, vol))
+        )
+        assert not postproc.rar_sets_missing_first_volume(workingdir, rars)
 
     @pytest.fixture
     def category_in_program_dir(self, monkeypatch):
