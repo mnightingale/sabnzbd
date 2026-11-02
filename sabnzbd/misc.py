@@ -57,6 +57,10 @@ from sabnzbd.constants import (
     PP_LOOKUP,
     VALID_ARCHIVES,
     VALID_NZB_FILES,
+    WRITE_BEHIND_BUFFER_SIZE,
+    WRITE_BEHIND_MAX_MEMORY,
+    WRITE_BEHIND_MEMORY_FRACTION,
+    WRITE_BEHIND_MIN_MEMORY,
 )
 import sabnzbd.config as config
 import sabnzbd.cfg as cfg
@@ -848,6 +852,13 @@ def get_cache_limit() -> str:
 
     # If failed, leave empty for Linux so user needs to decide
     return ""
+
+
+def get_write_behind_buffers() -> int:
+    """Number of write-behind buffers, sized by the memory we are allowed to use"""
+    memory = int(get_memory() * WRITE_BEHIND_MEMORY_FRACTION)
+    memory = min(max(memory, WRITE_BEHIND_MIN_MEMORY), WRITE_BEHIND_MAX_MEMORY)
+    return memory // WRITE_BEHIND_BUFFER_SIZE
 
 
 def get_memory() -> int:
