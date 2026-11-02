@@ -210,6 +210,13 @@ class Assembler(Thread):
         for writer in writers:
             writer.close()
 
+    def flush_writer(self, nzf: NzbFile) -> None:
+        """Wait for the streamed writes of this file, raising the first that failed"""
+        with self.writers_lock:
+            writer = self.writers.get(nzf.nzf_id)
+        if writer is not None:
+            writer.flush()
+
     def process(
         self,
         nzo: NzbObject = None,
@@ -349,6 +356,8 @@ class Assembler(Thread):
                     try:
                         logging.debug("Decoding part of %s", filepath)
                         self.assemble(nzo, nzf, file_done, allow_non_contiguous, direct_write)
+                        if file_done:
+                            self.flush_writer(nzf)
                     except ValueError:
                         # Raised by a FileWriter closed because the file or job was removed
                         if not (nzf.deleted or nzo.removed_from_queue):
