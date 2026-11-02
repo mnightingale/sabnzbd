@@ -709,6 +709,7 @@ class Downloader(Thread):
                     events = []
                     BPSMeter.reset()
                     sabnzbd.WriteMonitor.forget_rate()
+                    sabctools.write_behind_trim()
                     time.sleep(0.1)
                     self.max_chunk_size = _DEFAULT_CHUNK_SIZE
                     with DOWNLOADER_CV:
