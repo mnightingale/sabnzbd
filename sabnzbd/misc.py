@@ -58,6 +58,9 @@ from sabnzbd.constants import (
     PP_LOOKUP,
     VALID_ARCHIVES,
     VALID_NZB_FILES,
+    WRITE_BEHIND_MAX_MEMORY,
+    WRITE_BEHIND_MEMORY_FRACTION,
+    WRITE_BEHIND_MIN_MEMORY,
 )
 import sabnzbd.config as config
 import sabnzbd.cfg as cfg
@@ -875,6 +878,12 @@ def raise_open_file_limit() -> None:
         logging.info("Raised the open file limit from %d to %d", soft, target)
     except (ValueError, OSError):
         logging.debug("Could not raise the open file limit from %d to %d", soft, target)
+
+
+def get_write_behind_memory() -> int:
+    """Bytes of write-behind buffers, sized by the memory we are allowed to use"""
+    memory = int(get_memory() * WRITE_BEHIND_MEMORY_FRACTION)
+    return min(max(memory, WRITE_BEHIND_MIN_MEMORY), WRITE_BEHIND_MAX_MEMORY)
 
 
 def get_memory() -> int:

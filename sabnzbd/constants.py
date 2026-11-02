@@ -138,6 +138,12 @@ PAR2_RESERVED_MEMORY = int(512 * MEBI)
 PAR2_MINIMUM_MEMORY = int(32 * MEBI)
 # Shortest time between adding par2 for the failed articles of a file still downloading
 PROSPECTIVE_ADD_INTERVAL = 1.0
+# Threads writing streamed articles to disk in the background
+WRITE_BEHIND_THREADS = 2
+# Their buffers take this fraction of system memory, within the bounds below
+WRITE_BEHIND_MEMORY_FRACTION = 1 / 64
+WRITE_BEHIND_MIN_MEMORY = int(32 * MEBI)
+WRITE_BEHIND_MAX_MEMORY = int(512 * MEBI)
 
 REPAIR_PRIORITY = 3
 FORCE_PRIORITY = 2

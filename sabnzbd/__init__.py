@@ -80,6 +80,8 @@ elif os.name == "posix":
 from sabnzbd.version import __version__, __baseline__
 
 # Now we can import safely
+import sabctools
+
 import sabnzbd.misc as misc
 import sabnzbd.filesystem as filesystem
 import sabnzbd.writemonitor
@@ -114,6 +116,7 @@ import sabnzbd.bpsmeter
 import sabnzbd.scheduler as scheduler
 import sabnzbd.notifier as notifier
 import sabnzbd.sorting
+from sabnzbd.constants import WRITE_BEHIND_THREADS
 from sabnzbd.decorators import synchronized
 import sabnzbd.utils.ssdp
 import sabnzbd.utils.checkdir
@@ -291,6 +294,11 @@ def initialize(pause_downloader=False, clean_up=False, repair=0):
         pause_downloader = True
 
     misc.raise_open_file_limit()
+
+    # Start the threads that write streamed articles
+    write_behind_memory = misc.get_write_behind_memory()
+    sabctools.set_write_behind(WRITE_BEHIND_THREADS, write_behind_memory)
+    logging.info("Write-behind: %d threads, %s of buffers", WRITE_BEHIND_THREADS, misc.to_units(write_behind_memory))
 
     # Initialize threads
     sabnzbd.ArticleCache = sabnzbd.articlecache.ArticleCache()

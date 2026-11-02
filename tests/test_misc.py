@@ -44,9 +44,13 @@ from sabnzbd.config import ConfigCat, get_sorters, save_config
 from sabnzbd.constants import (
     DEFAULT_PRIORITY,
     FORCE_PRIORITY,
+    GIGI,
     GUESSIT_SORT_TYPES,
     HIGH_PRIORITY,
     NORMAL_PRIORITY,
+    WRITE_BEHIND_MAX_MEMORY,
+    WRITE_BEHIND_MEMORY_FRACTION,
+    WRITE_BEHIND_MIN_MEMORY,
 )
 from sabnzbd.misc import SABRarFile
 from tests.testhelper import SAB_BASE_DIR
@@ -1847,3 +1851,17 @@ class TestSetSocks5Proxy:
             assert self.original_socket.gettimeout(listener) == 0.0
             with pytest.raises(BlockingIOError):
                 listener.accept()
+
+
+class TestWriteBehindMemory:
+    @pytest.mark.parametrize(
+        "system, expected",
+        [
+            (0, WRITE_BEHIND_MIN_MEMORY),
+            (8 * GIGI, int(8 * GIGI * WRITE_BEHIND_MEMORY_FRACTION)),
+            (1024 * GIGI, WRITE_BEHIND_MAX_MEMORY),
+        ],
+    )
+    def test_a_fraction_of_memory_within_the_bounds(self, system, expected):
+        with mock.patch("sabnzbd.misc.get_memory", return_value=system):
+            assert misc.get_write_behind_memory() == expected
