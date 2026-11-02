@@ -211,11 +211,16 @@ class Assembler(Thread):
             writer.close()
 
     def flush_writer(self, nzf: NzbFile) -> None:
-        """Wait for the streamed writes of this file, raising the first that failed"""
+        """Wait for the streamed writes of this file, marking the articles of any that failed
+        as not on disk and raising the first failure"""
         with self.writers_lock:
             writer = self.writers.get(nzf.nzf_id)
         if writer is not None:
-            writer.flush()
+            try:
+                writer.flush()
+            except OSError:
+                nzf.forget_failed_writes(writer.failed_ranges())
+                raise
 
     def process(
         self,
