@@ -930,7 +930,11 @@ class TestWriterCache:
         nzf.prepare_filepath.return_value = nzf.filepath
         writer = mock.Mock()
         writer.flush.side_effect = OSError(errno.ENOSPC, "No space left on device", nzf.filepath)
+        writer.failed_ranges.return_value = [(150, 100), (400, 50)]
         nzf.writer = writer
+        nzf.decodetable = [
+            SimpleNamespace(on_disk=True, data_begin=begin, data_size=100) for begin in range(0, 500, 100)
+        ]
         nzo = mock.Mock(pp_or_finished=False)
 
         with (
@@ -945,6 +949,7 @@ class TestWriterCache:
 
         writer.flush.assert_called_once()
         downloader.pause.assert_called_once()
+        assert [article.on_disk for article in nzf.decodetable] == [True, False, False, True, False]
 
     def test_a_deleted_job_gets_no_new_handle(self, assembler, tmp_path):
         nzf = self.make_nzf(tmp_path, "deleted")
