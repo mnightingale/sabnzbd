@@ -343,6 +343,9 @@ class Assembler(Thread):
                     try:
                         logging.debug("Decoding part of %s", filepath)
                         self.assemble(nzo, nzf, file_done, allow_non_contiguous, direct_write)
+                        if file_done and (writer := nzf.writer):
+                            # Wait for streamed articles still queued for writing, raising any that failed
+                            writer.flush()
                     except ValueError:
                         # Raised by a FileWriter closed because the file or job was removed
                         if not (nzf.deleted or nzo.removed_from_queue):

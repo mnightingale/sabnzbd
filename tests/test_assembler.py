@@ -19,6 +19,7 @@
 tests.test_assembler - Testing functions in assembler.py
 """
 
+import errno
 import os
 import threading
 from types import SimpleNamespace
@@ -29,7 +30,7 @@ from zlib import crc32
 import pytest
 
 import sabnzbd
-from sabnzbd.assembler import Assembler
+from sabnzbd.assembler import Assembler, AssemblerTask
 from sabnzbd.constants import ASSEMBLER_MAX_OPEN_WRITERS, GIGI, Status
 from sabnzbd.filesystem import Diskspace
 from sabnzbd.misc import pp_to_opts
@@ -922,6 +923,28 @@ class TestWriterCache:
         assert not os.path.exists(nzf.filepath)
         # The assembler still writes what is left of it
         assert assembler.get_writer(nzf) is not None
+
+    def test_a_failed_streamed_write_pauses_when_the_file_finishes(self, assembler, tmp_path):
+        nzf = self.make_nzf(tmp_path, "streamed")
+        open(nzf.filepath, "wb").close()
+        nzf.prepare_filepath.return_value = nzf.filepath
+        writer = mock.Mock()
+        writer.flush.side_effect = OSError(errno.ENOSPC, "No space left on device", nzf.filepath)
+        nzf.writer = writer
+        nzo = mock.Mock(pp_or_finished=False)
+
+        with (
+            mock.patch.object(Assembler, "assemble"),
+            mock.patch.object(assembler, "diskspace_check"),
+            mock.patch.object(sabnzbd, "Downloader", create=True) as downloader,
+        ):
+            downloader.paused = False
+            assembler.queue.put(AssemblerTask(nzo, nzf, True, False, True))
+            assembler.stop()
+            assembler.run()
+
+        writer.flush.assert_called_once()
+        downloader.pause.assert_called_once()
 
     def test_a_deleted_job_gets_no_new_handle(self, assembler, tmp_path):
         nzf = self.make_nzf(tmp_path, "deleted")
