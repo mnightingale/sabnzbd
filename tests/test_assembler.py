@@ -828,10 +828,9 @@ class TestWriterCache:
         assert files[0].writer is None
         assert files[-1].writer is not None
 
-    def test_eviction_drops_rather_than_closes(self, assembler, tmp_path):
+    def test_eviction_retires_rather_than_closes(self, assembler, tmp_path):
         """A thread may be inside a write on the handle being evicted. Closing it would
-        turn that write into an error; dropping the reference lets it close once the
-        write returns."""
+        turn that write into an error."""
         victim = self.make_nzf(tmp_path, "victim")
         held = assembler.get_writer(victim)  # a caller still holding it, mid-write
 
@@ -842,6 +841,48 @@ class TestWriterCache:
         assert held.closed is False, "evicting must not close a handle in use"
         # And it still works for whoever is holding it
         assert held.write(b"still valid", 0) == 11
+
+    def evict(self, assembler, tmp_path, nzf):
+        for index in range(ASSEMBLER_MAX_OPEN_WRITERS):
+            assembler.get_writer(self.make_nzf(tmp_path, "filler%d" % index))
+        assert nzf.writer is None, "should have been evicted"
+
+    def test_an_unused_retired_handle_is_closed(self, assembler, tmp_path):
+        victim = self.make_nzf(tmp_path, "victim")
+        assembler.get_writer(victim)
+        self.evict(assembler, tmp_path, victim)
+
+        assembler.close_unused_retired_writers()
+        assert assembler.retired_writers[0][1].closed is True
+
+    def test_a_retired_handle_still_held_stays_open(self, assembler, tmp_path):
+        victim = self.make_nzf(tmp_path, "victim")
+        held = assembler.get_writer(victim)
+        self.evict(assembler, tmp_path, victim)
+
+        assembler.close_unused_retired_writers()
+        assert held.closed is False
+        assert held.write(b"still valid", 0) == 11
+
+    def test_close_writer_closes_the_retired_handles_too(self, assembler, tmp_path):
+        victim = self.make_nzf(tmp_path, "victim")
+        held = assembler.get_writer(victim)
+        self.evict(assembler, tmp_path, victim)
+        reopened = assembler.get_writer(victim)
+
+        assembler.close_writer(victim)
+        assert held.closed is True
+        assert reopened.closed is True
+        assert all(owner is not victim for owner, _ in assembler.retired_writers)
+
+    def test_close_all_writers_closes_the_retired_handles_too(self, assembler, tmp_path):
+        victim = self.make_nzf(tmp_path, "victim")
+        held = assembler.get_writer(victim)
+        self.evict(assembler, tmp_path, victim)
+
+        assembler.close_all_writers()
+        assert held.closed is True
+        assert not assembler.retired_writers
 
     def test_use_keeps_a_handle_from_being_evicted(self, assembler, tmp_path):
         """Least recently used, so a file being actively written is not the one dropped"""
@@ -950,6 +991,38 @@ class TestWriterCache:
         writer.flush.assert_called_once()
         downloader.pause.assert_called_once()
         assert [article.on_disk for article in nzf.decodetable] == [True, False, False, True, False]
+
+    def test_a_failed_write_on_a_retired_handle_pauses_when_the_file_finishes(self, assembler, tmp_path):
+        nzf = self.make_nzf(tmp_path, "evicted")
+        open(nzf.filepath, "wb").close()
+        nzf.prepare_filepath.return_value = nzf.filepath
+        retired = mock.Mock()
+        retired.flush.side_effect = OSError(errno.ENOSPC, "No space left on device", nzf.filepath)
+        retired.failed_ranges.return_value = [(100, 100)]
+        assembler.retired_writers.append((nzf, retired))
+        current = mock.Mock()
+        current.failed_ranges.return_value = []
+        nzf.writer = current
+        nzf.decodetable = [
+            SimpleNamespace(on_disk=True, data_begin=begin, data_size=100) for begin in range(0, 300, 100)
+        ]
+        nzo = mock.Mock(pp_or_finished=False)
+
+        with (
+            mock.patch.object(Assembler, "assemble"),
+            mock.patch.object(assembler, "diskspace_check"),
+            mock.patch.object(sabnzbd, "Downloader", create=True) as downloader,
+        ):
+            downloader.paused = False
+            assembler.queue.put(AssemblerTask(nzo, nzf, True, False, True))
+            assembler.stop()
+            assembler.run()
+
+        retired.flush.assert_called_once()
+        current.flush.assert_called_once()
+        downloader.pause.assert_called_once()
+        assert [article.on_disk for article in nzf.decodetable] == [True, False, True]
+        assert not assembler.retired_writers
 
     def test_a_deleted_job_gets_no_new_handle(self, assembler, tmp_path):
         nzf = self.make_nzf(tmp_path, "deleted")
