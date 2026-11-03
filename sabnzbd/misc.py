@@ -53,6 +53,9 @@ from sabnzbd.constants import (
     DEF_ARTICLE_CACHE_DEFAULT,
     DEF_ARTICLE_CACHE_MAX,
     REPAIR_REQUEST,
+    ASSEMBLER_MAX_OPEN_WRITERS,
+    ASSEMBLER_MIN_OPEN_WRITERS,
+    ASSEMBLER_OPEN_FILE_FRACTION,
     GUESSIT_SORT_TYPES,
     PP_LOOKUP,
     VALID_ARCHIVES,
@@ -87,6 +90,9 @@ if sabnzbd.WINDOWS:
 
 if sabnzbd.MACOS:
     from sabnzbd.utils import sleepless
+
+if not sabnzbd.WINDOWS:
+    import resource
 
 
 TAB_UNITS = ("", "K", "M", "G", "T", "P")
@@ -859,6 +865,37 @@ def get_write_behind_buffers() -> int:
     memory = int(get_memory() * WRITE_BEHIND_MEMORY_FRACTION)
     memory = min(max(memory, WRITE_BEHIND_MIN_MEMORY), WRITE_BEHIND_MAX_MEMORY)
     return memory // WRITE_BEHIND_BUFFER_SIZE
+
+
+def raise_open_file_limit() -> Optional[int]:
+    """Raise the soft limit on open files to the hard limit and return the limit in force,
+    or None on Windows, which has no such limit"""
+    if sabnzbd.WINDOWS:
+        return None
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    target = hard
+    if sabnzbd.MACOS:
+        # The most setrlimit accepts on macOS
+        try:
+            target = min(hard, int(run_command(["sysctl", "-n", "kern.maxfilesperproc"]).strip()))
+        except Exception:
+            pass
+    if target == resource.RLIM_INFINITY or target <= soft:
+        return soft
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except (ValueError, OSError):
+        logging.debug("Could not raise the open file limit from %d to %d", soft, target)
+        return soft
+    return target
+
+
+def get_max_open_writers(open_file_limit: Optional[int]) -> int:
+    """Number of files the assembler keeps open, a share of the open file limit"""
+    if open_file_limit is None:
+        return ASSEMBLER_MAX_OPEN_WRITERS
+    writers = int(open_file_limit * ASSEMBLER_OPEN_FILE_FRACTION)
+    return min(max(writers, ASSEMBLER_MIN_OPEN_WRITERS), ASSEMBLER_MAX_OPEN_WRITERS)
 
 
 def get_memory() -> int:

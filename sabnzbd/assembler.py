@@ -55,7 +55,7 @@ from sabnzbd.constants import (
     DOWNLOADER_TICK,
     ASSEMBLER_WRITE_INTERVAL,
     ASSEMBLER_TRIGGER_PERCENTAGE,
-    ASSEMBLER_MAX_OPEN_WRITERS,
+    ASSEMBLER_MIN_OPEN_WRITERS,
 )
 import sabnzbd.cfg as cfg
 from sabnzbd.nzb import NzbFile, NzbObject, Article
@@ -72,7 +72,7 @@ class AssemblerTask(NamedTuple):
 
 
 class Assembler(Thread):
-    def __init__(self):
+    def __init__(self, max_open_writers: int = ASSEMBLER_MIN_OPEN_WRITERS):
         super().__init__()
         self.direct_write: bool = cfg.direct_write()
         self.cache_limit: int = 0
@@ -86,6 +86,7 @@ class Assembler(Thread):
         self.ready_bytes_lock = threading.Lock()
         self.ready_bytes: dict[str, int] = {}
         self.writers_lock = threading.Lock()
+        self.max_open_writers = max_open_writers
         self.open_writers: OrderedDict[str, NzbFile] = OrderedDict()
         # Handles evicted from open_writers, kept until their file finishes or is removed
         self.retired_writers: list[tuple[NzbFile, sabctools.FileWriter]] = []
@@ -154,7 +155,7 @@ class Assembler(Thread):
 
         Opening per write costs an open and a close for every article, which at the
         article rates this is built for outweighs the write itself. Handles are kept
-        instead, bounded by ASSEMBLER_MAX_OPEN_WRITERS because they are a limited
+        instead, bounded by max_open_writers because they are a limited
         resource shared with every socket the downloader holds.
 
         A stream gets no new handle once the file or job is finished, and nothing gets
@@ -175,7 +176,7 @@ class Assembler(Thread):
             nzf.writer = writer
             self.open_writers[nzf.nzf_id] = nzf
 
-            while len(self.open_writers) > ASSEMBLER_MAX_OPEN_WRITERS:
+            while len(self.open_writers) > self.max_open_writers:
                 _, evicted = self.open_writers.popitem(last=False)
                 # Retired rather than closed. Another thread may be inside a write on
                 # this very handle, and closing it would turn that write into an error.

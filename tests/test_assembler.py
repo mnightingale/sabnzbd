@@ -31,7 +31,7 @@ import pytest
 
 import sabnzbd
 from sabnzbd.assembler import Assembler, AssemblerTask
-from sabnzbd.constants import ASSEMBLER_MAX_OPEN_WRITERS, GIGI, Status
+from sabnzbd.constants import ASSEMBLER_MIN_OPEN_WRITERS, GIGI, Status
 from sabnzbd.filesystem import Diskspace
 from sabnzbd.misc import pp_to_opts
 from sabnzbd.nzb import Article, NzbFile, NzbObject
@@ -819,11 +819,11 @@ class TestWriterCache:
     def test_the_cache_is_bounded(self, assembler, tmp_path):
         """Handles are shared with every socket the downloader holds, so the cache
         cannot be allowed to grow with the queue"""
-        files = [self.make_nzf(tmp_path, "file%d" % index) for index in range(ASSEMBLER_MAX_OPEN_WRITERS + 10)]
+        files = [self.make_nzf(tmp_path, "file%d" % index) for index in range(ASSEMBLER_MIN_OPEN_WRITERS + 10)]
         for nzf in files:
             assembler.get_writer(nzf)
 
-        assert len(assembler.open_writers) == ASSEMBLER_MAX_OPEN_WRITERS
+        assert len(assembler.open_writers) == ASSEMBLER_MIN_OPEN_WRITERS
         # Oldest evicted, newest kept
         assert files[0].writer is None
         assert files[-1].writer is not None
@@ -834,7 +834,7 @@ class TestWriterCache:
         victim = self.make_nzf(tmp_path, "victim")
         held = assembler.get_writer(victim)  # a caller still holding it, mid-write
 
-        for index in range(ASSEMBLER_MAX_OPEN_WRITERS + 1):
+        for index in range(ASSEMBLER_MIN_OPEN_WRITERS + 1):
             assembler.get_writer(self.make_nzf(tmp_path, "filler%d" % index))
 
         assert victim.writer is None, "should have been evicted"
@@ -843,7 +843,7 @@ class TestWriterCache:
         assert held.write(b"still valid", 0) == 11
 
     def evict(self, assembler, tmp_path, nzf):
-        for index in range(ASSEMBLER_MAX_OPEN_WRITERS):
+        for index in range(ASSEMBLER_MIN_OPEN_WRITERS):
             assembler.get_writer(self.make_nzf(tmp_path, "filler%d" % index))
         assert nzf.writer is None, "should have been evicted"
 
@@ -889,7 +889,7 @@ class TestWriterCache:
         busy = self.make_nzf(tmp_path, "busy")
         assembler.get_writer(busy)
 
-        for index in range(ASSEMBLER_MAX_OPEN_WRITERS - 1):
+        for index in range(ASSEMBLER_MIN_OPEN_WRITERS - 1):
             assembler.get_writer(self.make_nzf(tmp_path, "other%d" % index))
             assembler.get_writer(busy)
 

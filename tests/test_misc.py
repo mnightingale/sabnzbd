@@ -1701,3 +1701,24 @@ class TestCgroupMemoryLimit:
         with self.patched_open({}):
             with mock.patch("sabnzbd.misc._physical_memory", return_value=None):
                 assert misc.get_memory() == 0
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="Windows has no open file limit")
+class TestRaiseOpenFileLimit:
+    """Each case runs in its own process, which it leaves with a lowered hard limit"""
+
+    @staticmethod
+    def raise_from(soft: int, hard: int) -> list[int]:
+        script = (
+            "import resource, sabnzbd.misc as misc; "
+            f"resource.setrlimit(resource.RLIMIT_NOFILE, ({soft}, {hard})); "
+            "print(misc.raise_open_file_limit(), *resource.getrlimit(resource.RLIMIT_NOFILE))"
+        )
+        output = subprocess.check_output([sys.executable, "-c", script], cwd=os.path.dirname(SAB_BASE_DIR), text=True)
+        return [int(value) for value in output.split()]
+
+    def test_raised_to_the_hard_limit(self):
+        assert self.raise_from(256, 1024) == [1024, 1024, 1024]
+
+    def test_left_alone_when_already_at_the_hard_limit(self):
+        assert self.raise_from(256, 256) == [256, 256, 256]

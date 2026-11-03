@@ -309,12 +309,16 @@ def initialize(pause_downloader=False, clean_up=False, repair=0):
         misc.to_units(write_behind_buffers * WRITE_BEHIND_BUFFER_SIZE),
     )
 
+    open_file_limit = misc.raise_open_file_limit()
+    max_open_writers = misc.get_max_open_writers(open_file_limit)
+    logging.info("Open file limit: %s, keeping up to %d files open for writing", open_file_limit, max_open_writers)
+
     # Initialize threads
     sabnzbd.ArticleCache = sabnzbd.articlecache.ArticleCache()
     sabnzbd.BPSMeter = sabnzbd.bpsmeter.BPSMeter()
     sabnzbd.NzbQueue = sabnzbd.nzbqueue.NzbQueue()
     sabnzbd.Downloader = sabnzbd.downloader.Downloader(sabnzbd.BPSMeter.read() or pause_downloader)
-    sabnzbd.Assembler = sabnzbd.assembler.Assembler()
+    sabnzbd.Assembler = sabnzbd.assembler.Assembler(max_open_writers)
     sabnzbd.PostProcessor = sabnzbd.postproc.PostProcessor()
     sabnzbd.DirScanner = sabnzbd.dirscanner.DirScanner()
     sabnzbd.URLGrabber = sabnzbd.urlgrabber.URLGrabber()

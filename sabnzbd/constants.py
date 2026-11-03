@@ -119,8 +119,10 @@ ASSEMBLER_DRAIN_MARGIN = 0.9
 ASSEMBLER_TRIGGER_PERCENTAGE = 0.05
 # Files kept open for writing at once. Handles are cached so an article does not cost an
 # open/close pair, but they are a limited resource shared with every socket the
-# downloader holds, so the cache is bounded rather than growing with the queue.
-ASSEMBLER_MAX_OPEN_WRITERS = 32
+# downloader holds, so the cache takes this fraction of the open file limit, within the bounds below.
+ASSEMBLER_OPEN_FILE_FRACTION = 1 / 4
+ASSEMBLER_MIN_OPEN_WRITERS = 32
+ASSEMBLER_MAX_OPEN_WRITERS = 1024
 ASSEMBLER_WRITE_INTERVAL = 5.0
 NNTP_BUFFER_SIZE = int(256 * KIBI)
 NTTP_MAX_BUFFER_SIZE = int(10 * MEBI)
