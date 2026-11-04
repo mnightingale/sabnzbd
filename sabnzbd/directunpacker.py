@@ -99,6 +99,8 @@ class DirectUnpacker(threading.Thread):
             or not cfg.direct_unpack()
             or self.killed
             or self.nzo.first_articles
+            # Par2 can still rename the volumes
+            or (self.nzo.bytes_par2 and not self.nzo.par2packs)
             or not self.nzo.unpack
             or self.nzo.bad_articles
             or sabnzbd.newsunpack.RAR_PROBLEM
