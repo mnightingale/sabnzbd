@@ -181,9 +181,9 @@ class NewsWrapper:
 
         Streaming is refused whenever the bytes are still needed in memory. The first
         article of a file is the clearest case: until the filename has been checked,
-        decode_yenc uses the data to derive md5of16k and to rename the file, and the
-        file has no path to write to yet. Those articles take the cache path exactly as
-        before, so the in-memory route stays live in every configuration.
+        decode_yenc uses the data to derive md5of16k and to rename the file. Those
+        articles take the cache path exactly as before, so the in-memory route stays
+        live in every configuration.
 
         It is also refused while the download directory is not keeping up with writes
         placed where they belong.
@@ -200,8 +200,7 @@ class NewsWrapper:
         if nzf.type != "yenc":
             return None
         # The first article is the one decode_yenc derives md5of16k from, so its bytes
-        # have to be in memory. Every other article only feeds verify_nzf_filename,
-        # which gives up as soon as there is a filepath - and there is one below.
+        # have to be in memory
         if article.lowest_partnum:
             return None
         if not nzf.prepare_filepath():

@@ -226,8 +226,7 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
     nzf.type = "yenc"
 
     # Only set the name if it was found and not obfuscated. Streamed articles never
-    # reach here: a sink is only handed out once the filename has been checked, exactly
-    # because this needs the bytes.
+    # reach here, the first article of a file is never streamed.
     if decoded_data is not None and not nzf.filename_checked and (file_name := response.file_name):
         # Set the md5-of-16k if this is the first article
         if article.lowest_partnum:

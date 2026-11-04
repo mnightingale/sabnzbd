@@ -26,6 +26,7 @@ import threading
 from typing import Optional, Any
 
 import sabctools
+import sabnzbd
 from sabnzbd.nzb.article import TryList, Article
 from sabnzbd.downloader import Server
 from sabnzbd.filesystem import (
@@ -222,24 +223,9 @@ class NzbFile(TryList):
             art.reset_try_list()
         self.reset_try_list()
 
-    def first_article_processed(self) -> bool:
-        """Check if the first article has been processed.
-        This ensures we have attempted to extract md5of16k and filename information
-        before creating the filepath.
-        """
-        # The first article of decodetable is always the lowest
-        first_article = self.decodetable[0]
-        # If it's still in nzo.first_articles, it hasn't been processed yet
-        return first_article not in self.nzo.first_articles
-
     def prepare_filepath(self):
-        """Do all checks before making the final path"""
+        """Do all checks before making the path, which can still be renamed until the file is complete"""
         if not self.filepath:
-            # Wait for the first article to be processed so we can get md5of16k
-            # and proper filename before creating the filepath
-            if not self.first_article_processed():
-                return None
-
             with self.nzo.lock:
                 if not self.filepath:
                     self.nzo.verify_nzf_filename(self)
@@ -247,6 +233,38 @@ class NzbFile(TryList):
                     filename = sanitize_filename(self.filename, allow_subdirs=True)
                     self.filename, self.filepath = self.nzo.get_unique_filepath(filename)
         return self.filepath
+
+    def rename(self, filename: str) -> bool:
+        """Change the name of this file, moving it on disk if writing already started.
+        Open handles keep writing into the moved file."""
+        nzo = self.nzo
+        with nzo.lock:
+            if not self.filepath:
+                self.filename = filename
+                return True
+
+            if self.deleted or self.assembled:
+                return False
+
+            filename = sanitize_filename(filename, allow_subdirs=True)
+            if filename == self.filename:
+                return False
+            if filename in nzo.filenames or os.path.lexists(os.path.join(nzo.download_path, filename)):
+                logging.debug("Not renaming %s to %s, the name is already in use", self.filename, filename)
+                return False
+
+            filename, filepath = nzo.get_unique_filepath(filename)
+            with self.file_lock, sabnzbd.Assembler.writers_lock:
+                try:
+                    if os.path.lexists(self.filepath):
+                        os.replace(self.filepath, filepath)
+                except OSError:
+                    logging.info("Could not rename %s to %s", self.filepath, filepath, exc_info=True)
+                    nzo.filenames.discard(filename)
+                    return False
+                nzo.filenames.discard(self.filename)
+                self.filename, self.filepath = filename, filepath
+        return True
 
     @property
     def completed(self):

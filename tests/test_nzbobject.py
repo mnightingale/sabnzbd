@@ -21,8 +21,11 @@ tests.test_nzbobject - Testing functions in nzbobject.py
 
 import os
 import pytest
+
+import sabnzbd
 from tests.testhelper import SAB_CACHE_DIR, create_and_read_nzb_fp
 
+from sabnzbd.assembler import Assembler
 from sabnzbd.nzb import NzbObject
 from sabnzbd.config import ConfigCat
 from sabnzbd.constants import NORMAL_PRIORITY, MAX_BAD_ARTICLES
@@ -243,3 +246,90 @@ class TestCheckAvailabilityRatio:
         result, ratio = nzo.check_availability_ratio()
         assert result is False
         assert ratio == pytest.approx(95.0)
+
+
+@pytest.mark.usefixtures("clean_cache_dir")
+class TestProvisionalPath:
+    @pytest.fixture
+    def nzo(self):
+        ConfigCat("*", {"pp": 3, "script": "None", "priority": NORMAL_PRIORITY})
+        try:
+            sabnzbd.Assembler = Assembler()
+            yield NzbObject("test_provisional", nzb_fp=create_and_read_nzb_fp("basic_rar5"))
+        finally:
+            sabnzbd.Assembler.close_all_writers()
+            del sabnzbd.Assembler
+
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+    def test_path_before_first_article(self, nzo):
+        nzf = nzo.files[0]
+        assert nzf.decodetable[0] in nzo.first_articles
+        assert nzf.prepare_filepath() == os.path.join(nzo.download_path, "testfile.rar")
+
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+    def test_par2_name_renames_open_file(self, nzo):
+        nzf = nzo.files[0]
+        old_path = nzf.prepare_filepath()
+        writer = sabnzbd.Assembler.get_writer(nzf)
+        writer.write(b"first", 0)
+
+        nzf.md5of16k = b"md5"
+        nzo.md5of16k = {b"md5": "Real.Name.S01E01.rar"}
+        nzo.verify_nzf_filename(nzf)
+
+        assert nzf.filename_checked
+        assert nzf.filename == "Real.Name.S01E01.rar"
+        assert nzf.filepath == os.path.join(nzo.download_path, "Real.Name.S01E01.rar")
+        assert not os.path.exists(old_path)
+        assert nzo.filenames == {"Real.Name.S01E01.rar"}
+        assert nzo.renames == {"Real.Name.S01E01.rar": "testfile.rar"}
+
+        # The handle opened before the rename writes into the renamed file
+        writer.write(b"second", 5)
+        assert sabnzbd.Assembler.get_writer(nzf) is writer
+        sabnzbd.Assembler.close_writer(nzf)
+        with open(nzf.filepath, "rb") as renamed:
+            assert renamed.read() == b"firstsecond"
+
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+    def test_yenc_name_renames_file_not_yet_opened(self, nzo):
+        nzf = nzo.files[0]
+        nzf.prepare_filepath()
+
+        nzo.verify_nzf_filename(nzf, "Real.Name.S01E01.rar")
+
+        assert nzf.filename == "Real.Name.S01E01.rar"
+        assert nzf.filepath == os.path.join(nzo.download_path, "Real.Name.S01E01.rar")
+        assert not nzf.filename_checked
+
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+    def test_no_rename_onto_name_in_use(self, nzo):
+        nzf = nzo.files[0]
+        old_path = nzf.prepare_filepath()
+        with open(old_path, "wb") as provisional:
+            provisional.write(b"provisional")
+        taken = os.path.join(nzo.download_path, "Real.Name.S01E01.rar")
+        with open(taken, "wb") as other:
+            other.write(b"other")
+
+        nzo.verify_nzf_filename(nzf, "Real.Name.S01E01.rar")
+
+        assert nzf.filename == "testfile.rar"
+        assert nzf.filepath == old_path
+        assert "Real.Name.S01E01.rar" not in nzo.renames
+        with open(taken, "rb") as other:
+            assert other.read() == b"other"
+
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+    def test_no_rename_once_assembled(self, nzo):
+        nzf = nzo.files[0]
+        old_path = nzf.prepare_filepath()
+        nzf.assembled = True
+
+        nzf.md5of16k = b"md5"
+        nzo.md5of16k = {b"md5": "Real.Name.S01E01.rar"}
+        nzo.verify_nzf_filename(nzf)
+
+        assert nzf.filename == "testfile.rar"
+        assert nzf.filepath == old_path
+        assert not nzo.renames

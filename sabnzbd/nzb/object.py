@@ -1390,19 +1390,15 @@ class NzbObject(TryList):
         if nzf.filename_checked:
             return
 
-        # If writing already started, we can't rename anymore
-        if nzf.filepath:
-            return
-
         # If we have the md5, use it to rename
         if nzf.md5of16k and self.md5of16k:
             # Find the match and rename
             if new_filename := self.md5of16k.get(nzf.md5of16k, None):
                 # Was it even new?
-                if new_filename != nzf.filename:
-                    logging.info("Detected filename based on par2: %s -> %s", nzf.filename, new_filename)
-                    self.renamed_file(new_filename, nzf.filename)
-                    nzf.filename = new_filename
+                old_filename = nzf.filename
+                if new_filename != old_filename and nzf.rename(new_filename):
+                    logging.info("Detected filename based on par2: %s -> %s", old_filename, nzf.filename)
+                    self.renamed_file(nzf.filename, old_filename)
                 nzf.filename_checked = True
                 return
             else:
@@ -1417,9 +1413,10 @@ class NzbObject(TryList):
             and not is_probably_obfuscated(yenc_filename)
             and not sabnzbd.par2file.has_par2_in_filename(nzf.filename)
         ):
-            logging.info("Detected filename from yenc or uu: %s -> %s", nzf.filename, yenc_filename)
-            self.renamed_file(yenc_filename, nzf.filename)
-            nzf.filename = yenc_filename
+            old_filename = nzf.filename
+            if nzf.rename(yenc_filename):
+                logging.info("Detected filename from yenc or uu: %s -> %s", old_filename, nzf.filename)
+                self.renamed_file(nzf.filename, old_filename)
 
     @synchronized()
     def verify_all_filenames_and_resort(self):
