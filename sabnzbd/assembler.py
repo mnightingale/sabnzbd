@@ -153,10 +153,7 @@ class Assembler(Thread):
     def get_writer(self, nzf: NzbFile, stream: bool = False) -> Optional[sabctools.FileWriter]:
         """Open handle for this file, reusing the one already open where there is one.
 
-        Opening per write costs an open and a close for every article, which at the
-        article rates this is built for outweighs the write itself. Handles are kept
-        instead, bounded by max_open_writers because they are a limited
-        resource shared with every socket the downloader holds.
+        At most max_open_writers handles are kept open.
 
         A stream gets no new handle once the file or job is finished, and nothing gets
         one once the job is deleted.
@@ -178,8 +175,6 @@ class Assembler(Thread):
 
             while len(self.open_writers) > self.max_open_writers:
                 _, evicted = self.open_writers.popitem(last=False)
-                # Retired rather than closed. Another thread may be inside a write on
-                # this very handle, and closing it would turn that write into an error.
                 self.retired_writers.append((evicted, evicted.writer))
                 evicted.writer = None
 
@@ -194,7 +189,6 @@ class Assembler(Thread):
                 writers.append(nzf.writer)
             nzf.writer = None
 
-        # Outside the lock: close waits for writes still in flight
         for writer in writers:
             writer.close()
 

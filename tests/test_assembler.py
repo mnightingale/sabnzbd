@@ -829,8 +829,7 @@ class TestWriterCache:
         assert files[-1].writer is not None
 
     def test_eviction_retires_rather_than_closes(self, assembler, tmp_path):
-        """A thread may be inside a write on the handle being evicted. Closing it would
-        turn that write into an error."""
+        """An evicted handle stays open while a caller still holds it"""
         victim = self.make_nzf(tmp_path, "victim")
         held = assembler.get_writer(victim)  # a caller still holding it, mid-write
 
