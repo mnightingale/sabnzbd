@@ -28,6 +28,7 @@ from unittest import mock
 from zlib import crc32
 
 import pytest
+import sabctools
 
 import sabnzbd
 from sabnzbd.assembler import Assembler, AssemblerTask
@@ -854,14 +855,19 @@ class TestWriterCache:
         assembler.close_unused_retired_writers()
         assert assembler.retired_writers[victim.nzf_id][0].closed is True
 
-    def test_a_retired_handle_still_held_stays_open(self, assembler, tmp_path):
+    def test_a_retired_handle_being_streamed_into_stays_open(self, assembler, tmp_path):
         victim = self.make_nzf(tmp_path, "victim")
-        held = assembler.get_writer(victim)
+        streaming = assembler.get_writer(victim)
+        decoder = sabctools.Decoder(4096)
+        decoder.expect("article", streaming)
         self.evict(assembler, tmp_path, victim)
 
         assembler.close_unused_retired_writers()
-        assert held.closed is False
-        assert held.write(b"still valid", 0) == 11
+        assert streaming.closed is False
+
+        decoder.clear_expected()
+        assembler.close_unused_retired_writers()
+        assert streaming.closed is True
 
     def test_close_writer_closes_the_retired_handles_too(self, assembler, tmp_path):
         victim = self.make_nzf(tmp_path, "victim")

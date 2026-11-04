@@ -25,7 +25,6 @@ import queue
 import logging
 from collections import OrderedDict
 import re
-import sys
 import threading
 from threading import Thread
 import ctypes
@@ -208,15 +207,9 @@ class Assembler(Thread):
                 writer.close()
 
     def close_unused_retired_writers(self) -> None:
-        """Close the retired handles that nothing but retired_writers still refers to"""
+        """Close the retired handles that no article is streaming into"""
         with self.writers_lock:
-            # The list's reference and getrefcount's own. Indexed, as a loop variable would add one before 3.14
-            unused = [
-                writers[index]
-                for writers in self.retired_writers.values()
-                for index in range(len(writers))
-                if sys.getrefcount(writers[index]) <= 2
-            ]
+            unused = [writer for writers in self.retired_writers.values() for writer in writers if not writer.in_use]
 
         for writer in unused:
             if not writer.closed:
