@@ -235,7 +235,7 @@ class Assembler(Thread):
             try:
                 writer.flush()
             except OSError as error:
-                self.forget_failed_writes(nzf, writer.failed_ranges())
+                nzf.forget_failed_writes(writer.failed_ranges())
                 failure = failure or error
         if failure:
             raise failure
@@ -584,17 +584,6 @@ class Assembler(Thread):
                 # nzo has probably been deleted or not enough disk space, ArticleCache tries the fallback and handles it
                 return False
         return True
-
-    @staticmethod
-    def forget_failed_writes(nzf: NzbFile, ranges: list[tuple[int, int]]) -> None:
-        """Mark every article overlapping a failed streamed write as not on disk"""
-        for article in nzf.decodetable:
-            if not article.on_disk or not article.data_size:
-                continue
-            begin = article.data_begin
-            end = begin + article.data_size
-            if any(start < end and begin < start + length for start, length in ranges):
-                article.on_disk = False
 
     @staticmethod
     def check_encrypted_and_unwanted(nzo: NzbObject, nzf: NzbFile):

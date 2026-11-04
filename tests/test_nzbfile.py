@@ -20,6 +20,7 @@ tests.test_nzbfile - Testing functions in nzb/file.py
 """
 
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -85,3 +86,29 @@ class TestNzbFile:
         files2.sort()
 
         assert [f.filename for f in files1] == [f.filename for f in files2]
+
+    @pytest.mark.parametrize(
+        "ranges, expected",
+        [
+            ([(150, 100), (400, 50)], [True, False, False, True, False]),
+            ([(100, 100)], [True, False, True, True, True]),
+            ([(0, 0)], [True, True, True, True, True]),
+            ([], [True, True, True, True, True]),
+        ],
+    )
+    def test_forget_failed_writes(self, ranges, expected):
+        nzf = NzbFile.__new__(NzbFile)
+        nzf.decodetable = [
+            SimpleNamespace(on_disk=True, data_begin=begin, data_size=100) for begin in range(0, 500, 100)
+        ]
+        nzf.forget_failed_writes(ranges)
+        assert [article.on_disk for article in nzf.decodetable] == expected
+
+    def test_forget_failed_writes_skips_articles_without_a_known_position(self):
+        nzf = NzbFile.__new__(NzbFile)
+        nzf.decodetable = [
+            SimpleNamespace(on_disk=False, data_begin=0, data_size=100),
+            SimpleNamespace(on_disk=True, data_begin=0, data_size=0),
+        ]
+        nzf.forget_failed_writes([(0, 100)])
+        assert [article.on_disk for article in nzf.decodetable] == [False, True]

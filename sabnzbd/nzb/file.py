@@ -306,6 +306,16 @@ class NzbFile(TryList):
                 break
         return bytes_ready <= 0
 
+    def forget_failed_writes(self, ranges: list[tuple[int, int]]) -> None:
+        """Mark every article overlapping a failed streamed write as not on disk"""
+        for article in self.decodetable:
+            if not article.on_disk or not article.data_size:
+                continue
+            begin = article.data_begin
+            end = begin + article.data_size
+            if any(start < end and begin < start + length for start, length in ranges):
+                article.on_disk = False
+
     def sort_key(self) -> tuple[Any, ...]:
         """Comparison function for sorting NZB files.
 

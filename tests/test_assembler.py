@@ -972,9 +972,6 @@ class TestWriterCache:
         writer.flush.side_effect = OSError(errno.ENOSPC, "No space left on device", nzf.filepath)
         writer.failed_ranges.return_value = [(150, 100), (400, 50)]
         nzf.writer = writer
-        nzf.decodetable = [
-            SimpleNamespace(on_disk=True, data_begin=begin, data_size=100) for begin in range(0, 500, 100)
-        ]
         nzo = mock.Mock(pp_or_finished=False)
 
         with (
@@ -989,7 +986,7 @@ class TestWriterCache:
 
         writer.flush.assert_called_once()
         downloader.pause.assert_called_once()
-        assert [article.on_disk for article in nzf.decodetable] == [True, False, False, True, False]
+        nzf.forget_failed_writes.assert_called_once_with([(150, 100), (400, 50)])
 
     def test_a_failed_write_on_a_retired_handle_pauses_when_the_file_finishes(self, assembler, tmp_path):
         nzf = self.make_nzf(tmp_path, "evicted")
@@ -1002,9 +999,6 @@ class TestWriterCache:
         current = mock.Mock()
         current.failed_ranges.return_value = []
         nzf.writer = current
-        nzf.decodetable = [
-            SimpleNamespace(on_disk=True, data_begin=begin, data_size=100) for begin in range(0, 300, 100)
-        ]
         nzo = mock.Mock(pp_or_finished=False)
 
         with (
@@ -1020,7 +1014,7 @@ class TestWriterCache:
         retired.flush.assert_called_once()
         current.flush.assert_called_once()
         downloader.pause.assert_called_once()
-        assert [article.on_disk for article in nzf.decodetable] == [True, False, True]
+        nzf.forget_failed_writes.assert_called_once_with([(100, 100)])
         assert not assembler.retired_writers
 
     def test_a_deleted_job_gets_no_new_handle(self, assembler, tmp_path):
