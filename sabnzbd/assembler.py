@@ -89,7 +89,7 @@ class Assembler(Thread):
         self.max_open_writers = max_open_writers
         self.open_writers: OrderedDict[str, NzbFile] = OrderedDict()
         # Handles evicted from open_writers, kept until their file finishes or is removed
-        self.retired_writers: list[tuple[NzbFile, sabctools.FileWriter]] = []
+        self.retired_writers: dict[str, list[sabctools.FileWriter]] = {}
 
     def stop(self):
         self.queue.put(AssemblerTask())
@@ -175,7 +175,7 @@ class Assembler(Thread):
 
             while len(self.open_writers) > self.max_open_writers:
                 _, evicted = self.open_writers.popitem(last=False)
-                self.retired_writers.append((evicted, evicted.writer))
+                self.retired_writers.setdefault(evicted.nzf_id, []).append(evicted.writer)
                 evicted.writer = None
 
             return writer
@@ -184,7 +184,7 @@ class Assembler(Thread):
         """Close the handle for this file, if one is open"""
         with self.writers_lock:
             self.open_writers.pop(nzf.nzf_id, None)
-            writers = self.take_retired_writers(nzf)
+            writers = self.retired_writers.pop(nzf.nzf_id, [])
             if nzf.writer is not None:
                 writers.append(nzf.writer)
             nzf.writer = None
@@ -199,24 +199,24 @@ class Assembler(Thread):
             for nzf in self.open_writers.values():
                 nzf.writer = None
             self.open_writers.clear()
-            writers.extend(writer for _, writer in self.retired_writers)
+            for retired in self.retired_writers.values():
+                writers.extend(retired)
             self.retired_writers.clear()
 
         for writer in writers:
             if writer is not None:
                 writer.close()
 
-    def take_retired_writers(self, nzf: NzbFile) -> list[sabctools.FileWriter]:
-        """Remove and return the retired handles of this file. Requires writers_lock."""
-        writers = [writer for owner, writer in self.retired_writers if owner is nzf]
-        self.retired_writers = [entry for entry in self.retired_writers if entry[0] is not nzf]
-        return writers
-
     def close_unused_retired_writers(self) -> None:
         """Close the retired handles that nothing but retired_writers still refers to"""
         with self.writers_lock:
-            # The entry's reference and getrefcount's own
-            unused = [entry[1] for entry in self.retired_writers if sys.getrefcount(entry[1]) <= 2]
+            # The list's reference and getrefcount's own. Indexed, as a loop variable would add one before 3.14
+            unused = [
+                writers[index]
+                for writers in self.retired_writers.values()
+                for index in range(len(writers))
+                if sys.getrefcount(writers[index]) <= 2
+            ]
 
         for writer in unused:
             if not writer.closed:
@@ -226,7 +226,7 @@ class Assembler(Thread):
         """Wait for the streamed writes of this file, on its handle and on its retired ones,
         marking the articles of any that failed as not on disk and raising the first failure"""
         with self.writers_lock:
-            writers = [writer for owner, writer in self.retired_writers if owner is nzf]
+            writers = list(self.retired_writers.get(nzf.nzf_id, ()))
             if nzf.writer is not None:
                 writers.append(nzf.writer)
 

@@ -852,7 +852,7 @@ class TestWriterCache:
         self.evict(assembler, tmp_path, victim)
 
         assembler.close_unused_retired_writers()
-        assert assembler.retired_writers[0][1].closed is True
+        assert assembler.retired_writers[victim.nzf_id][0].closed is True
 
     def test_a_retired_handle_still_held_stays_open(self, assembler, tmp_path):
         victim = self.make_nzf(tmp_path, "victim")
@@ -872,7 +872,7 @@ class TestWriterCache:
         assembler.close_writer(victim)
         assert held.closed is True
         assert reopened.closed is True
-        assert all(owner is not victim for owner, _ in assembler.retired_writers)
+        assert victim.nzf_id not in assembler.retired_writers
 
     def test_close_all_writers_closes_the_retired_handles_too(self, assembler, tmp_path):
         victim = self.make_nzf(tmp_path, "victim")
@@ -995,7 +995,7 @@ class TestWriterCache:
         retired = mock.Mock()
         retired.flush.side_effect = OSError(errno.ENOSPC, "No space left on device", nzf.filepath)
         retired.failed_ranges.return_value = [(100, 100)]
-        assembler.retired_writers.append((nzf, retired))
+        assembler.retired_writers[nzf.nzf_id] = [retired]
         current = mock.Mock()
         current.failed_ranges.return_value = []
         nzf.writer = current
