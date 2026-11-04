@@ -116,7 +116,7 @@ import sabnzbd.bpsmeter
 import sabnzbd.scheduler as scheduler
 import sabnzbd.notifier as notifier
 import sabnzbd.sorting
-from sabnzbd.constants import WRITE_BEHIND_BUFFER_SIZE, WRITE_BEHIND_THREADS
+from sabnzbd.constants import WRITE_BEHIND_THREADS
 from sabnzbd.decorators import synchronized
 import sabnzbd.utils.ssdp
 import sabnzbd.utils.checkdir
@@ -301,13 +301,9 @@ def initialize(pause_downloader=False, clean_up=False, repair=0):
         pause_downloader = True
 
     # Start the threads that write streamed articles
-    write_behind_buffers = misc.get_write_behind_buffers()
-    sabctools.set_write_behind(WRITE_BEHIND_THREADS, write_behind_buffers)
-    logging.info(
-        "Write-behind: %d threads, %s of buffers",
-        WRITE_BEHIND_THREADS,
-        misc.to_units(write_behind_buffers * WRITE_BEHIND_BUFFER_SIZE),
-    )
+    write_behind_memory = misc.get_write_behind_memory()
+    sabctools.set_write_behind(WRITE_BEHIND_THREADS, write_behind_memory)
+    logging.info("Write-behind: %d threads, %s of buffers", WRITE_BEHIND_THREADS, misc.to_units(write_behind_memory))
 
     open_file_limit = misc.raise_open_file_limit()
     max_open_writers = misc.get_max_open_writers(open_file_limit)

@@ -60,7 +60,6 @@ from sabnzbd.constants import (
     PP_LOOKUP,
     VALID_ARCHIVES,
     VALID_NZB_FILES,
-    WRITE_BEHIND_BUFFER_SIZE,
     WRITE_BEHIND_MAX_MEMORY,
     WRITE_BEHIND_MEMORY_FRACTION,
     WRITE_BEHIND_MIN_MEMORY,
@@ -860,11 +859,10 @@ def get_cache_limit() -> str:
     return ""
 
 
-def get_write_behind_buffers() -> int:
-    """Number of write-behind buffers, sized by the memory we are allowed to use"""
+def get_write_behind_memory() -> int:
+    """Bytes of write-behind buffers, sized by the memory we are allowed to use"""
     memory = int(get_memory() * WRITE_BEHIND_MEMORY_FRACTION)
-    memory = min(max(memory, WRITE_BEHIND_MIN_MEMORY), WRITE_BEHIND_MAX_MEMORY)
-    return memory // WRITE_BEHIND_BUFFER_SIZE
+    return min(max(memory, WRITE_BEHIND_MIN_MEMORY), WRITE_BEHIND_MAX_MEMORY)
 
 
 def raise_open_file_limit() -> Optional[int]:

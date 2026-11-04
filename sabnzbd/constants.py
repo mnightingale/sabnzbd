@@ -131,8 +131,6 @@ ARTICLE_CACHE_NON_CONTIGUOUS_FLUSH_PERCENTAGE = ASSEMBLER_DELAY_FILL
 ARTICLE_CACHE_RESERVED_MEMORY = int(512 * MEBI)
 # Threads writing streamed articles to disk in the background
 WRITE_BEHIND_THREADS = 2
-# Size of each of their buffers, fixed by sabctools
-WRITE_BEHIND_BUFFER_SIZE = int(256 * KIBI)
 # Their buffers take this fraction of system memory, within the bounds below
 WRITE_BEHIND_MEMORY_FRACTION = 1 / 64
 WRITE_BEHIND_MIN_MEMORY = int(32 * MEBI)
