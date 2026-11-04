@@ -1498,6 +1498,41 @@ def check_filesystem_capabilities(test_dir: str, is_download_dir: bool = False) 
     return allgood
 
 
+@lru_cache(maxsize=8)
+def is_rename_while_open_supported(check_dir: str) -> bool:
+    """Check that a file can be renamed while it is open for writing,
+    with writes made through the open handle afterwards landing in the renamed file"""
+    supported = False
+    old_path = new_path = ""
+    if not is_network_path(check_dir):
+        try:
+            with tempfile.NamedTemporaryFile(dir=check_dir, delete=False) as probe_file:
+                old_path = probe_file.name
+            new_path = old_path + ".renamed"
+            writer = sabctools.FileWriter(old_path)
+            try:
+                writer.write(b"before", 0)
+                os.replace(old_path, new_path)
+                writer.write(b"after", 6)
+            finally:
+                writer.close()
+            with open(new_path, "rb") as renamed_file:
+                supported = not os.path.lexists(old_path) and renamed_file.read() == b"beforeafter"
+        except (OSError, ValueError):
+            logging.debug("Renaming an open file in %s failed", check_dir, exc_info=True)
+        finally:
+            for path in (old_path, new_path):
+                if path and os.path.lexists(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+    logging.info(
+        "Renaming files while they are written in %s: %s", check_dir, "supported" if supported else "unsupported"
+    )
+    return supported
+
+
 def check_sparse_and_disable(test_dir: str) -> bool:
     """Check if sparse files are supported, otherwise disable direct write mode"""
     if sabnzbd.cfg.direct_write() and not is_sparse_supported(test_dir):

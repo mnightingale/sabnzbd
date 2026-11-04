@@ -36,6 +36,7 @@ from sabnzbd.filesystem import (
     save_data,
     load_data,
     RAR_RE,
+    is_rename_while_open_supported,
 )
 from sabnzbd.misc import int_conv, subject_name_extractor
 from sabnzbd.decorators import synchronized
@@ -226,6 +227,12 @@ class NzbFile(TryList):
     def prepare_filepath(self):
         """Do all checks before making the path, which can still be renamed until the file is complete"""
         if not self.filepath:
+            # Without renames the name has to be settled by the first article before writing starts
+            if self.decodetable[0] in self.nzo.first_articles and not is_rename_while_open_supported(
+                sabnzbd.cfg.download_dir.get_path()
+            ):
+                return None
+
             with self.nzo.lock:
                 if not self.filepath:
                     self.nzo.verify_nzf_filename(self)
@@ -244,6 +251,8 @@ class NzbFile(TryList):
                 return True
 
             if self.deleted or self.assembled:
+                return False
+            if not is_rename_while_open_supported(sabnzbd.cfg.download_dir.get_path()):
                 return False
 
             filename = sanitize_filename(filename, allow_subdirs=True)

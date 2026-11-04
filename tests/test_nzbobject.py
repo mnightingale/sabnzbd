@@ -20,6 +20,8 @@ tests.test_nzbobject - Testing functions in nzbobject.py
 """
 
 import os
+from unittest import mock
+
 import pytest
 
 import sabnzbd
@@ -29,7 +31,13 @@ from sabnzbd.assembler import Assembler
 from sabnzbd.nzb import NzbObject
 from sabnzbd.config import ConfigCat
 from sabnzbd.constants import NORMAL_PRIORITY, MAX_BAD_ARTICLES
-from sabnzbd.filesystem import globber, sanitize_filename, create_all_dirs, long_path
+from sabnzbd.filesystem import (
+    globber,
+    sanitize_filename,
+    create_all_dirs,
+    long_path,
+    is_rename_while_open_supported,
+)
 
 
 @pytest.mark.usefixtures("clean_cache_dir")
@@ -253,12 +261,14 @@ class TestProvisionalPath:
     @pytest.fixture
     def nzo(self):
         ConfigCat("*", {"pp": 3, "script": "None", "priority": NORMAL_PRIORITY})
+        is_rename_while_open_supported.cache_clear()
         try:
             sabnzbd.Assembler = Assembler()
             yield NzbObject("test_provisional", nzb_fp=create_and_read_nzb_fp("basic_rar5"))
         finally:
             sabnzbd.Assembler.close_all_writers()
             del sabnzbd.Assembler
+            is_rename_while_open_supported.cache_clear()
 
     @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
     def test_path_before_first_article(self, nzo):
@@ -329,6 +339,27 @@ class TestProvisionalPath:
         nzf.md5of16k = b"md5"
         nzo.md5of16k = {b"md5": "Real.Name.S01E01.rar"}
         nzo.verify_nzf_filename(nzf)
+
+        assert nzf.filename == "testfile.rar"
+        assert nzf.filepath == old_path
+        assert not nzo.renames
+
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+    def test_unsupported_waits_for_first_article(self, nzo):
+        nzf = nzo.files[0]
+        with mock.patch("sabnzbd.nzb.file.is_rename_while_open_supported", return_value=False):
+            assert nzf.prepare_filepath() is None
+            nzo.first_articles.remove(nzf.decodetable[0])
+            assert nzf.prepare_filepath() == os.path.join(nzo.download_path, "testfile.rar")
+
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+    def test_unsupported_keeps_name_once_writing(self, nzo):
+        nzf = nzo.files[0]
+        old_path = nzf.prepare_filepath()
+        with mock.patch("sabnzbd.nzb.file.is_rename_while_open_supported", return_value=False):
+            nzf.md5of16k = b"md5"
+            nzo.md5of16k = {b"md5": "Real.Name.S01E01.rar"}
+            nzo.verify_nzf_filename(nzf)
 
         assert nzf.filename == "testfile.rar"
         assert nzf.filepath == old_path

@@ -1890,3 +1890,36 @@ class TestOutOfSpace:
             assert sabnzbd.filesystem.out_of_space(self.error(errno.EINVAL, 5)) is False
         finally:
             sabnzbd.WINDOWS = original
+
+
+class TestRenameWhileOpen:
+    @pytest.fixture(autouse=True)
+    def clear_probe_cache(self):
+        filesystem.is_rename_while_open_supported.cache_clear()
+        yield
+        filesystem.is_rename_while_open_supported.cache_clear()
+
+    def test_supported_locally(self, tmp_path):
+        assert filesystem.is_rename_while_open_supported(str(tmp_path))
+        assert not os.listdir(tmp_path)
+
+    def test_rename_refused(self, tmp_path):
+        with mock.patch("sabnzbd.filesystem.os.replace", side_effect=PermissionError("in use")):
+            assert not filesystem.is_rename_while_open_supported(str(tmp_path))
+        assert not os.listdir(tmp_path)
+
+    def test_writes_after_rename_lost(self, tmp_path):
+        """A filesystem that renames by copying leaves the open handle on the old file"""
+
+        def copy_and_delete(src, dst):
+            shutil.copyfile(src, dst)
+            os.remove(src)
+
+        with mock.patch("sabnzbd.filesystem.os.replace", side_effect=copy_and_delete):
+            assert not filesystem.is_rename_while_open_supported(str(tmp_path))
+        assert not os.listdir(tmp_path)
+
+    def test_network_path(self, tmp_path):
+        with mock.patch("sabnzbd.filesystem.is_network_path", return_value=True):
+            assert not filesystem.is_rename_while_open_supported(str(tmp_path))
+        assert not os.listdir(tmp_path)
