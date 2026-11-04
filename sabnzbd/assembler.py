@@ -629,17 +629,24 @@ class Assembler(Thread):
             if direct_write:
                 if not file_size:
                     direct_write = False
-                # Read from the handle just opened, so it cannot disagree with the file
-                # being written
-                if writer.size == 0:
-                    set_permissions(nzf.filepath)
-                    try:
-                        writer.preallocate(file_size)
-                    except sabctools.SparseUnsupported:
-                        logging.debug("Sparse call failed for %s", nzf.filepath)
-                        cfg.direct_write.set(False)
-                        direct_write = False
+                if not Assembler.preallocate(nzf, writer, file_size):
+                    direct_write = False
             return writer, offset, direct_write
+
+    @staticmethod
+    def preallocate(nzf: NzbFile, writer: sabctools.FileWriter, file_size: int) -> bool:
+        """Size a new file in full before its first write, False if sparse files are not supported.
+        Requires nzf.file_lock."""
+        # Read from the handle, so it cannot disagree with the file being written
+        if writer.size == 0:
+            set_permissions(nzf.filepath)
+            try:
+                writer.preallocate(file_size)
+            except sabctools.SparseUnsupported:
+                logging.debug("Sparse call failed for %s", nzf.filepath)
+                cfg.direct_write.set(False)
+                return False
+        return True
 
 
 RE_SUBS = re.compile(r"\W+sub|subs|subpack|subtitle|subtitles(?![a-z])", re.I)

@@ -197,7 +197,7 @@ class NewsWrapper:
         nzf = article.nzf
         # type is only known once the first article of the file has decoded, and uu
         # carries no offsets to write at
-        if nzf.type != "yenc":
+        if nzf.type != "yenc" or not nzf.file_size:
             return None
         # The first article is the one decode_yenc derives md5of16k from, so its bytes
         # have to be in memory
@@ -207,7 +207,11 @@ class NewsWrapper:
             return None
 
         try:
-            return sabnzbd.Assembler.get_writer(nzf, stream=True)
+            with nzf.file_lock:
+                writer = sabnzbd.Assembler.get_writer(nzf, stream=True)
+                if writer is not None and not sabnzbd.Assembler.preallocate(nzf, writer, nzf.file_size):
+                    return None
+                return writer
         except OSError:
             # Cannot open the file: fall back to memory rather than failing the article
             logging.debug("Could not open %s for streaming", nzf.filepath, exc_info=True)

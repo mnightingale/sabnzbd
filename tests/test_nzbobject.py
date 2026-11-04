@@ -20,11 +20,13 @@ tests.test_nzbobject - Testing functions in nzbobject.py
 """
 
 import os
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
 
 import sabnzbd
+from sabnzbd import newswrapper
 from tests.testhelper import SAB_CACHE_DIR, create_and_read_nzb_fp
 
 from sabnzbd.assembler import Assembler
@@ -364,3 +366,16 @@ class TestProvisionalPath:
         assert nzf.filename == "testfile.rar"
         assert nzf.filepath == old_path
         assert not nzo.renames
+
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR, "direct_decode": True, "direct_write": True})
+    def test_stream_sink_preallocates(self, nzo, monkeypatch):
+        monkeypatch.setattr(sabnzbd, "WriteMonitor", SimpleNamespace(allow_direct_decode=True), raising=False)
+        nzf = nzo.files[0]
+        article = nzf.add_article(("second@article", 100))
+        nzf.type = "yenc"
+        assert newswrapper.NewsWrapper.article_sink(None, article) is None
+
+        nzf.file_size = 1000
+        writer = newswrapper.NewsWrapper.article_sink(None, article)
+        assert writer is not None
+        assert writer.size == 1000

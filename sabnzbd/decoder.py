@@ -224,6 +224,8 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
     nzf = article.nzf
     # Assume it is yenc
     nzf.type = "yenc"
+    if article.data_size:
+        nzf.file_size = article.file_size
 
     # Only set the name if it was found and not obfuscated. Streamed articles never
     # reach here, the first article of a file is never streamed.
