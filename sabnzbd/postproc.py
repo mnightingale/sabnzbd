@@ -489,7 +489,7 @@ def process_job(nzo: NzbObject) -> bool:
         # Without par2 there is nothing to repair missing articles with, except unrar using REV files
         if all_ok and nzo.bytes_missing and not nzo.extrapars and cfg.safe_postproc():
             _, rars, _, _, _ = build_filelists(nzo.download_path, extra_dirs=nzo.sub_directories())
-            if not (flag_unpack and cfg.enable_unrar() and rars):
+            if not (flag_unpack and rars):
                 emsg = T("Download failed - Not on your server(s)") + " - https://sabnzbd.org/not-complete"
                 nzo.fail_msg = emsg
                 nzo.set_unpack_info("Download", emsg)
@@ -924,7 +924,7 @@ def parring(nzo: NzbObject) -> tuple[bool, bool]:
                 par_error = sfv_check_result is False
 
             # If no luck with SFV, do RAR-check
-            if sfv_check_result is None and cfg.enable_unrar():
+            if sfv_check_result is None:
                 # Check for RAR's with a sensible extension
                 _, rars, _, _, _ = build_filelists(nzo.download_path, check_rar=False, extra_dirs=nzo.sub_directories())
                 if rars:

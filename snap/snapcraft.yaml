@@ -115,30 +115,3 @@ parts:
       cd CPP/7zip/Bundles/Alone2
       make -f makefile.gcc
       install -D -m755 ./_o/7zz -t "$CRAFT_PART_INSTALL/usr/bin"
-
-  unrar:
-    source: .
-    plugin: nil
-    build-packages:
-      - curl
-    build-environment:
-      - LDFLAGS: -s
-    override-pull: |
-      UNRAR_TARBALL_PATH="$CRAFT_PROJECT_DIR/snap/unrar.tar.gz"
-      if [ ! -f "$UNRAR_TARBALL_PATH" ]; then
-        UNRAR_TARBALL_LINK="$(curl -sL https://www.rarlab.com/rar_add.htm | sed -z -n -e s%'.*<a href="\(rar/unrarsrc-[.0-9]\+.tar.gz\)">UnRAR\ source</a>.*%\1%p')"
-        if [ ! -z "$UNRAR_TARBALL_LINK" ]; then
-          UNRAR_TARBALL="https://www.rarlab.com/$UNRAR_TARBALL_LINK"
-        else
-          echo "failed to extract unrar tarball link"
-          exit 42
-        fi
-        curl -o "$UNRAR_TARBALL_PATH" -L "$UNRAR_TARBALL"
-      else
-        echo "Using cached snap/unrar.tar.gz"
-      fi
-      tar xf "$UNRAR_TARBALL_PATH" --strip-components=1
-    override-build: |
-      craftctl default
-      make all
-      install -D -m755 ./unrar -t "$CRAFT_PART_INSTALL/usr/bin"

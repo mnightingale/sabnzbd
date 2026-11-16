@@ -617,22 +617,6 @@ class TestMisc:
             not failure_calls
         ), "AttributeError was raised (extractMetadata returned None but .get() was called on it)"
 
-    @pytest.mark.parametrize(
-        "test_input, expected_output",
-        [
-            (["cmd1", 9, "cmd3"], '"cmd1" "9" "cmd3"'),  # sending all commands as valid string
-            (["", "cmd1", "5"], '"" "cmd1" "5"'),  # sending blank string
-            (["cmd1", None, "cmd3", "tail -f"], '"cmd1" "" "cmd3" "tail -f"'),  # sending None in command
-            (["cmd1", 0, "ps ux"], '"cmd1" "" "ps ux"'),  # sending 0
-            (['pass"word', "command"], '"pass""word" "command"'),  # special escaping of unrar
-        ],
-    )
-    def test_list2cmdline_unrar(self, test_input, expected_output):
-        """Test to convert list to a cmd.exe-compatible command string"""
-        res = misc.list2cmdline_unrar(test_input)
-        # Make sure the output is cmd.exe-compatible
-        assert res == expected_output
-
     def test_recursive_html_escape(self):
         """Very basic test if the recursive clean-up works"""
         input_test = {
@@ -1488,12 +1472,6 @@ class TestBuildAndRunCommand:
         assert mock_subproc_popen.call_args[1]["startupinfo"].dwFlags == win32process.STARTF_USESHOWWINDOW
         assert mock_subproc_popen.call_args[1]["startupinfo"].wShowWindow == win32con.SW_HIDE
 
-        # See: https://github.com/sabnzbd/sabnzbd/issues/1043
-        misc.build_and_run_command(["UnRar.exe", "\\\\?\\C:\\path\\"])
-        assert mock_subproc_popen.call_args[0][0] == ["UnRar.exe", "\\\\?\\C:\\path\\"]
-        misc.build_and_run_command(["UnRar.exe", "\\\\?\\C:\\path\\", "pass'\"word"], windows_unrar_command=True)
-        assert mock_subproc_popen.call_args[0][0] == '"UnRar.exe" "\\\\?\\C:\\path\\" "pass\'""word"'
-
     @mock.patch("sabnzbd.misc.userxbit")
     @mock.patch("subprocess.Popen")
     def test_std_override(self, mock_subproc_popen, userxbit):
@@ -1525,11 +1503,6 @@ class TestBuildAndRunCommand:
             "input 1",
         ]
         os.remove(temp_file_path)
-
-        # Make sure Windows UnRar patching stays on Windows
-        test_cmd = ["unrar", "/home/", "pass'\"word"]
-        misc.build_and_run_command(test_cmd, windows_unrar_command=True)
-        assert mock_subproc_popen.call_args[0][0] == test_cmd
 
         # Have to fake these for it to work
         monkeypatch.setattr(newsunpack, "IONICE_COMMAND", "ionice")

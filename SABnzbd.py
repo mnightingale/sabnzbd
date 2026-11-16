@@ -414,21 +414,6 @@ def print_modules():
 
     logging.info("Cryptography module (v%s)... found!", cryptography.__version__)
 
-    if sabnzbd.newsunpack.RAR_COMMAND:
-        logging.info("UNRAR binary... found (%s)", sabnzbd.newsunpack.RAR_COMMAND)
-
-        # Report problematic unrar
-        if sabnzbd.newsunpack.RAR_PROBLEM:
-            have_str = "%.2f" % (float(sabnzbd.newsunpack.RAR_VERSION) / 100)
-            want_str = "%.2f" % (float(sabnzbd.constants.REC_RAR_VERSION) / 100)
-            helpful_warning(T("Your UNRAR version is %s, we recommend version %s or higher.<br />"), have_str, want_str)
-        elif not (sabnzbd.WINDOWS or sabnzbd.MACOS):
-            logging.info("UNRAR binary version %.2f", (float(sabnzbd.newsunpack.RAR_VERSION) / 100))
-    else:
-        logging.error(T("unrar binary... NOT found"))
-        # Do not allow downloading
-        sabnzbd.NO_DOWNLOADING = True
-
     if sabnzbd.newsunpack.SEVENZIP_COMMAND:
         logging.info("7za binary... found (%s)", sabnzbd.newsunpack.SEVENZIP_COMMAND)
         if not (sabnzbd.WINDOWS or sabnzbd.MACOS):

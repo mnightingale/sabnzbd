@@ -59,7 +59,7 @@ jobs:
         cache-dependency-path: "**/requirements.txt"
     - name: Install system dependencies
       if: runner.os == 'Linux'
-      run: sudo apt-get install unrar 7zip
+      run: sudo apt-get install 7zip
     - name: Relax exact version pins on Python 3.10
       # Untill 5.3 we need to support 3.10, hacky for now
       # sabctools is excluded: its exact pin is checked against SABCTOOLS_VERSION_REQUIRED by a test.

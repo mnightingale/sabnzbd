@@ -958,7 +958,6 @@ SPECIAL_BOOL_LIST = (
     "api_warnings",
     "helpful_warnings",
     "ampm",
-    "enable_unrar",
     "enable_7zip",
     "enable_filejoin",
     "enable_tsjoin",
@@ -1000,7 +999,6 @@ SPECIAL_VALUE_LIST = (
     "par2_file_threads",
     "selftest_host",
     "ssdp_broadcast_interval",
-    "unrar_parameters",
     "outgoing_nntp_ip",
 )
 SPECIAL_LIST_LIST = (
