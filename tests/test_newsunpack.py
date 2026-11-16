@@ -57,7 +57,6 @@ def _isolate_newsunpack_globals(monkeypatch):
     for name in (
         "NICE_COMMAND",
         "IONICE_COMMAND",
-        "RAR_COMMAND",
         "SEVENZIP_COMMAND",
     ):
         monkeypatch.setattr(newsunpack, name, getattr(newsunpack, name))
@@ -1409,7 +1408,6 @@ class TestTarUnpack:
 @pytest.mark.usefixtures("clean_cache_dir")
 @pytest.mark.config(
     {
-        "enable_unrar": True,
         "enable_filejoin": False,
         "enable_tsjoin": False,
         "enable_tar": False,

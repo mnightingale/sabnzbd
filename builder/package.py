@@ -383,8 +383,6 @@ if __name__ == "__main__":
         # Otherwise the signature of the main application becomes invalid
         if authority:
             files_to_sign = [
-                "macos/unrar/unrar",
-                "macos/unrar/arm64/unrar",
                 "macos/7zip/7zz",
                 "macos/7zip/arm64/7zz",
             ]

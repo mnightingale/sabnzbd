@@ -63,7 +63,6 @@ class Job:
             "cfg",
             mock.Mock(
                 **{
-                    "enable_unrar.return_value": True,
                     "direct_unpack.return_value": True,
                     "direct_unpack_tested.return_value": True,
                     "direct_unpack_threads.return_value": 3,

@@ -79,12 +79,9 @@ SEVENZIP_PATH_RE = re.compile("^Path = (.+)")
 
 # Constants
 SEVENZIP_ID = b"7z\xbc\xaf'\x1c"
-RAR_COMMAND = None
 NICE_COMMAND = None
 SEVENZIP_COMMAND = None
 IONICE_COMMAND = None
-RAR_PROBLEM = False
-RAR_VERSION = 0
 SEVENZIP_VERSION = ""
 
 
@@ -101,27 +98,14 @@ def find_programs(curdir: str):
     if sabnzbd.MACOS:
         if sabnzbd.MACOSARM64:
             # ARM64 versions
-            sabnzbd.newsunpack.RAR_COMMAND = check(curdir, "macos/unrar/arm64/unrar")
             sabnzbd.newsunpack.SEVENZIP_COMMAND = check(curdir, "macos/7zip/arm64/7zz")
         else:
             # Regular x64 versions
-            sabnzbd.newsunpack.RAR_COMMAND = check(curdir, "macos/unrar/unrar")
             sabnzbd.newsunpack.SEVENZIP_COMMAND = check(curdir, "macos/7zip/7zz")
 
     if sabnzbd.WINDOWS:
-        # UnRAR has no arm64 version, so we skip it also for 7zip
-        sabnzbd.newsunpack.RAR_COMMAND = check(curdir, "win/unrar/UnRAR.exe")
         sabnzbd.newsunpack.SEVENZIP_COMMAND = check(curdir, "win/7zip/7za.exe")
     else:
-        if not sabnzbd.newsunpack.RAR_COMMAND:
-            sabnzbd.newsunpack.RAR_COMMAND = find_on_path(
-                (
-                    "unrar",
-                    "rar",
-                    "unrar3",
-                    "rar3",
-                )
-            )
         sabnzbd.newsunpack.NICE_COMMAND = find_on_path("nice")
         sabnzbd.newsunpack.IONICE_COMMAND = find_on_path("ionice")
 
@@ -146,11 +130,6 @@ def find_programs(curdir: str):
             )
 
     if not (sabnzbd.WINDOWS or sabnzbd.MACOS):
-        # Run check on rar version
-        version, original = unrar_check(sabnzbd.newsunpack.RAR_COMMAND)
-        sabnzbd.newsunpack.RAR_PROBLEM = not original or version < sabnzbd.constants.REC_RAR_VERSION
-        sabnzbd.newsunpack.RAR_VERSION = version
-
         # Run check on 7zip
         sabnzbd.newsunpack.SEVENZIP_VERSION = sevenzip_check(sabnzbd.newsunpack.SEVENZIP_COMMAND)
 
@@ -323,14 +302,13 @@ def unpacker(
                 newfiles.extend(newf)
             logging.info("Filejoin finished on %s", nzo.download_path)
 
-    if cfg.enable_unrar():
-        new_rars = [rar for rar in xrars if rar not in rars]
-        if new_rars:
-            logging.info("Unrar starting on %s", nzo.download_path)
-            error, newf = rar_unpack(nzo, workdir_complete, one_folder, new_rars)
-            if newf:
-                newfiles.extend(newf)
-            logging.info("Unrar finished on %s", nzo.download_path)
+    new_rars = [rar for rar in xrars if rar not in rars]
+    if new_rars:
+        logging.info("RAR unpack starting on %s", nzo.download_path)
+        error, newf = rar_unpack(nzo, workdir_complete, one_folder, new_rars)
+        if newf:
+            newfiles.extend(newf)
+        logging.info("RAR unpack finished on %s", nzo.download_path)
 
     if cfg.enable_7zip() and SEVENZIP_COMMAND:
         new_sevens = [seven for seven in xsevens if seven not in sevens]
@@ -669,8 +647,8 @@ def rar_extract(
 
     for password in passwords:
         if password:
-            logging.debug('Trying unrar with password "%s"', password)
-            msg = T('Trying unrar with password "%s"') % password
+            logging.debug('Trying to unpack with password "%s"', password)
+            msg = T('Trying to unpack with password "%s"') % password
             nzo.set_unpack_info("Unpack", msg, setname)
         fail, new_files = rar_extract_core(rarfile_path, one_folder, nzo, setname, extraction_path, password)
         if fail != 2:
@@ -1207,7 +1185,6 @@ def create_env(nzo: Optional[NzbObject] = None, extra_env_fields: dict[str, Any]
             "program_dir": sabnzbd.DIR_PROG,
             "api_key": cfg.api_key(),
             "api_url": f"{sabnzbd.BROWSER_URL}/api",
-            "rar_command": sabnzbd.newsunpack.RAR_COMMAND,
             "7zip_command": sabnzbd.newsunpack.SEVENZIP_COMMAND,
             "version": sabnzbd.__version__,
         }
@@ -1332,27 +1309,6 @@ def quick_check_set(setname: str, nzo: NzbObject) -> bool:
         nzo.renamed_file(renames)
 
     return result
-
-
-def unrar_check(rar: str) -> tuple[int, bool]:
-    """Return version number of unrar, where "5.01" returns 501
-    Also return whether an original version is found
-    (version, original)
-    """
-    version = 0
-    original = False
-    if rar:
-        try:
-            version = run_command([rar])
-        except Exception:
-            return version, original
-        original = "Alexander Roshal" in version
-
-        if m := re.search(r"RAR\s(\d+)\.(\d+)", version):
-            version = int(m.group(1)) * 100 + int(m.group(2))
-        else:
-            version = 0
-    return version, original
 
 
 def sevenzip_check(sevenzip: str) -> str:

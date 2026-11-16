@@ -24,7 +24,6 @@ QUEUE_VERSION = 10
 POSTPROC_QUEUE_VERSION = 3
 ONDISK_VERSION = 1
 
-REC_RAR_VERSION = 550
 
 ANFO = namedtuple("ANFO", "article_sum cache_size cache_limit")
 

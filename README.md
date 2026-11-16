@@ -19,7 +19,6 @@ SABnzbd has a few dependencies you'll need before you can get running. If you've
 - `python` (Python 3.10 and above, often called `python3`)
 - Python modules listed in `requirements.txt`. Install with `python3 -m pip install -r requirements.txt`
 - `par2` (Multi-threaded par2 installation guide can be found [here](https://sabnzbd.org/wiki/installation/multicore-par2))
-- `unrar` (make sure you get the "official" non-free version of unrar)
 
 Optional:
 - See `requirements.txt`

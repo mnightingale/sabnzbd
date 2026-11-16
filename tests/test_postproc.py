@@ -919,14 +919,6 @@ class TestProcessJobMissingArticles:
         assert nzo.status == Status.FAILED
         assert nzo.fail_msg
 
-    def test_missing_articles_without_par2_with_rars_is_failed_when_unrar_disabled(self):
-        nzo = self._make_nzo(bytes_missing=1000, extrapars={}, unpack=True)
-        with mock.patch.object(sabnzbd.cfg.enable_unrar, "get", return_value=False):
-            mocks = self._process_job(nzo, rars=["test_job.rar"])
-        assert nzo.status == Status.FAILED
-        assert nzo.fail_msg
-        mocks["unpacker"].assert_not_called()
-
     def test_missing_articles_with_par2_is_completed(self):
         # Repair either succeeded or par_error already failed the job
         nzo = self._make_nzo(bytes_missing=1000, extrapars={"test_job": []})
