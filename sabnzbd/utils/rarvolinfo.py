@@ -20,7 +20,7 @@
 sabnzbd.utils.rarvolinfo - Find out volume number and/or original extension of a rar file. Useful with obfuscated files
 """
 
-import rarfile
+import rars
 
 
 def get_rar_extension(myrarfile: str) -> tuple[int, str]:
@@ -34,31 +34,19 @@ def get_rar_extension(myrarfile: str) -> tuple[int, str]:
     org_extension = ""
 
     try:
-        # Let the rarfile parser do the work and collect all header blocks it finds
-        headers = []
-        rarfile.RarFile(myrarfile, part_only=True, info_callback=headers.append)
-        main = next(h for h in headers if h.type == rarfile.RAR_BLOCK_MAIN)
-
-        if main.extract_version >= 50:
-            # RAR5: volume number is in the main header, absent means first volume
-            volumenumber = (main.main_volume_number or 0) + 1
-            org_extension = "part%03d.rar" % volumenumber
-        else:
-            # RAR3/RAR4: volume number is in the end-of-archive block, if it's a multi-volume archive
-            if main.flags & rarfile.RAR_MAIN_VOLUME:
-                endarc = next(h for h in headers if h.type == rarfile.RAR_BLOCK_ENDARC)
-                volumenumber = endarc.endarc_volnr + 1
-            else:
-                volumenumber = 1
-            if main.flags & rarfile.RAR_MAIN_NEWNUMBERING:
-                org_extension = "part%02d.rar" % volumenumber
-            else:
-                # 1, 2, 3, 4 resp refers to .rar, .r00, .r01, .r02 ...
-                if volumenumber == 1:
+        with rars.RarFile(myrarfile, first_volume_only=True) as rarfile:
+            if rarfile.volume_index is not None:
+                volumenumber = rarfile.volume_index + 1
+                if rarfile.family == rars.ArchiveFamily.RAR50_PLUS:
+                    org_extension = "part%03d.rar" % volumenumber
+                elif rarfile.volume_naming == rars.VolumeNaming.PART:
+                    org_extension = "part%02d.rar" % volumenumber
+                elif volumenumber == 1:
+                    # 1, 2, 3, 4 resp refers to .rar, .r00, .r01, .r02 ...
                     org_extension = "rar"
                 else:
                     org_extension = "r%02d" % (volumenumber - 2)
-    except Exception:
+    except (rars.Error, OSError):
         volumenumber = -1
         org_extension = ""
 

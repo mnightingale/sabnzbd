@@ -29,12 +29,12 @@ import threading
 import weakref
 from threading import Thread
 from typing import Optional, NamedTuple
-import rarfile
+import rars
 import time
 
 import sabctools
 import sabnzbd
-from sabnzbd.misc import get_all_passwords, match_str, SABRarFile, to_units
+from sabnzbd.misc import get_all_passwords, to_units
 from sabnzbd.filesystem import (
     set_permissions,
     clip_path,
@@ -378,7 +378,7 @@ class Assembler(Thread):
                             nzf.remove_admin()
 
                             # Do rar-related processing
-                            if rarfile.is_rarfile(filepath):
+                            if rars.is_rarfile(filepath):
                                 # Check for encrypted files, unwanted extensions and add to direct unpack
                                 self.check_encrypted_and_unwanted(nzo, nzf)
                                 nzo.add_to_direct_unpacker(nzf)
@@ -727,91 +727,53 @@ def check_encrypted_and_unwanted_files(nzo: NzbObject, filepath: str) -> tuple[b
                 return encrypted, unwanted
 
             # Is it even a rarfile?
-            if rarfile.is_rarfile(filepath):
-                # Open the rar
-                zf = SABRarFile(filepath, part_only=True)
+            if rars.is_rarfile(filepath):
+                if nzo.encrypted == 0 and cfg.pause_on_pwrar():
+                    # Load all passwords
+                    passwords = [password for password in get_all_passwords(nzo) if password]
+                elif nzo.correct_password:
+                    # RARs using header encryption require the password to decrypt the file list
+                    passwords = [nzo.correct_password]
+                else:
+                    passwords = []
+
+                # Open the rar and test if any of the passwords work
+                check = rars.check_password(filepath, passwords)
+                namelist = check.archive.namelist() if check.archive else []
 
                 # Check for encryption
                 if (
                     nzo.encrypted == 0
                     and cfg.pause_on_pwrar()
-                    and (zf.needs_password() or is_cloaked(nzo, filepath, zf.namelist()))
+                    and (check.needs_password or is_cloaked(nzo, filepath, namelist))
                 ):
-                    # Load all passwords
-                    passwords = get_all_passwords(nzo)
-
                     # Cloaked job?
-                    if is_cloaked(nzo, filepath, zf.namelist()):
+                    if is_cloaked(nzo, filepath, namelist):
                         encrypted = True
                     elif not passwords:
                         # Only error when no password was set
                         nzo.encrypted = 1
                         encrypted = True
+                    elif password_hit := check.correct or next(iter(check.undetermined), None):
+                        # Record the successful password
+                        nzo.correct_password = password_hit
+                        # Don't check other files
+                        logging.info('Password "%s" matches for job "%s"', password_hit, nzo.final_name)
+                        nzo.encrypted = -1
+                        encrypted = False
                     else:
-                        # Lets test if any of the password work
-                        password_hit = False
-
-                        for password in passwords:
-                            if password:
-                                logging.info('Trying password "%s" on job "%s"', password, nzo.final_name)
-                                try:
-                                    zf.setpassword(password)
-                                    password_hit = password
-                                    break
-                                except rarfile.RarWrongPassword:
-                                    # This one really didn't work
-                                    continue
-                                except rarfile.RarCRCError as e:
-                                    # CRC errors can be thrown for wrong password or
-                                    # missing the next volume (with correct password)
-                                    if match_str(str(e), ("cannot find volume", "unexpected end of archive")):
-                                        # We assume this one worked!
-                                        password_hit = password
-                                        break
-                                    # This one didn't work
-                                    continue
-                                except Exception as e:
-                                    # Catch other suspicious errors
-                                    if "wrong password" in str(e):
-                                        # This one didn't work
-                                        continue
-
-                                    # All the other errors we skip, they might be fixable in post-proc.
-                                    # For example starting from the wrong volume, or damaged files
-                                    # This will cause the check to be performed again for the next rar, might
-                                    # be disk-intensive! Could be removed later and just accept the password.
-                                    logging.info('Could not try password "%s" on job "%s"', password, nzo.final_name)
-                                    return encrypted, unwanted
-
-                        # Did any work?
-                        if password_hit:
-                            # Record the successful password
-                            nzo.correct_password = password_hit
-                            # Don't check other files
-                            logging.info('Password "%s" matches for job "%s"', password_hit, nzo.final_name)
-                            nzo.encrypted = -1
-                            encrypted = False
-                        else:
-                            # Encrypted and none of them worked
-                            nzo.encrypted = 1
-                            encrypted = True
+                        # Encrypted and none of them worked
+                        nzo.encrypted = 1
+                        encrypted = True
 
                 # Check for unwanted extensions
                 if cfg.unwanted_extensions() and cfg.action_on_unwanted_extensions():
-                    # RARs using header encryption require the password to decrypt the file list
-                    if nzo.correct_password and not zf.namelist():
-                        try:
-                            zf.setpassword(nzo.correct_password)
-                        except Exception:
-                            pass
-                    for somefile in zf.namelist():
+                    for somefile in namelist:
                         logging.debug("File contains: %s", somefile)
                         if has_unwanted_extension(somefile):
                             logging.debug("Unwanted file %s", somefile)
                             unwanted = somefile
-                zf.close()
-                del zf
-        except rarfile.Error as e:
+        except (rars.Error, OSError) as e:
             logging.info("Error during inspection of RAR-file %s: %s", filepath, e)
         except Exception as e:
             # Malformed metadata can raise non-rarfile.Error (e.g. ValueError on a bad seek);

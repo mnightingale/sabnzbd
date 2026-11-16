@@ -31,14 +31,14 @@ import pytest
 import sabctools
 
 import sabnzbd
-from sabnzbd.assembler import Assembler
+from sabnzbd.assembler import Assembler, check_encrypted_and_unwanted_files
 from sabnzbd.constants import ASSEMBLER_MAX_IDLE_WRITERS, GIGI, Status
 from sabnzbd.filesystem import Diskspace
 from sabnzbd.misc import pp_to_opts
 from sabnzbd.newswrapper import NewsWrapper
 from sabnzbd.nzb import Article, NzbFile, NzbObject
 from sabnzbd.par2file import FilePar2Info
-from tests.testhelper import make_mock_nzo
+from tests.testhelper import make_mock_nzo, SAB_DATA_DIR
 
 
 class TestAssembler:
@@ -1160,3 +1160,60 @@ class TestWriterCache:
             assembler.get_writer(nzf)
         assert not assembler.writers
         assert not os.path.exists(nzf.filepath)
+
+
+PASSWORD = "75f8c9f91969b42eaaadc389739df9ed65e8970f9ad333a146e4f73e3875b69a"
+
+
+class TestCheckEncryptedAndUnwanted:
+    @pytest.fixture(autouse=True)
+    def config(self):
+        with (
+            mock.patch("sabnzbd.assembler.cfg") as cfg,
+            mock.patch("sabnzbd.assembler.has_unwanted_extension", side_effect=lambda name: name == "testfile.bin"),
+        ):
+            cfg.pause_on_pwrar.return_value = True
+            cfg.unwanted_extensions.return_value = ["bin"]
+            cfg.action_on_unwanted_extensions.return_value = 1
+            yield cfg
+
+    @pytest.mark.parametrize(
+        "test_dir, passwords, expected_encrypted, expected_password",
+        [
+            ("basic_rar3", [], 0, None),
+            ("basic_rar5", [], 0, None),
+            ("basic_rar3_64", [], 1, None),
+            ("basic_rar3_64", ["", "UNDETERMINED"], -1, "UNDETERMINED"),
+            ("basic_rar4_64_header", ["WRONG_PASSWORD"], 1, None),
+            ("basic_rar4_64_header", ["WRONG_PASSWORD", PASSWORD], -1, PASSWORD),
+            ("basic_rar5_64", ["WRONG_PASSWORD"], 1, None),
+            ("basic_rar5_64", ["WRONG_PASSWORD", PASSWORD], -1, PASSWORD),
+            ("basic_rar5_64_header_blake2", ["WRONG_PASSWORD"], 1, None),
+            ("basic_rar5_64_header_blake2", ["WRONG_PASSWORD", PASSWORD], -1, PASSWORD),
+        ],
+    )
+    def test_passwords(self, test_dir, passwords, expected_encrypted, expected_password):
+        nzo = make_mock_nzo(encrypted=0)
+        with mock.patch("sabnzbd.assembler.get_all_passwords", return_value=passwords):
+            encrypted, unwanted = check_encrypted_and_unwanted_files(
+                nzo, os.path.join(SAB_DATA_DIR, test_dir, "testfile.rar")
+            )
+
+        assert encrypted == (expected_encrypted == 1)
+        assert nzo.encrypted == expected_encrypted
+        assert nzo.correct_password == expected_password
+        if expected_encrypted == 1 and "header" in test_dir:
+            assert unwanted is None
+        else:
+            assert unwanted == "testfile.bin"
+
+    def test_unwanted_behind_header_encryption_uses_the_correct_password(self, config):
+        config.pause_on_pwrar.return_value = False
+        nzo = make_mock_nzo(encrypted=-1, correct_password=PASSWORD)
+
+        encrypted, unwanted = check_encrypted_and_unwanted_files(
+            nzo, os.path.join(SAB_DATA_DIR, "basic_rar5_64_header_blake2", "testfile.rar")
+        )
+
+        assert not encrypted
+        assert unwanted == "testfile.bin"
