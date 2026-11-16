@@ -27,7 +27,7 @@ import time
 import re
 import gc
 import queue
-import rarfile
+import rars
 from typing import Optional
 
 import sabnzbd
@@ -50,7 +50,6 @@ from sabnzbd.misc import (
     change_queue_complete_action,
     run_script,
     is_none,
-    SABRarFile,
 )
 from sabnzbd.filesystem import (
     points_into_program_dir,
@@ -135,6 +134,7 @@ class PostProcessor(Thread):
 
         # So we can always cancel external processes
         self.external_process: Optional[subprocess.Popen] = None
+        self.rar_cancellation: Optional[rars.CancellationToken] = None
 
         # Counter to not only process fast-jobs
         self.__fast_job_count = 0
@@ -254,6 +254,9 @@ class PostProcessor(Thread):
                         logging.info("Killed external process %s", self.external_process.args[0])
                     except Exception:
                         pass
+                    if rar_cancellation := self.rar_cancellation:
+                        rar_cancellation.cancel()
+                        logging.info("Cancelled RAR extraction")
                 result = True
             return result
         return result
@@ -984,39 +987,36 @@ def try_sfv_check(nzo: NzbObject) -> Optional[bool]:
     return True
 
 
-def try_rar_check(nzo: NzbObject, rars: list[str]) -> bool:
+def try_rar_check(nzo: NzbObject, rar_files: list[str]) -> bool:
     """Attempt to verify set using the RARs
     Return True if verified, False when failed
     When setname is '', all RAR files will be used, otherwise only the matching one
     If no RAR's are found, returns True
     """
     # Sort for better processing
-    rars.sort(key=functools.cmp_to_key(rar_sort))
+    rar_files.sort(key=functools.cmp_to_key(rar_sort))
 
     # Test
-    if rars:
-        setname = setname_from_path(rars[0])
+    if rar_files:
+        setname = setname_from_path(rar_files[0])
         nzo.status = Status.VERIFYING
         nzo.set_unpack_info("Repair", T("Trying RAR-based verification"), setname)
         nzo.set_action_line(T("Trying RAR-based verification"), "...")
         try:
-            # Requires de-unicode for RarFile to work!
-            zf = SABRarFile(rars[0])
-
-            # Skip if it's encrypted
-            if zf.needs_password():
-                msg = T("[%s] RAR-based verification failed: %s") % (setname, T("Passworded"))
-                nzo.set_unpack_info("Repair", msg)
-                return True
-
             # Will throw exception if something is wrong
-            zf.testrar()
+            with rars.RarFile(rar_files[0]) as zf:
+                zf.testrar()
             # Success!
             msg = T("RAR files verified successfully")
             nzo.set_unpack_info("Repair", msg, setname)
             logging.info(msg)
             return True
-        except rarfile.Error as e:
+        except rars.PasswordRequired:
+            # Skip if it's encrypted
+            msg = T("[%s] RAR-based verification failed: %s") % (setname, T("Passworded"))
+            nzo.set_unpack_info("Repair", msg)
+            return True
+        except (rars.Error, OSError) as e:
             nzo.fail_msg = T("RAR files failed to verify")
             msg = T("[%s] RAR-based verification failed: %s") % (setname, e)
             nzo.set_unpack_info("Repair", msg, setname)
@@ -1078,15 +1078,15 @@ def rar_renamer(nzo: NzbObject) -> int:
         file_to_check = os.path.join(nzo.download_path, file_to_check)
 
         # We only want rar files; guard against cbr files due to pr#3114
-        if (
-            not os.path.isfile(file_to_check)
-            or get_ext(file_to_check) == ".cbr"
-            or not rarfile.is_rarfile(file_to_check)
-        ):
+        if not os.path.isfile(file_to_check) or get_ext(file_to_check) == ".cbr" or not rars.is_rarfile(file_to_check):
             continue
 
         # if a rar file is fully encrypted, RarFile() will return an empty list:
-        rar_contents = SABRarFile(file_to_check, part_only=True).filelist()
+        try:
+            with rars.RarFile(file_to_check, first_volume_only=True) as zf:
+                rar_contents = [info.filename for info in zf.infolist() if not info.is_dir()]
+        except rars.PasswordRequired:
+            rar_contents = []
         if not rar_contents:
             logging.info(
                 "Download %s contains a fully encrypted & obfuscated rar-file: %s.",

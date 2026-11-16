@@ -29,14 +29,14 @@ import subprocess
 import sys
 import tempfile
 import wave
-from contextlib import ExitStack, contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager
 from functools import cached_property
 from random import randint, sample
 from typing import Optional
 from unittest import mock
 
 import pytest
-import rarfile
+import rars
 
 from sabnzbd import lang, misc, newsunpack, cfg
 from sabnzbd.config import ConfigCat, get_sorters, save_config
@@ -47,7 +47,6 @@ from sabnzbd.constants import (
     HIGH_PRIORITY,
     NORMAL_PRIORITY,
 )
-from sabnzbd.misc import SABRarFile
 from tests.testhelper import SAB_BASE_DIR
 
 
@@ -1549,7 +1548,7 @@ class TestBuildAndRunCommand:
         ]
 
 
-class TestSABRarFile:
+class TestRarsCheckPassword:
     @pytest.mark.parametrize(
         "test_dir, rar_files, password, expected_correct",
         [
@@ -1598,14 +1597,14 @@ class TestSABRarFile:
         ],
     )
     def test_rar5_check_password(self, test_dir, rar_files, password, expected_correct):
-        expected = nullcontext() if expected_correct else pytest.raises(rarfile.RarWrongPassword)
-
         for rar_file in rar_files:
-            with SABRarFile(os.path.join(test_dir, rar_file), part_only=True) as zf:
-                with expected:
-                    zf.setpassword(password)
-                if zf._file_parser.has_header_encryption() and expected_correct:
-                    assert zf.namelist()
+            check = rars.check_password(os.path.join(test_dir, rar_file), [password])
+            if not check.needs_password:
+                assert expected_correct
+            else:
+                assert (check.correct == password or password in check.undetermined) == expected_correct
+            if expected_correct:
+                assert check.archive.namelist()
 
     @pytest.mark.parametrize(
         "test_dir, rar_files, expected_files",
@@ -1618,13 +1617,13 @@ class TestSABRarFile:
         ],
     )
     def test_rar5_check_password_after_parse(self, test_dir, rar_files, expected_files):
-        """The password check should occur after parse finishes so
-        that infolist is fully populated when headers are not encrypted"""
+        """A wrong password should still leave the file list
+        fully populated when headers are not encrypted"""
         for rar_file in rar_files:
-            with SABRarFile(os.path.join(test_dir, rar_file), part_only=True) as zf:
-                with pytest.raises(rarfile.RarWrongPassword):
-                    zf.setpassword("WRONG_PASSWORD")
-                assert zf.namelist() == expected_files
+            check = rars.check_password(os.path.join(test_dir, rar_file), ["WRONG_PASSWORD"])
+            assert check.correct is None
+            assert not check.undetermined
+            assert check.archive.namelist() == expected_files
 
 
 def patched_cgroup_open(files: dict[str, str]):

@@ -37,6 +37,7 @@ from unittest import mock
 from unittest.mock import call
 
 import pytest
+import rars
 import sabctools
 
 import sabnzbd
@@ -45,7 +46,7 @@ import sabnzbd.par2repair as par2repair
 from sabnzbd.constants import JOB_ADMIN, Status
 from sabnzbd.par2file import FilePar2Info
 from tests.testhelper import SAB_CACHE_DIR, make_mock_nzo
-from sabnzbd.misc import format_time_string, SABRarFile
+from sabnzbd.misc import format_time_string
 from sabnzbd.filesystem import long_path, build_filelists, create_all_dirs, listdir_full, clip_path
 
 
@@ -633,6 +634,83 @@ class TestPar2RepairResume:
 
 
 @pytest.mark.usefixtures("clean_cache_dir")
+class TestRarExtractFailures:
+    """rars errors map onto the fail codes rar_unpack acts on: 1 error, 2 wrong password, 3 corrupt"""
+
+    PAYLOAD = bytes(range(256)) * 400
+
+    @pytest.fixture
+    def job(self, tmp_path):
+        sabnzbd.PostProcessor = mock.Mock()
+        download_path = os.path.join(str(tmp_path), "incomplete")
+        os.mkdir(download_path)
+        nzo = make_mock_nzo(download_path=download_path, final_name="job")
+        return nzo, os.path.join(str(tmp_path), "complete")
+
+    def write_set(self, nzo, volume_size=None) -> list[str]:
+        builder = rars.RarBuilder(version="rar50", level=0, volume_size=volume_size)
+        builder.add_bytes(self.PAYLOAD, "show.mkv")
+        if volume_size:
+            return [os.fspath(path) for path in builder.write(os.path.join(nzo.download_path, "show.part01.rar"))]
+        path = os.path.join(nzo.download_path, "show.rar")
+        builder.write(path)
+        return [path]
+
+    def test_extracts(self, job):
+        nzo, complete = job
+        volumes = self.write_set(nzo, volume_size=16384)
+        assert newsunpack.rar_extract(volumes[0], False, nzo, "show", complete) == (
+            0,
+            [os.path.join(complete, "show.mkv")],
+        )
+        with open(os.path.join(complete, "show.mkv"), "rb") as extracted:
+            assert extracted.read() == self.PAYLOAD
+
+    def test_progress_counts_volumes(self, job):
+        nzo, complete = job
+        volumes = self.write_set(nzo, volume_size=16384)
+        assert newsunpack.rar_extract(volumes[0], False, nzo, "show", complete)[0] == 0
+        numrars = len(volumes)
+        assert nzo.set_action_line.call_args_list[0] == mock.call("Unpacking", "00/%02d" % numrars)
+        assert nzo.set_action_line.call_args_list[-1] == mock.call("Unpacking", "%02d/%02d " % (numrars, numrars))
+
+    def test_missing_volume_is_an_error(self, job):
+        nzo, complete = job
+        volumes = self.write_set(nzo, volume_size=16384)
+        os.remove(volumes[2])
+        assert newsunpack.rar_extract(volumes[0], False, nzo, "show", complete) == (1, [])
+        assert nzo.fail_msg == "Unpacking failed, unable to find show.part03.rar"
+
+    def test_volumes_out_of_order_is_an_error(self, job):
+        nzo, complete = job
+        volumes = self.write_set(nzo, volume_size=16384)
+        os.rename(volumes[2], volumes[2] + ".tmp")
+        os.rename(volumes[3], volumes[2])
+        os.rename(volumes[2] + ".tmp", volumes[3])
+        assert newsunpack.rar_extract(volumes[0], False, nzo, "show", complete) == (1, [])
+        assert nzo.fail_msg == "Unpacking failed, RAR volumes are out of order"
+
+    def test_corrupt_data_is_a_crc_error(self, job):
+        nzo, complete = job
+        (path,) = self.write_set(nzo)
+        with open(path, "r+b") as archive:
+            archive.seek(os.path.getsize(path) // 2)
+            archive.write(b"corrupt")
+        assert newsunpack.rar_extract(path, False, nzo, "show", complete) == (3, [])
+        assert nzo.fail_msg == "Corrupt RAR file"
+        assert not os.path.exists(os.path.join(complete, "show.mkv"))
+
+    def test_cancel_aborts(self, job):
+        nzo, complete = job
+        (path,) = self.write_set(nzo)
+        token = rars.CancellationToken()
+        token.cancel()
+        with mock.patch.object(newsunpack.rars, "CancellationToken", return_value=token):
+            assert newsunpack.rar_extract(path, False, nzo, "show", complete) == (1, [])
+        assert nzo.fail_msg == "Post-processing was aborted"
+        assert sabnzbd.PostProcessor.rar_cancellation is None
+
+
 class TestRarUnpack:
     @staticmethod
     def _create_test_nzo(temp_dir, filename: str = "test.nzb", password: Optional[str] = None):
@@ -799,8 +877,7 @@ class TestRarUnpack:
     )
     def test_basic_rar_unpack(self, test_dir, rar_files, expected_files, password):
         for rar_file in rar_files:
-            with SABRarFile(os.path.join(test_dir, rar_file), part_only=True) as zf:
-                zf.setpassword(password)
+            with rars.RarFile(os.path.join(test_dir, rar_file), password=password) as zf:
                 assert zf.namelist()
 
         error_code, extracted_files, complete_contents, download_contents, _nzo, temp_complete_dir = (
@@ -1453,11 +1530,11 @@ class TestUnpackNestedRarSets:
         nfc_path = os.path.join(nzo.download_path, unicodedata.normalize("NFC", "frènch_german_demö.rar"))
         nfd_path = os.path.join(nzo.download_path, unicodedata.normalize("NFD", "frènch_german_demö.rar"))
 
-        with mock.patch.object(newsunpack, "rar_extract", return_value=(0, [], [])) as rar_extract:
+        with mock.patch.object(newsunpack, "rar_extract", return_value=(0, [])) as rar_extract:
             fail, _newfiles = newsunpack.rar_unpack(nzo, complete_path, False, [nfc_path, nfd_path])
 
         assert not fail
-        assert [(call.args[0], call.args[1]) for call in rar_extract.call_args_list] == [(nfc_path, 1), (nfd_path, 1)]
+        assert [call.args[0] for call in rar_extract.call_args_list] == [nfc_path, nfd_path]
 
     def test_quick_check_rename_updates_setname_and_vol(self, tmp_path):
         """The rename is what puts the volumes in the subfolder, so the set and volume number

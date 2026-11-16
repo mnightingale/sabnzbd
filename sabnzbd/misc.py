@@ -35,15 +35,11 @@ import datetime
 import inspect
 import html
 import ipaddress
-import sabctools
 import socks
 import math
-import rarfile
-import hashlib
 from threading import Thread, RLock
 from collections.abc import Iterable
 from typing import Any, AnyStr, Optional
-from functools import lru_cache
 
 import sabnzbd
 import sabnzbd.getipaddress
@@ -2009,94 +2005,3 @@ def subject_name_extractor(subject: str) -> str:
 
     # Return the subject
     return subject
-
-
-##
-## SABnzbd patched rarfile classes
-## Patch for https://github.com/markokr/rarfile/issues/56#issuecomment-711146569
-##
-
-
-class SABRarFile(rarfile.RarFile):
-    """SABnzbd patched RarFile class with info_callback fix for multi-volume archives"""
-
-    def __init__(self, *args, **kwargs):
-        """Patch RarFile-call when using `part_only`
-        to store filenames inside the RAR-files"""
-        if kwargs.get("part_only"):
-            kwargs["info_callback"] = self.info_callback
-
-        # Let RarFile handle the rest!
-        super().__init__(*args, **kwargs)
-
-    def info_callback(self, rar_obj: rarfile.RarInfo):
-        """Called for every RarInfo-object found"""
-        # We only care about files inside the Rar
-        # For Rar5 there is a separate object, for Rar3 we need to check if a filename was parsed
-        if isinstance(rar_obj, (rarfile.Rar5FileInfo, rarfile.Rar3Info)) and rar_obj.filename:
-            # Avoid duplicates
-            if rar_obj not in self._file_parser._info_list:
-                self._file_parser._info_list.append(rar_obj)
-                self._file_parser._info_map[rar_obj.filename.rstrip("/")] = rar_obj
-
-    def filelist(self) -> list[str]:
-        """Return list of filenames in archive."""
-        return [f.filename for f in self.infolist() if not f.isdir()]
-
-    def setpassword(self, pwd):
-        """Sets the password to use when extracting."""
-        self._file_parser = None  # Always trigger parse
-        super().setpassword(pwd)
-
-    def _parse(self):
-        """Run parser for file type"""
-        super()._parse()
-        self._verify_file_passwords()
-
-    def _verify_file_passwords(self):
-        """Verify passwords for all files in archive"""
-        if not self._password:
-            return
-        if isinstance(self._file_parser, rarfile.RAR5Parser):
-            # Encrypted headers already verify the password, and we assume all files use the same password
-            if self._file_parser.has_header_encryption():
-                return
-            for rar_obj in self.infolist():
-                if rar_obj.is_file() and rar_obj.needs_password():
-                    _algo, flags, kdf_count, salt, _iv, checkval = rar_obj.file_encryption
-                    if flags & rarfile.RAR5_XENC_CHECKVAL:
-                        if not rar5_check_password(self._password, salt, kdf_count, checkval):
-                            raise rarfile.RarWrongPassword()
-                        # All files typically share the same password and usually even the same salt, so one successful check is enough
-                        return
-
-
-@lru_cache(maxsize=128)
-def rar5_check_password(password: str | bytes, salt: bytes, kdf_count_shift: int, check_value: bytes) -> bool:
-    """Verify a check_value against a password, salt and kdf_count_shift"""
-    if len(check_value) != rarfile.RAR5_PW_CHECK_SIZE + rarfile.RAR5_PW_SUM_SIZE:
-        return False
-    if kdf_count_shift > rarfile.RAR_MAX_KDF_SHIFT:
-        raise rarfile.BadRarFile("Too large kdf_count")
-
-    hdr_check = check_value[: rarfile.RAR5_PW_CHECK_SIZE]
-    hdr_sum = check_value[rarfile.RAR5_PW_CHECK_SIZE :]
-    sum_hash = hashlib.sha256(hdr_check).digest()
-    if sum_hash[: rarfile.RAR5_PW_SUM_SIZE] != hdr_sum:
-        return False
-
-    kdf_count = (1 << kdf_count_shift) + 32
-    password_hash = rarfile.rar5_s2k(password, salt, kdf_count)
-
-    # Fold the 32-byte value into 8 bytes
-    pwd_check = bytearray(rarfile.RAR5_PW_CHECK_SIZE)
-    len_mask = rarfile.RAR5_PW_CHECK_SIZE - 1
-    for i, v in enumerate(password_hash):
-        pwd_check[i & len_mask] ^= v
-
-    return pwd_check == hdr_check
-
-
-# Replace rar3_s2k with native implementation which is faster for longer passwords
-rarfile.rar3_s2k = lru_cache(maxsize=128)(sabctools.rarfile_rar3_s2k)
-rarfile.rar5_s2k = lru_cache(maxsize=128)(rarfile.rar5_s2k)

@@ -62,7 +62,7 @@ from sabnzbd.constants import (
     DEF_COMPLETE_DIR,
 )
 from sabnzbd.encoding import correct_unknown_encoding, unicode_nfc_normalize, utob, limit_encoded_length
-import rarfile
+from rars import is_rarfile
 
 # For Windows: determine executable extensions
 if os.name == "nt":
@@ -619,7 +619,7 @@ def build_filelists(
         # Extra check for rar (takes CPU/disk)
         file_is_rar = False
         if check_rar:
-            file_is_rar = rarfile.is_rarfile(file)
+            file_is_rar = is_rarfile(file)
 
         # Run through all the checks
         if SEVENZIP_RE.search(file) or SEVENMULTI_RE.search(file):
