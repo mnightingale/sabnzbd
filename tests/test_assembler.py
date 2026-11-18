@@ -75,8 +75,8 @@ class TestAssembler:
                 self.nzf.type = "yenc"  # for writes from article cache
                 assert self.nzf.prepare_filepath() is not None
                 # Clear the state after prepare_filepath
-                self.nzf.articles.clear()
                 self.nzf.decodetable.clear()
+                self.nzf.next_index = 0
 
                 with mock.patch.object(Assembler, "write", wraps=Assembler.write) as mocked_assembler_write:
                     yield mocked_assembler_write

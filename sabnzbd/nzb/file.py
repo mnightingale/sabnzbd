@@ -59,8 +59,9 @@ NzbFileSaver = (
     "vol",
     "blocks",
     "setname",
-    "articles",
     "decodetable",
+    "next_index",
+    "waiting",
     "bytes",
     "bytes_left",
     "nzo",
@@ -78,7 +79,7 @@ class NzbFile(TryList):
     """Representation of one file consisting of multiple articles"""
 
     # Pre-define attributes to save memory
-    __slots__ = (*NzbFileSaver, "lock", "file_lock", "assembler_next_index", "writer")
+    __slots__ = (*NzbFileSaver, "in_flight", "lock", "file_lock", "assembler_next_index", "writer")
 
     def __init__(self, date, subject, raw_article_db, file_bytes, nzo):
         """Setup object"""
@@ -99,9 +100,11 @@ class NzbFile(TryList):
         self.blocks: Optional[int] = None
         self.setname: Optional[str] = None
 
-        # Articles are removed from "articles" after being fetched
-        self.articles: dict[Article, Article] = {}
+        # Articles from next_index on have not been handed to a server yet
         self.decodetable: list[Article] = []
+        self.next_index: int = 0
+        self.in_flight: dict[Article, Article] = {}
+        self.waiting: dict[Article, Article] = {}
 
         self.bytes: int = file_bytes
         self.bytes_left: int = file_bytes
@@ -174,20 +177,57 @@ class NzbFile(TryList):
         """Add article to object database and return article object"""
         article = Article(article_info[0], article_info[1], self)
         article.on_disk = self.assembled
-        self.articles[article] = article
         self.decodetable.append(article)
         return article
+
+    @property
+    def articles_left(self) -> int:
+        """Number of articles still to be fetched"""
+        return len(self.decodetable) - self.next_index + len(self.in_flight) + len(self.waiting)
+
+    @synchronized()
+    def remaining_articles(self) -> list[Article]:
+        """Articles still to be fetched"""
+        return [*self.in_flight, *self.waiting, *self.decodetable[self.next_index :]]
+
+    @synchronized()
+    def take_fresh_article(self, article: Article) -> bool:
+        """Take an article not handed out yet, any before it are moved to waiting"""
+        try:
+            index = self.decodetable.index(article, self.next_index)
+        except ValueError:
+            return False
+        for skipped in self.decodetable[self.next_index : index]:
+            self.waiting[skipped] = skipped
+        self.next_index = index + 1
+        return True
+
+    @synchronized()
+    def article_fetching(self, article: Article):
+        """Article was handed to a server"""
+        if self.waiting.pop(article, None) is not None or self.take_fresh_article(article):
+            self.in_flight[article] = article
+
+    @synchronized()
+    def article_returned(self, article: Article):
+        """Article was taken back from its server without being fetched"""
+        if self.in_flight.pop(article, None) is not None:
+            self.waiting[article] = article
 
     @synchronized()
     def remove_article(self, article: Article, success: bool) -> bool:
         """Handle completed article, possibly end of file"""
-        if self.articles.pop(article, None) is not None:
+        if (
+            self.in_flight.pop(article, None) is not None
+            or self.waiting.pop(article, None) is not None
+            or self.take_fresh_article(article)
+        ):
             if success:
                 self.bytes_left -= article.bytes
             else:
                 article.failed = True
         # Only on fully loaded files we can know if it's really done
-        return self.import_finished and not self.articles
+        return self.import_finished and not self.articles_left
 
     def set_par2(self, setname, vol, blocks):
         """Designate this file as a par2 file"""
@@ -247,11 +287,18 @@ class NzbFile(TryList):
     def get_articles(self, server: Server, servers: list[Server], fetch_limit: int):
         """Get next articles to be downloaded"""
         articles = server.article_queue
-        for article in self.articles:
-            if article := article.get_article(server, servers):
+        for article in tuple(self.waiting):
+            if article.get_article(server, servers):
                 articles.append(article)
                 if len(articles) >= fetch_limit:
                     return
+        # Stop at the first article not handed out yet that is skipped
+        while self.next_index < len(self.decodetable):
+            if not (article := self.decodetable[self.next_index].get_article(server, servers)):
+                break
+            articles.append(article)
+            if len(articles) >= fetch_limit:
+                return
         self.add_to_try_list(server)
 
     @synchronized()
@@ -259,7 +306,7 @@ class NzbFile(TryList):
         """Reset all try lists. Locked so reset is performed
         for all items at the same time without chance of another
         thread changing any of the items while we are resetting"""
-        for art in self.articles:
+        for art in self.remaining_articles():
             art.reset_try_list()
         self.reset_try_list()
 
@@ -295,7 +342,7 @@ class NzbFile(TryList):
         if not self.import_finished:
             return False
         with self.lock:
-            return not self.articles
+            return not self.articles_left
 
     def remove_admin(self):
         """Remove article database from disk (sabnzbd_nzf_<id>)"""
@@ -394,8 +441,11 @@ class NzbFile(TryList):
     def __getstate__(self):
         """Save to pickle file, selecting attributes"""
         dict_ = {}
-        for item in NzbFileSaver:
-            dict_[item] = getattr(self, item)
+        with self.lock:
+            for item in NzbFileSaver:
+                dict_[item] = getattr(self, item)
+            dict_["decodetable"] = self.decodetable[:]
+            dict_["waiting"] = [*self.waiting, *self.in_flight]
         dict_["try_list"] = super().__getstate__()
         return dict_
 
@@ -411,10 +461,19 @@ class NzbFile(TryList):
         self.file_lock = threading.RLock()
         self.assembler_next_index = 0
         self.writer = None
-        if isinstance(self.articles, list):
-            # Converted from list to dict
-            self.articles = {x: x for x in self.articles}
-        for article in self.articles:
+        self.in_flight = {}
+        if (articles := dict_.get("articles")) is not None:
+            # Converted from a list or dict of remaining articles
+            remaining = set(articles)
+            self.next_index = len(self.decodetable)
+            while self.next_index and (article := self.decodetable[self.next_index - 1]) in remaining:
+                if article.try_list:
+                    break
+                self.next_index -= 1
+            self.waiting = {x: x for x in self.decodetable[: self.next_index] if x in remaining}
+        else:
+            self.waiting = {x: x for x in self.waiting}
+        for article in self.decodetable:
             article.lock = self.lock
         super().__setstate__(dict_.get("try_list", []))
 

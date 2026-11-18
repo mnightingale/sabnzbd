@@ -314,6 +314,7 @@ class TestBlockAccounting:
                 article.on_disk = True
                 nzf.bytes_left -= self.ARTICLE_SIZE
             nzf.decodetable.append(article)
+        nzf.next_index = len(nzf.decodetable)
         return nzf
 
     def _make_parfile(self, nzo: NzbObject, name: str, blocks: int) -> NzbFile:
@@ -321,9 +322,7 @@ class TestBlockAccounting:
         nzf.filename = name
         nzf.set_par2("myset", 1, blocks)
         # An article left outstanding, so the file does not count as downloaded
-        article = Article("<p-%s>" % name, 100, nzf)
-        nzf.articles[article] = article
-        nzf.decodetable.append(article)
+        nzf.decodetable.append(Article("<p-%s>" % name, 100, nzf))
         return nzf
 
     def _make_nzo(self, failed_articles=()) -> NzbObject:
@@ -499,7 +498,7 @@ class TestBlockAccounting:
         nzo.files.append(downloading)
         downloading.import_finished = True
         failed, outstanding = downloading.decodetable[:2]
-        downloading.articles = {failed: failed, outstanding: outstanding}
+        downloading.waiting = {failed: failed, outstanding: outstanding}
         with mock.patch.object(nzo, "prospective_add") as prospective_add:
             nzo.remove_article(failed, False)
         prospective_add.assert_called_once_with(downloading)
@@ -510,7 +509,7 @@ class TestBlockAccounting:
         nzo.finished_files.remove(nzo.finished_files[0])
         nzo.files.append(downloading)
         downloading.import_finished = True
-        downloading.articles = {article: article for article in downloading.decodetable}
+        downloading.next_index = 0
         first, second, third, _ = downloading.decodetable
         with (
             mock.patch.object(nzo, "prospective_add") as prospective_add,
@@ -529,7 +528,7 @@ class TestBlockAccounting:
         nzo.files.append(downloading)
         downloading.import_finished = True
         last = downloading.decodetable[-1]
-        downloading.articles = {last: last}
+        downloading.waiting = {last: last}
         downloading.bytes_left = last.bytes
         nzo.next_prospective_add = float("inf")
         with mock.patch.object(nzo, "prospective_add") as prospective_add:

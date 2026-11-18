@@ -892,14 +892,16 @@ class NzbQueue:
                         # register_article later calls nzf.remove_article (see #3431).
                         with nzf.lock:
                             articles_to_remove = [
-                                article for article in nzf.articles if article.all_servers_in_try_list(active_servers)
+                                article
+                                for article in nzf.remaining_articles()
+                                if article.all_servers_in_try_list(active_servers)
                             ]
                         for article in articles_to_remove:
                             logging.debug("Removing article %s with bad trylist in file %s", article, nzf.filename)
                             nzo.increase_bad_articles_counter("missing_articles")
                             sabnzbd.NzbQueue.register_article(article, success=False)
 
-                        if not nzf.assembled and not nzf.articles:
+                        if not nzf.assembled and not nzf.articles_left:
                             logging.debug("Not assembled but no remaining articles for file %s", nzf.filename)
                         if not nzf.assembled and (next_article := nzf.assembler_next_article):
                             logging.debug(

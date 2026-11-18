@@ -169,7 +169,7 @@ class TestNzbQueue:
         q.add(jobb)
 
         # Mark one of joba articles as tried
-        article = next(iter(joba.files[0].articles))
+        article = joba.files[0].remaining_articles()[0]
         article.add_to_try_list(sabnzbd.Downloader.servers[0])
         q.save()
 
@@ -186,7 +186,7 @@ class TestNzbQueue:
         assert jobb
 
         # Try list restored
-        assert sabnzbd.Downloader.servers[0] in next(iter(joba.files[0].articles)).try_list
+        assert sabnzbd.Downloader.servers[0] in joba.files[0].remaining_articles()[0].try_list
 
     def test_stop_idle_jobs_no_crash_on_exhausted_articles(self):
         """Regression test: stop_idle_jobs must not raise RuntimeError when
@@ -210,11 +210,12 @@ class TestNzbQueue:
         # Saturate all try-lists so stop_idle_jobs enters the article-removal branch
         nzo.add_to_try_list(server)
         nzf.add_to_try_list(server)
-        for article in list(nzf.articles):
+        for article in nzf.remaining_articles():
             article.add_to_try_list(server)
 
         # Must not raise RuntimeError: dictionary changed size during iteration
         q.stop_idle_jobs()
+        assert nzf.articles_left == 0
 
     @pytest.mark.skipif(not sabnzbd.WINDOWS, reason="Legacy 3.0.0 queue fixture contains Windows-specific paths")
     def test_restore_legacy_queue_format_3_0_0(self, tmp_path, monkeypatch):
@@ -257,7 +258,7 @@ class TestNzbQueue:
         assert cnzf.nzo == nzo
         assert cnzf.filename == "rar-files.part1.rar"
         assert cnzf.md5of16k == b"e\xc4^\x93\xc4\x92\xf9s\x057Oe!\x9dA\xe7"
-        assert len(cnzf.articles) == 51
+        assert cnzf.articles_left == 51
         assert len(cnzf.decodetable) == 73
 
         assert cnzf.bytes == 27049565

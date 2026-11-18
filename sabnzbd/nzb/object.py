@@ -1025,7 +1025,7 @@ class NzbObject(TryList):
                 self.files.append(nzf)
                 self.files_table[nzf.nzf_id] = nzf
                 nzf.filename = existing_filename
-                if not nzf.articles:
+                if not nzf.articles_left:
                     self.remove_nzf(nzf)
 
                 # Set bytes correctly

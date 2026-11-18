@@ -141,6 +141,7 @@ class Article(TryList):
     def reset_try_list(self):
         """In addition to resetting the try list, also reset fetcher so all servers
         are tried again. Locked so fetcher setting changes are also protected."""
+        self.nzf.article_returned(self)
         self.fetcher = None
         self.fetcher_priority = 0
         super().reset_try_list()
@@ -152,6 +153,7 @@ class Article(TryList):
         with self.nzf.nzo.lock, self.lock:
             if remove_fetcher_from_try_list:
                 self.remove_from_try_list(self.fetcher)
+            self.nzf.article_returned(self)
             self.fetcher = None
             self.tries = 0
             self.nzf.reset_try_list()
@@ -176,6 +178,7 @@ class Article(TryList):
 
         # If no higher priority servers, use this server
         self.fetcher_priority = server.priority
+        self.nzf.article_fetching(self)
         self.fetcher = server
         self.tries += 1
         return self
