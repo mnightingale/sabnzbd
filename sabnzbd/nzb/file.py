@@ -71,6 +71,7 @@ NzbFileSaver = (
     "assembled",
     "direct_written",
     "md5of16k",
+    "part_check",
 )
 
 
@@ -115,6 +116,8 @@ class NzbFile(TryList):
         # Cleared once an article is packed at a running offset
         self.direct_written: bool = True
         self.md5of16k: Optional[bytes] = None
+        # Whether the yEnc part of each article must match its NZB segment number, None until the first article decides
+        self.part_check: Optional[bool] = None
         self.assembler_next_index: int = 0
 
         # Add first article to decodetable, this way we can check

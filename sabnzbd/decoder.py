@@ -215,6 +215,24 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
             raise response.sink_error
         raise SinkFailed
 
+    nzf = article.nzf
+    if (partnum := article.partnum) and (part := response.part):
+        if nzf.part_check is None:
+            with nzf.lock:
+                if nzf.part_check is None:
+                    nzf.part_check = part == partnum
+                    if not nzf.part_check:
+                        logging.info(
+                            "Not checking yEnc parts of %s, part %d of %s is NZB segment %d",
+                            nzf.filename,
+                            part,
+                            article.article,
+                            partnum,
+                        )
+        if nzf.part_check and part != partnum:
+            logging.info("Article %s is yEnc part %d, not NZB segment %d", article.article, part, partnum)
+            raise BadData(None)
+
     # Let SABCTools do all the heavy lifting
     decoded_data = response.data
     article.file_size = response.file_size
@@ -224,7 +242,6 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
     article.block_size = response.block_size
     article.block_crcs = array.array("I", crcs) if (crcs := response.block_crcs) is not None else None
 
-    nzf = article.nzf
     # Assume it is yenc
     nzf.type = "yenc"
 

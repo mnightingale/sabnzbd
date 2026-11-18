@@ -22,7 +22,10 @@ tests.test_decoder- Testing functions in decoder.py
 import binascii
 import os
 import pytest
+import threading
 from io import BytesIO
+from types import SimpleNamespace
+from typing import Optional
 
 from random import randint
 from unittest import mock
@@ -276,3 +279,43 @@ class TestYencBlockCrcs:
         decoder.decode_yenc(article, self._response(b"\x01" * 100, 0, 0))
         assert article.block_size == 0
         assert article.block_crcs is None
+
+
+class TestYencPartCheck:
+    @staticmethod
+    def _response(part: int, expected: int = 0, sink: Optional[sabctools.FileWriter] = None) -> sabctools.NNTPResponse:
+        encoded, crc = sabctools.yenc_encode(b"a" * 100)
+        raw_data = (
+            f"222 0 <foo@bar>\r\n=ybegin part={part} line=128 size=100000 name=foo.bin\r\n"
+            f"=ypart begin={part * 100 - 99} end={part * 100}\r\n".encode()
+            + encoded
+            + f"\r\n=yend size=100 part={part} pcrc32={crc:08x}\r\n.\r\n".encode()
+        )
+        dec = sabctools.Decoder(len(raw_data))
+        dec.expect(None, sink, part=expected)
+        BytesIO(raw_data).readinto(dec)
+        dec.process(len(raw_data))
+        return next(dec)
+
+    @staticmethod
+    def _nzf(part_check: Optional[bool] = None) -> SimpleNamespace:
+        return SimpleNamespace(lock=threading.RLock(), filename="foo.bin", filename_checked=True, part_check=part_check)
+
+    def test_first_article_decides_the_check(self):
+        nzf = self._nzf()
+        decoder.decode_yenc(Article("foo@bar", 1234, nzf, partnum=3), self._response(part=7))
+        assert nzf.part_check is False
+        assert decoder.decode_yenc(Article("foo@baz", 1234, nzf, partnum=4), self._response(part=8))
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_article_of_another_post_is_rejected(self, tmp_path, stream):
+        article = Article("foo@bar", 1234, self._nzf(part_check=True), partnum=11)
+        writer = sabctools.FileWriter(str(tmp_path / "foo.bin")) if stream else None
+        response = self._response(part=346, expected=11, sink=writer)
+        if writer:
+            writer.close()
+            assert os.path.getsize(writer.path) == 0
+        with pytest.raises(decoder.BadData) as error:
+            decoder.decode_yenc(article, response)
+        assert error.value.data is None
+        assert article.data_begin is None

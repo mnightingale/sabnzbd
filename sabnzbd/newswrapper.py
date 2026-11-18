@@ -484,9 +484,13 @@ class NewsWrapper:
 
                     # The par2 block size to split the article's CRC at, 0 while no par2 set describes its file
                     block_size = 0
+                    # The yEnc part the article must carry, 0 to accept any
+                    part = 0
                     if article:
                         block_size = article.nzf.nzo.par2_block_size(article.nzf.filename)
-                    self.decoder.expect(article, self.article_sink(article), block_size=block_size)
+                        if article.nzf.part_check:
+                            part = article.partnum or 0
+                    self.decoder.expect(article, self.article_sink(article), block_size=block_size, part=part)
                     self.next_request = None
                 else:
                     # Concurrency limit reached; wait until a response is read to prevent hot looping on EVENT_WRITE
