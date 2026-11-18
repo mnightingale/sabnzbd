@@ -172,7 +172,7 @@ class NzbFile(TryList):
     @synchronized()
     def add_article(self, article_info):
         """Add article to object database and return article object"""
-        article = Article(article_info[0], article_info[1], self)
+        article = Article(article_info[0], article_info[1], self, article_info[2] if len(article_info) > 2 else None)
         article.on_disk = self.assembled
         self.articles[article] = article
         self.decodetable.append(article)

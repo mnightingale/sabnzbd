@@ -90,6 +90,7 @@ ArticleSaver = (
     "art_id",
     "bytes",
     "lowest_partnum",
+    "partnum",
     "decoded",
     "file_size",
     "data_begin",
@@ -110,12 +111,13 @@ class Article(TryList):
     # Pre-define attributes to save memory
     __slots__ = (*ArticleSaver, "fetcher", "fetcher_priority", "tries", "lock")
 
-    def __init__(self, article, article_bytes, nzf):
+    def __init__(self, article, article_bytes, nzf, partnum: Optional[int] = None):
         super().__init__()
         self.article: str = article
         self.art_id: Optional[str] = None
         self.bytes: int = article_bytes
         self.lowest_partnum: bool = False
+        self.partnum: Optional[int] = partnum  # Segment number from the NZB, None when unknown
         self.fetcher: Optional[Server] = None
         self.fetcher_priority: int = 0
         self.tries: int = 0  # Try count

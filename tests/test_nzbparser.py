@@ -19,6 +19,7 @@
 tests.test_nzbparser - Tests of basic NZB parsing
 """
 
+import io
 import os
 import pytest
 from tests.testhelper import SAB_CACHE_DIR, SAB_DATA_DIR, create_and_read_nzb_fp
@@ -73,3 +74,13 @@ class TestNzbParser:
         #  Strange articles sizes
         #  Correct parsing of dates
         assert False
+
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+    def test_segment_numbers_are_kept(self):
+        nzo = NzbObject("test_segment_numbers")
+        segments = "".join(f'<segment bytes="100" number="{n}">{n}@test</segment>' for n in (5, 1, 2))
+        nzb = f'<nzb><file subject="foo.bin" date="0"><segments>{segments}</segments></file></nzb>'
+        save_compressed(SAB_CACHE_DIR, "segments", io.BytesIO(nzb.encode()))
+        nzbparser.nzbfile_parser(os.path.join(SAB_CACHE_DIR, "segments.nzb.gz"), nzo)
+        nzo.files[0].finish_import()
+        assert [article.partnum for article in nzo.files[0].decodetable] == [1, 2, 5]

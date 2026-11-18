@@ -468,7 +468,7 @@ def nzbfile_parser(full_nzb_path: str, nzo):
                                 logging.info("Skipping article %s due to strange size (%s)", article_id, segment_size)
                                 nzo.increase_bad_articles_counter("bad_articles")
                             else:
-                                raw_article_db[partnum] = (article_id, segment_size)
+                                raw_article_db[partnum] = (article_id, segment_size, partnum)
                                 file_bytes += segment_size
                         except Exception:
                             # In case of missing attributes
